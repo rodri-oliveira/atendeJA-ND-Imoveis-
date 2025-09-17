@@ -6,10 +6,13 @@ from app.repositories.models import (
     Conversation,
     ConversationStatus,
     Message,
+    MessageDirection,
     Contact,
     Tenant,
     User,
     UserRole,
+    SuppressedContact,
+    MessageLog,
 )
 
 import structlog
@@ -22,6 +25,7 @@ from app.domain.realestate import models as re_models
 import csv
 import io
 from app.api.deps import require_role_admin
+from app.messaging.provider import get_provider
 
 # Definição do router e logger (precisa vir antes dos decoradores @router...)
 router = APIRouter(dependencies=[Depends(require_role_admin)])
@@ -284,6 +288,222 @@ def create_user(payload: UserCreate):
         db.commit()
         db.refresh(user)
         return user
+
+
+# ------------------- Mensageria: Logs e Opt-out (Admin) -------------------
+class SuppressIn(BaseModel):
+    wa_id: str
+    reason: str | None = None
+
+
+def _get_or_create_default_tenant(db: Session) -> Tenant:
+    tenant_name = settings.DEFAULT_TENANT_ID
+    tenant = db.query(Tenant).filter(Tenant.name == tenant_name).first()
+    if not tenant:
+        tenant = Tenant(name=tenant_name)
+        db.add(tenant)
+        db.flush()
+    return tenant
+
+
+@router.get("/messaging/logs")
+def list_message_logs(
+    to: str | None = None,
+    status: str | None = None,
+    dt_ini: str | None = None,
+    dt_fim: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+):
+    try:
+        from datetime import datetime
+        with SessionLocal() as db:  # type: Session
+            tenant = _get_or_create_default_tenant(db)
+            q = db.query(MessageLog).filter(MessageLog.tenant_id == tenant.id)
+            if to:
+                q = q.filter(MessageLog.to == to)
+            if status:
+                q = q.filter(MessageLog.status == status)
+            if dt_ini:
+                try:
+                    dti = datetime.fromisoformat(dt_ini)
+                    q = q.filter(MessageLog.created_at >= dti)
+                except Exception:
+                    pass
+            if dt_fim:
+                try:
+                    dtf = datetime.fromisoformat(dt_fim)
+                    q = q.filter(MessageLog.created_at <= dtf)
+                except Exception:
+                    pass
+            q = q.order_by(MessageLog.id.desc()).limit(max(1, min(limit, 200))).offset(max(0, offset))
+            rows = q.all()
+            return [
+                {
+                    "id": r.id,
+                    "to": r.to,
+                    "kind": r.kind,
+                    "status": r.status,
+                    "template_name": r.template_name,
+                    "provider_message_id": r.provider_message_id,
+                    "error_code": r.error_code,
+                    "created_at": r.created_at,
+                }
+                for r in rows
+            ]
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error("list_message_logs_error", error=str(e))
+        raise HTTPException(status_code=400, detail="list_logs_error")
+
+
+@router.post("/messaging/suppress")
+def add_suppressed_contact(payload: SuppressIn):
+    try:
+        with SessionLocal() as db:  # type: Session
+            tenant = _get_or_create_default_tenant(db)
+            wa_id = (payload.wa_id or "").strip()
+            if not wa_id:
+                raise HTTPException(status_code=400, detail="wa_id_required")
+            existing = (
+                db.query(SuppressedContact)
+                .filter(SuppressedContact.tenant_id == tenant.id, SuppressedContact.wa_id == wa_id)
+                .first()
+            )
+            if existing:
+                existing.reason = payload.reason or existing.reason
+                db.add(existing)
+                db.commit()
+                db.refresh(existing)
+                return {"status": "updated", "wa_id": wa_id}
+            sup = SuppressedContact(tenant_id=tenant.id, wa_id=wa_id, reason=payload.reason)
+            db.add(sup)
+            db.commit()
+            return {"status": "created", "wa_id": wa_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error("suppress_add_error", error=str(e))
+        raise HTTPException(status_code=400, detail="suppress_add_error")
+
+
+@router.delete("/messaging/suppress")
+def remove_suppressed_contact(wa_id: str):
+    try:
+        with SessionLocal() as db:  # type: Session
+            tenant = _get_or_create_default_tenant(db)
+            wa_id_ = (wa_id or "").strip()
+            if not wa_id_:
+                raise HTTPException(status_code=400, detail="wa_id_required")
+            removed = (
+                db.query(SuppressedContact)
+                .filter(SuppressedContact.tenant_id == tenant.id, SuppressedContact.wa_id == wa_id_)
+                .delete()
+            )
+            db.commit()
+            return {"removed": int(removed)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error("suppress_remove_error", error=str(e))
+        raise HTTPException(status_code=400, detail="suppress_remove_error")
+
+
+@router.get("/messaging/window-status")
+def window_status(wa_id: str):
+    """Retorna se o contato está dentro da janela de 24h e quando foi a última inbound."""
+    try:
+        from datetime import datetime, timedelta, timezone
+        with SessionLocal() as db:  # type: Session
+            tenant = _get_or_create_default_tenant(db)
+            contact = db.query(Contact).filter(Contact.tenant_id == tenant.id, Contact.wa_id == wa_id).first()
+            if not contact:
+                return {"inside_window": False, "last_inbound_at": None, "hours_since": None}
+            last_inbound = (
+                db.query(Message)
+                .filter(
+                    Message.tenant_id == tenant.id,
+                    Message.direction == MessageDirection.inbound,
+                    Message.conversation_id.in_(db.query(Conversation.id).filter(Conversation.contact_id == contact.id)),
+                )
+                .order_by(Message.created_at.desc())
+                .first()
+            )
+            if not last_inbound:
+                return {"inside_window": False, "last_inbound_at": None, "hours_since": None}
+            now = datetime.now(timezone.utc)
+            li = last_inbound.created_at
+            if li.tzinfo is None:
+                li = li.replace(tzinfo=timezone.utc)
+            delta_h = (now - li).total_seconds() / 3600.0
+            inside = delta_h <= settings.WINDOW_24H_HOURS
+            return {"inside_window": inside, "last_inbound_at": li, "hours_since": round(delta_h, 2)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error("window_status_error", error=str(e))
+        raise HTTPException(status_code=400, detail="window_status_error")
+
+
+# ------------------- Mensageria: testes de envio (gera logs) -------------------
+class TestTextIn(BaseModel):
+    wa_id: str
+    body: str
+
+
+@router.post("/messaging/test-text")
+def messaging_test_text(payload: TestTextIn):
+    try:
+        with SessionLocal() as db:  # type: Session
+            tenant = _get_or_create_default_tenant(db)
+        provider = get_provider()
+        data = provider.send_text(payload.wa_id, payload.body, tenant_id=str(tenant.id))
+        return {"status": "ok", "provider_response": data}
+    except HTTPException:
+        raise
+    except RuntimeError as e:
+        # Mapeia erros operacionais previsíveis
+        code = str(e)
+        if code in {"outside_session_window", "rate_limited_or_global_limit", "suppressed_contact"}:
+            raise HTTPException(status_code=400, detail={"code": code})
+        raise HTTPException(status_code=400, detail={"code": "send_text_error", "message": code})
+    except Exception as e:
+        log.error("messaging_test_text_error", error=str(e))
+        raise HTTPException(status_code=400, detail="messaging_test_text_error")
+
+
+class TestTemplateIn(BaseModel):
+    wa_id: str
+    template_name: str
+    language: str | None = "pt_BR"
+    components: list[dict] | None = None
+
+
+@router.post("/messaging/test-template")
+def messaging_test_template(payload: TestTemplateIn):
+    try:
+        with SessionLocal() as db:  # type: Session
+            tenant = _get_or_create_default_tenant(db)
+        provider = get_provider()
+        data = provider.send_template(
+            payload.wa_id,
+            payload.template_name,
+            language=payload.language or "pt_BR",
+            components=payload.components or [],
+            tenant_id=str(tenant.id),
+        )
+        return {"status": "ok", "provider_response": data}
+    except HTTPException:
+        raise
+    except RuntimeError as e:
+        code = str(e)
+        if code in {"rate_limited_or_global_limit", "suppressed_contact"}:
+            raise HTTPException(status_code=400, detail={"code": code})
+        raise HTTPException(status_code=400, detail={"code": "send_template_error", "message": code})
+    except Exception as e:
+        log.error("messaging_test_template_error", error=str(e))
+        raise HTTPException(status_code=400, detail="messaging_test_template_error")
 
 
 @router.get("/users", response_model=list[UserOut])

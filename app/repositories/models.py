@@ -105,3 +105,41 @@ class ConversationEvent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 # Removidos modelos de pizzaria/lanches para focar no domínio imobiliário
+
+
+class SuppressedContact(Base):
+    """Lista de supressão/opt-out por tenant (não enviar mensagens)."""
+
+    __tablename__ = "suppressed_contacts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[int] = mapped_column(Integer, index=True)
+    wa_id: Mapped[str] = mapped_column(String(32), index=True)
+    reason: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        Index("uix_suppressed_tenant_wa", "tenant_id", "wa_id", unique=True),
+    )
+
+
+class MessageLog(Base):
+    """Log de envios via provider para rastreabilidade/auditoria."""
+
+    __tablename__ = "message_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[int] = mapped_column(Integer, index=True)
+    to: Mapped[str] = mapped_column(String(32), index=True)
+    kind: Mapped[str] = mapped_column(String(16))  # text|template|read
+    body: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    template_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    status: Mapped[str] = mapped_column(String(32), default="queued")
+    provider_message_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        Index("idx_msglog_tenant_to", "tenant_id", "to"),
+        Index("idx_msglog_created", "created_at"),
+    )
