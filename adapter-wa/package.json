@@ -1,0 +1,16 @@
+{
+  "name": "adapter-wa",
+  "version": "0.1.0",
+  "private": true,
+  "type": "commonjs",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "dotenv": "^17.2.2",
+    "node-fetch": "^2.6.7",
+    "qrcode": "^1.5.3",
+    "whatsapp-web.js": "^1.24.0"
+  }
+}

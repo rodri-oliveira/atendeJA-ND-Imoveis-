@@ -4,6 +4,8 @@ __pycache__/
 *.pyd
 .env
 .env.*
+adapter-wa/node_modules/
+adapter-wa/.env
 .poetry/
 .venv/
 .mypy_cache/
@@ -34,8 +36,8 @@ frontend/ui/.env
 frontend/ui/.env.*
 
 # Env files
-.env
-*.env
+# .env
+# *.env
 
 # OS/Editor
 .DS_Store
@@ -48,3 +50,7 @@ cliente/
 docs/interno/
 docs/internal/
 cliente/
+
+# Arquivos temporários de testes de API
+body.json
+chat_body.json

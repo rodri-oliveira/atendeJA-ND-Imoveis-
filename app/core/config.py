@@ -46,6 +46,10 @@ class Settings(BaseSettings):
     # MCP (Model Context Protocol) – autenticação simples para /mcp/execute
     MCP_API_TOKEN: str = ""  # quando definido, exigir Bearer <token> no endpoint MCP
 
+    # LLM (Ollama/Local) – provider de IA para geração/chat (substituível)
+    OLLAMA_BASE_URL: str = "http://localhost:11434"
+    OLLAMA_DEFAULT_MODEL: str = "gemma3:1b"
+
     # Imóveis somente leitura (produção)
     RE_READ_ONLY: bool = False
 

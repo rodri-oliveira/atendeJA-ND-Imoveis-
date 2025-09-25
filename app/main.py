@@ -11,6 +11,7 @@ from app.api.routes.admin import router as admin_router
 from app.api.routes.realestate import router as realestate_router
 from app.api.routes.mcp import router as mcp_router
 from app.api.routes.metrics import router as metrics_router
+from app.api.routes.llm import router as llm_router
 from app.api.routes.auth import router as auth_router
 from app.repositories.db import engine
 from app.repositories.models import Base, User, UserRole
@@ -78,6 +79,12 @@ app = FastAPI(
 @app.middleware("http")
 async def _http_logger(request, call_next):
     try:
+        # Correlation ID (propaga entre logs e resposta)
+        cid = request.headers.get("x-correlation-id")
+        if not cid:
+            import uuid
+
+            cid = str(uuid.uuid4())
         try:
             body_bytes = await request.body()
         except Exception:
@@ -88,13 +95,19 @@ async def _http_logger(request, call_next):
             path=request.url.path,
             content_type=request.headers.get("content-type"),
             content_length=len(body_bytes) if body_bytes is not None else 0,
+            correlation_id=cid,
         )
         response = await call_next(request)
+        try:
+            response.headers["X-Correlation-Id"] = cid
+        except Exception:
+            pass
         log.info(
             "http_request_end",
             method=request.method,
             path=request.url.path,
             status=getattr(response, "status_code", None),
+            correlation_id=cid,
         )
         return response
     except Exception as e:
@@ -104,6 +117,7 @@ async def _http_logger(request, call_next):
             path=request.url.path,
             error=str(e),
             traceback=traceback.format_exc(),
+            correlation_id=request.headers.get("x-correlation-id"),
         )
         return JSONResponse(status_code=500, content={"error": {"code": "internal_error", "message": "unexpected error"}})
 
@@ -114,7 +128,8 @@ app.include_router(admin_router, prefix="/admin", tags=["admin"])
 app.include_router(realestate_router, prefix="/re", tags=["realestate"]) 
 app.include_router(mcp_router, prefix="/mcp", tags=["mcp"]) 
 app.include_router(auth_router, prefix="/auth", tags=["auth"]) 
-app.include_router(metrics_router, prefix="/metrics", tags=["metrics"]) 
+app.include_router(metrics_router, prefix="/metrics", tags=["metrics"])
+app.include_router(llm_router, prefix="/llm", tags=["llm"]) 
 
 # Global error handlers (uniform error payloads)
 app.add_exception_handler(HTTPException, http_exception_handler)
