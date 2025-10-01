@@ -1,0 +1,2 @@
+﻿beautifulsoup4==4.14.2
+lxml==6.0.2

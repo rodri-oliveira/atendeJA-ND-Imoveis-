@@ -10,6 +10,7 @@ from app.api.routes.webhook import router as webhook_router
 from app.api.routes.admin import router as admin_router
 from app.api.routes.realestate import router as realestate_router
 from app.api.routes.mcp import router as mcp_router
+from app.api.routes.admin_realestate import router as admin_realestate_router
 from app.api.routes.metrics import router as metrics_router
 from app.api.routes.llm import router as llm_router
 from app.api.routes.auth import router as auth_router
@@ -130,6 +131,7 @@ app.include_router(mcp_router, prefix="/mcp", tags=["mcp"])
 app.include_router(auth_router, prefix="/auth", tags=["auth"]) 
 app.include_router(metrics_router, prefix="/metrics", tags=["metrics"])
 app.include_router(llm_router, prefix="/llm", tags=["llm"]) 
+app.include_router(admin_realestate_router, prefix="/admin/re", tags=["admin-re"]) 
 
 # Global error handlers (uniform error payloads)
 app.add_exception_handler(HTTPException, http_exception_handler)
