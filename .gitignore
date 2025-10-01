@@ -54,3 +54,11 @@ cliente/
 # Arquivos temporários de testes de API
 body.json
 chat_body.json
+
+# WhatsApp adapter artifacts
+adapter-wa/.wwebjs_auth/
+adapter-wa/.wwebjs_cache/
+adapter-wa/qr.png
+# Opcional: se não quiser versionar o lockfile do adapter
+adapter-wa/package-lock.json
+
