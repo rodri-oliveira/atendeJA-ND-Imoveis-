@@ -27,7 +27,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
-from sqlalchemy import select, exists
+from sqlalchemy import select, exists, func
+import structlog
 import httpx
 from app.repositories.db import SessionLocal
 from app.core.config import settings
@@ -40,6 +41,7 @@ from app.domain.realestate.models import (
 )
 
 router = APIRouter()
+log = structlog.get_logger()
 
 
 # Dependency: DB session por request
@@ -205,6 +207,13 @@ def list_properties(
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
 ):
+    # Log de diagnóstico: total bruto de imóveis na base
+    try:
+        total_db = db.execute(select(func.count()).select_from(Property)).scalar_one()
+        log.info("re_list_enter", finalidade=str(finalidade) if finalidade else None, tipo=str(tipo) if tipo else None, cidade=cidade, estado=estado, preco_min=preco_min, preco_max=preco_max, dormitorios_min=dormitorios_min, only_with_cover=only_with_cover, total_db=int(total_db))
+    except Exception as _e:
+        log.warning("re_list_count_error", error=str(_e))
+
     stmt = select(Property).where(Property.is_active == True)  # noqa: E712
     if finalidade:
         stmt = stmt.where(Property.purpose == finalidade)
@@ -241,6 +250,10 @@ def list_properties(
 
     stmt = stmt.limit(limit).offset(offset)
     rows = db.execute(stmt).scalars().all()
+    try:
+        log.info("re_list_result", returned=len(rows))
+    except Exception:
+        pass
     # N+1 simples para obter a imagem de capa (MVP)
     out: list[ImovelSaida] = []
     for r in rows:
