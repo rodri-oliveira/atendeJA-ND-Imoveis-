@@ -353,14 +353,3 @@ poetry run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 python repair_images.py
 
 # Importação
-curl -X POST "http://localhost:8000/admin/re/import/ndimoveis/run" \
-  -H "Authorization: Bearer {token}" \
-  -H "Content-Type: application/json" \
-  -d '{"finalidade":"both","page_start":1,"max_pages":20,"limit_properties":200,"throttle_ms":200}'
-
-# Verificar stats
-python -c "from app.repositories.db import SessionLocal; from app.domain.realestate import models as re_models; from sqlalchemy import func; db = SessionLocal(); print(f'Imóveis: {db.query(func.count(re_models.Property.id)).scalar()}'); print(f'Imagens: {db.query(func.count(re_models.PropertyImage.id)).scalar()}'); db.close()"
-
-# Testar proxy
-curl "http://localhost:8000/re/images/proxy?url=https://imgs2.cdn-imobibrasil.com.br/imagens/imoveis/test.jpg"
-```
