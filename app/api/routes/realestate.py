@@ -1,8 +1,34 @@
+from typing import Optional
+
+def _normalize_image_url(url: Optional[str]) -> Optional[str]:
+    if not url:
+        return None
+    try:
+        u = str(url).strip()
+        if not u:
+            return None
+        # esquema ausente, mas começa com //host/path
+        if u.startswith("//"):
+            u = "https:" + u
+        # somente aceita http/https
+        if not (u.startswith("http://") or u.startswith("https://")):
+            return None
+        # valida host simples (deve conter ponto)
+        from urllib.parse import urlparse
+        pr = urlparse(u)
+        if not pr.netloc or "." not in pr.netloc:
+            return None
+        return u
+    except Exception:
+        return None
+
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
-from sqlalchemy import select
+from sqlalchemy import select, exists
+import httpx
 from app.repositories.db import SessionLocal
 from app.core.config import settings
 from app.domain.realestate.models import (
@@ -88,6 +114,7 @@ class ImovelSaida(BaseModel):
     suites: Optional[int] = None
     vagas: Optional[int] = None
     ativo: bool
+    cover_image_url: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -174,6 +201,7 @@ def list_properties(
     preco_min: Optional[float] = Query(None),
     preco_max: Optional[float] = Query(None),
     dormitorios_min: Optional[int] = Query(None),
+    only_with_cover: bool = Query(False, description="Retorna apenas imóveis que possuam ao menos 1 imagem"),
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
 ):
@@ -183,19 +211,56 @@ def list_properties(
     if tipo:
         stmt = stmt.where(Property.type == tipo)
     if cidade:
-        stmt = stmt.where(Property.address_city.ilike(cidade))
+        c = (cidade or "").strip()
+        if c:
+            stmt = stmt.where(Property.address_city.ilike(f"%{c}%"))
     if estado:
-        stmt = stmt.where(Property.address_state == estado)
+        uf = (estado or "").strip().upper()
+        if uf:
+            stmt = stmt.where(Property.address_state == uf)
     if preco_min is not None:
         stmt = stmt.where(Property.price >= preco_min)
     if preco_max is not None:
         stmt = stmt.where(Property.price <= preco_max)
     if dormitorios_min is not None:
         stmt = stmt.where(Property.bedrooms >= dormitorios_min)
+    # Filtrar apenas imóveis que possuam imagens quando solicitado
+    if only_with_cover:
+        # Abordagem robusta: inner join + distinct evita armadilhas de correlação
+        from sqlalchemy import distinct
+        stmt = (
+            stmt.join(PropertyImage, PropertyImage.property_id == Property.id)
+                .distinct()
+        )
+    # Ordenação por mais recentes primeiro (melhor UX)
+    try:
+        stmt = stmt.order_by(Property.updated_at.desc(), Property.id.desc())
+    except Exception:
+        # Fallback caso o campo não exista em algum ambiente
+        stmt = stmt.order_by(Property.id.desc())
 
     stmt = stmt.limit(limit).offset(offset)
     rows = db.execute(stmt).scalars().all()
-    return [_to_imovel_saida(r) for r in rows]
+    # N+1 simples para obter a imagem de capa (MVP)
+    out: list[ImovelSaida] = []
+    for r in rows:
+        cover_url: Optional[str] = None
+        try:
+            img_stmt = (
+                select(PropertyImage)
+                .where(PropertyImage.property_id == r.id)
+                .order_by(PropertyImage.is_cover.desc(), PropertyImage.sort_order.asc(), PropertyImage.id.asc())
+                .limit(1)
+            )
+            img = db.execute(img_stmt).scalars().first()
+            if img:
+                cover_url = _normalize_image_url(img.url)
+        except Exception:
+            cover_url = None
+        item = _to_imovel_saida(r)
+        item.cover_image_url = cover_url
+        out.append(item)
+    return out
 
 
 @router.get(
@@ -519,8 +584,17 @@ def list_imagens(property_id: int, db: Session = Depends(get_db)):
         .order_by(PropertyImage.is_cover.desc(), PropertyImage.sort_order.asc(), PropertyImage.id.asc())
     )
     rows = db.execute(stmt).scalars().all()
-    return [ImagemSaida(id=r.id, url=r.url, is_capa=r.is_cover, ordem=r.sort_order) for r in rows]
+    out: list[ImagemSaida] = []
+    for r in rows:
+        nurl = _normalize_image_url(r.url)
+        if not nurl:
+            continue
+        out.append(ImagemSaida(id=r.id, url=nurl, is_capa=r.is_cover, ordem=r.sort_order))
+    return out
 
+
+ # [REMOVIDO] Duplicidade do endpoint de proxy de imagens.
+ # Mantida apenas a versão assíncrona definida mais abaixo em "/images/proxy".
 
 # --- Detalhes do imóvel (consolidado) ---
 class ImovelDetalhes(BaseModel):
@@ -557,6 +631,12 @@ def get_imovel_detalhes(property_id: int, db: Session = Depends(get_db)):
         .order_by(PropertyImage.is_cover.desc(), PropertyImage.sort_order.asc(), PropertyImage.id.asc())
     )
     imgs = db.execute(stmt).scalars().all()
+    norm_imgs: list[ImagemSaida] = []
+    for i in imgs:
+        nurl = _normalize_image_url(i.url)
+        if not nurl:
+            continue
+        norm_imgs.append(ImagemSaida(id=i.id, url=nurl, is_capa=i.is_cover, ordem=i.sort_order))
     return ImovelDetalhes(
         id=prop.id,
         titulo=prop.title,
@@ -573,7 +653,7 @@ def get_imovel_detalhes(property_id: int, db: Session = Depends(get_db)):
         vagas=prop.parking_spots,
         area_total=prop.area_total,
         area_util=prop.area_usable,
-        imagens=[ImagemSaida(id=i.id, url=i.url, is_capa=i.is_cover, ordem=i.sort_order) for i in imgs],
+        imagens=norm_imgs,
     )
 
 
@@ -594,3 +674,51 @@ def _to_imovel_saida(p: Property) -> ImovelSaida:
         vagas=p.parking_spots,
         ativo=p.is_active,
     )
+
+
+@router.get("/images/proxy")
+async def proxy_image(url: str = Query(..., description="URL da imagem para fazer proxy")):
+    """
+    Proxy de imagens para contornar CORS.
+    Aceita uma URL de imagem e retorna o conteúdo com headers apropriados.
+    """
+    print(f"[PROXY] Requisição para: {url}")
+    if not url:
+        raise HTTPException(status_code=400, detail="URL é obrigatória")
+    
+    # Validar URL
+    normalized = _normalize_image_url(url)
+    if not normalized:
+        raise HTTPException(status_code=400, detail="URL inválida")
+    
+    try:
+        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+            response = await client.get(
+                normalized,
+                headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                    "Referer": "https://www.ndimoveis.com.br/",
+                }
+            )
+            
+            if response.status_code != 200:
+                raise HTTPException(
+                    status_code=response.status_code,
+                    detail=f"Erro ao buscar imagem: {response.status_code}"
+                )
+            
+            # Determinar content-type
+            content_type = response.headers.get("content-type", "image/jpeg")
+            
+            return Response(
+                content=response.content,
+                media_type=content_type,
+                headers={
+                    "Cache-Control": "public, max-age=86400",  # 24 horas
+                    "Access-Control-Allow-Origin": "*",
+                }
+            )
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail=f"Erro ao buscar imagem: {str(e)}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro interno: {str(e)}")

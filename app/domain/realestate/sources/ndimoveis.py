@@ -73,21 +73,28 @@ def _normalize_money_text(raw: str | None) -> float | None:
 
 
 def list_url_candidates(finalidade: str, page: int) -> list[str]:
+    # Padrões observados no site (pager usa 'pag' e mantém 'pagina=1')
     if finalidade == "venda":
         return [
+            f"{ND_BASE}/imovel/venda/?pagina=1&pag={page}",
+            f"{ND_BASE}/imovel/venda/?pag={page}",
+            # Fallbacks
+            f"{ND_BASE}/imovel/venda?page={page}",
+            f"{ND_BASE}/imovel/?finalidade=venda&pag={page}",
             f"{ND_BASE}/imovel/?finalidade=venda&pagina={page}",
             f"{ND_BASE}/imovel/?finalidade=venda&page={page}",
-            f"{ND_BASE}/imovel/?finalidade=venda&pag={page}",
-            f"{ND_BASE}/imovel/venda?page={page}",
             f"{ND_BASE}/imovel/venda",
             f"{ND_BASE}/imovel/?finalidade=venda",
         ]
     if finalidade == "locacao":
         return [
+            f"{ND_BASE}/imovel/locacao/?pagina=1&pag={page}",
+            f"{ND_BASE}/imovel/locacao/?pag={page}",
+            # Fallbacks
+            f"{ND_BASE}/imovel/locacao?page={page}",
+            f"{ND_BASE}/imovel/?finalidade=locacao&pag={page}",
             f"{ND_BASE}/imovel/?finalidade=locacao&pagina={page}",
             f"{ND_BASE}/imovel/?finalidade=locacao&page={page}",
-            f"{ND_BASE}/imovel/?finalidade=locacao&pag={page}",
-            f"{ND_BASE}/imovel/locacao?page={page}",
             f"{ND_BASE}/imovel/locacao",
             f"{ND_BASE}/imovel/?finalidade=locacao",
         ]
@@ -295,12 +302,31 @@ def parse_detail(html: str, page_url: str) -> PropertyDTO:
     if m_i:
         iptu = _parse_money(m_i.group(1))
 
-    # images
+    # images - filtrar apenas imagens da galeria do imóvel
     images: list[str] = []
-    for img in soup.find_all("img", src=True):
+    all_imgs = soup.find_all("img", src=True)
+    print(f"\n[SCRAPING] Total de <img> encontradas: {len(all_imgs)}")
+    
+    for img in all_imgs:
         src = img["src"].strip()
-        if re.search(r"imoveis|imagem|imagens|thumb|galeria|upload|foto", src, re.IGNORECASE):
-            images.append(urljoin(ND_BASE, src))
+        full_url = urljoin(ND_BASE, src)
+        
+        # Aceitar apenas URLs do CDN de imóveis (cdn-imobibrasil)
+        if "cdn-imobibrasil.com.br/imagens/imoveis/" in full_url:
+            print(f"[SCRAPING] ✓ CDN imóvel: {full_url[:80]}...")
+            images.append(full_url)
+        # Fallback: aceitar imagens em diretórios específicos de upload/galeria (excluir logos/layout)
+        elif re.search(r"/(upload|galeria|fotos?)/.*\.(jpe?g|png|webp)", full_url, re.IGNORECASE):
+            # Excluir imagens de layout/site
+            if not re.search(r"(logo|icon|banner|site_modelo|imagensct|redesp_|whatsapp_modulo)", full_url, re.IGNORECASE):
+                print(f"[SCRAPING] ✓ Upload/galeria: {full_url[:80]}...")
+                images.append(full_url)
+            else:
+                print(f"[SCRAPING] ✗ Layout excluído: {full_url[:80]}...")
+        else:
+            print(f"[SCRAPING] ✗ Não match: {full_url[:80]}...")
+    
+    print(f"[SCRAPING] Total de imagens aceitas: {len(images)}")
 
     return PropertyDTO(
         url=page_url,

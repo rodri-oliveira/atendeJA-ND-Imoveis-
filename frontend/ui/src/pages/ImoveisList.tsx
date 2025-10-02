@@ -12,9 +12,21 @@ interface Imovel {
   bairro?: string | null
   dormitorios?: number | null
   ativo: boolean
+  cover_image_url?: string | null
 }
 
 export default function ImoveisList() {
+  // Helper: usa URL direta (backend já normaliza e devolve apenas http/https válidos)
+  const toDirect = (url?: string | null) => {
+    if (!url) return ''
+    try {
+      const u = String(url)
+      if (u.startsWith('http://') || u.startsWith('https://') || u.startsWith('/')) return u
+      return ''
+    } catch {
+      return ''
+    }
+  }
   const [data, setData] = useState<Imovel[] | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -29,6 +41,23 @@ export default function ImoveisList() {
   // paginação
   const [limit] = useState<number>(12)
   const [offset, setOffset] = useState<number>(0)
+
+  // Debounce helper
+  function useDebouncedValue<T>(value: T, delay = 300) {
+    const [debounced, setDebounced] = useState<T>(value)
+    useEffect(() => {
+      const t = setTimeout(() => setDebounced(value), delay)
+      return () => clearTimeout(t)
+    }, [value, delay])
+    return debounced
+  }
+
+  // Valores debounced para reduzir requisições durante digitação
+  const cidadeQ = useDebouncedValue(cidade)
+  const estadoQ = useDebouncedValue(estado)
+  const precoMinQ = useDebouncedValue(precoMin)
+  const precoMaxQ = useDebouncedValue(precoMax)
+  const dormMinQ = useDebouncedValue(dormMin)
 
   function clearFilters() {
     setFinalidade('')
@@ -62,23 +91,23 @@ export default function ImoveisList() {
     if (off) setOffset(Number(off) || 0)
   }, [])
 
-  // Atualizar querystring quando filtros/offset mudarem
+  // Atualizar querystring quando filtros/offset mudarem (usando valores debounced)
   useEffect(() => {
     const params = new URLSearchParams()
     if (finalidade) params.set('finalidade', finalidade)
     if (tipo) params.set('tipo', tipo)
-    if (cidade) params.set('cidade', cidade)
-    if (estado) params.set('estado', estado)
-    if (precoMin) params.set('preco_min', precoMin)
-    if (precoMax) params.set('preco_max', precoMax)
-    if (dormMin) params.set('dormitorios_min', dormMin)
+    if (cidadeQ) params.set('cidade', cidadeQ)
+    if (estadoQ) params.set('estado', estadoQ)
+    if (precoMinQ) params.set('preco_min', precoMinQ)
+    if (precoMaxQ) params.set('preco_max', precoMaxQ)
+    if (dormMinQ) params.set('dormitorios_min', dormMinQ)
     if (offset) params.set('offset', String(offset))
     const qs = params.toString()
     const newUrl = `${window.location.pathname}${qs ? `?${qs}` : ''}`
     if (newUrl !== window.location.pathname + window.location.search) {
       window.history.replaceState({}, '', newUrl)
     }
-  }, [finalidade, tipo, cidade, estado, precoMin, precoMax, dormMin, offset])
+  }, [finalidade, tipo, cidadeQ, estadoQ, precoMinQ, precoMaxQ, dormMinQ, offset])
 
   // Resetar offset ao mudar qualquer filtro
   useEffect(() => {
@@ -90,15 +119,15 @@ export default function ImoveisList() {
     const params = new URLSearchParams()
     if (finalidade) params.set('finalidade', finalidade)
     if (tipo) params.set('tipo', tipo)
-    if (cidade) params.set('cidade', cidade)
-    if (estado) params.set('estado', estado)
-    if (precoMin) params.set('preco_min', precoMin)
-    if (precoMax) params.set('preco_max', precoMax)
-    if (dormMin) params.set('dormitorios_min', dormMin)
+    if (cidadeQ) params.set('cidade', cidadeQ)
+    if (estadoQ) params.set('estado', estadoQ)
+    if (precoMinQ) params.set('preco_min', precoMinQ)
+    if (precoMaxQ) params.set('preco_max', precoMaxQ)
+    if (dormMinQ) params.set('dormitorios_min', dormMinQ)
     params.set('limit', String(limit))
     params.set('offset', String(offset))
     return params.toString()
-  }, [finalidade, tipo, cidade, estado, precoMin, precoMax, dormMin, limit, offset])
+  }, [finalidade, tipo, cidadeQ, estadoQ, precoMinQ, precoMaxQ, dormMinQ, limit, offset])
 
   useEffect(() => {
     let alive = true
@@ -229,13 +258,32 @@ export default function ImoveisList() {
               className="group rounded-xl border border-slate-200 bg-white shadow-card hover:shadow-hover transition-all duration-300 overflow-hidden hover-lift card-entrance"
               style={{ animationDelay: `${index * 0.1}s` }}
             >
-              {/* Simulação de imagem */}
-              <div className="h-48 bg-gradient-to-br from-slate-100 to-slate-200 relative overflow-hidden">
+              {/* Imagem de capa (quando disponível) com fallback visual */}
+              <div className="h-48 relative overflow-hidden bg-gradient-to-br from-slate-100 to-slate-200">
+                {p.cover_image_url ? (() => {
+                  const direct = toDirect(p.cover_image_url)
+                  const src = direct && direct.includes('cdn-imobibrasil.com.br')
+                    ? `/api/re/images/proxy?url=${encodeURIComponent(direct)}`
+                    : direct
+                  return src ? (
+                    <img
+                      src={src}
+                      alt={p.titulo}
+                      className="absolute inset-0 w-full h-full object-cover"
+                      onError={(e) => {
+                        try { console.error('[IMG_ERROR] list', { id: p.id, url: src, original: direct }) } catch {}
+                        const el = e.currentTarget as HTMLImageElement
+                        el.style.display = 'none'
+                      }}
+                      onLoad={() => { try { console.debug('[IMG_OK] list', { id: p.id, url: src }) } catch {} }}
+                    />
+                  ) : null
+                })() : null}
                 <div className="absolute inset-0 bg-gradient-to-t from-black/20 to-transparent"></div>
                 <div className="absolute top-3 left-3">
                   <span className={`px-2 py-1 rounded-full text-xs font-medium ${
-                    p.finalidade === 'sale' 
-                      ? 'bg-emerald-100 text-emerald-800' 
+                    p.finalidade === 'sale'
+                      ? 'bg-emerald-100 text-emerald-800'
                       : 'bg-amber-100 text-amber-800'
                   }`}>
                     {p.finalidade === 'sale' ? 'Venda' : 'Locação'}
@@ -260,7 +308,9 @@ export default function ImoveisList() {
                 
                 <div className="flex items-center justify-between">
                   <div className="text-2xl font-bold text-primary-600">
-                    R$ {Math.round(p.preco).toLocaleString('pt-BR')}
+                    {p.preco > 0
+                      ? new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(p.preco)
+                      : 'Consulte'}
                   </div>
                   {typeof p.dormitorios === 'number' && (
                     <div className="text-sm text-slate-500">
