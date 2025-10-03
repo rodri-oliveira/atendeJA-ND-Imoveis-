@@ -105,6 +105,39 @@ Eventos de negócio (logs): lead.created, inquiry.created, visit.requested
 }
 ```
 
+## Code Review – 2025-10-02 (Testes, Paginação, Criação de Imóvel)
+
+### ✅ Estrutura de testes
+- `frontend/ui/tests/`: testes de frontend (Vitest/RTL) — manter para UI/integração.
+- `tests/`: testes de backend (pytest) — manter para API/domínio.
+- Ação: configurar CI para executar ambos e padronizar comandos no README.
+  - Front: `pnpm test` ou `npm run test`
+  - Back: `pytest -q`
+
+### 🧭 Paginação da listagem (UX)
+- Backend (`GET /re/imoveis`): adicionar header `X-Total-Count` com o total filtrado (sem limit/offset).
+  - Implementação: calcular `total = select(func.count()).select_from(stmt_sem_paginacao.subquery())` e setar `response.headers['X-Total-Count'] = str(total)`.
+- Frontend (`ImoveisList.tsx`): ler `X-Total-Count` e exibir no rodapé: “Página X de Y • Z resultados”.
+  - Navegação: manter “Anterior/Próxima”, desabilitar “Próxima” quando `offset+limit >= total`.
+  - Mostrar também no cabeçalho um chip com `Z resultados`.
+
+### ➕ Criação de Imóvel (evitar dependência do cliente em importações)
+- Nova página: `/imoveis/novo` com formulário e validação.
+  - Campos: título, descrição, tipo (`apartment|house`), finalidade (`sale|rent`), preço (BRL), condomínio, IPTU, cidade, estado (UF), bairro, dormitórios, banheiros, suítes, vagas, área total/útil.
+  - UX: máscara de moeda, selects para enums, validações (obrigatórios, ranges), feedback inline, loading/disabled no submit.
+  - Ação: `POST /re/imoveis` (já existe). Ao criar, redirecionar para `/imoveis/{id}/detalhes` com toast de sucesso.
+  - Imagens (MVP): passo seguinte opcional com `POST /re/imoveis/{id}/imagens` via URLs; futuro: upload pré‑assinado.
+
+### 🧪 E2E (opcional, Playwright)
+- Cenários: paginação usa `X-Total-Count`; filtro por `rent` e `sale` retorna itens; fluxo “criar imóvel” conclui e exibe detalhes.
+- Rodar em CI headless; capturar screenshot básico.
+
+### 🔧 Fixes rápidos (backend)
+- `admin_realestate.py`: corrigir `order_by(PropertyImage.order)` para `order_by(PropertyImage.sort_order)` em `re_repair_invalid_images()`.
+- `realestate.py`: remover imports duplicados e não usados; considerar subquery única para capa (evitar N+1).
+- `ndimoveis.py`: priorizar “Locação/Aluguel” na inferência de `purpose` (checar `title` antes do `body`).
+- `images/proxy`: aplicar allowlist de hosts (ex.: `cdn-imobibrasil.com.br`) e substituir `print` por `structlog`.
+
 ## Contratos para o Front (referência)
 - Listar imóveis: `GET /re/imoveis`
   - Query: `finalidade`, `tipo`, `cidade`, `estado`, `preco_min`, `preco_max`, `dormitorios_min`, `limit`, `offset`.

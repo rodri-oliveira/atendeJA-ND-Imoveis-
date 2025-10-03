@@ -3,6 +3,7 @@ import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import AppShell from './layouts/AppShell'
 import ImoveisList from './pages/ImoveisList'
 import ImovelDetalhes from './pages/ImovelDetalhes'
+import ImovelNovo from './pages/ImovelNovo'
 import LeadsList from './pages/LeadsList'
 import OpsDashboard from './pages/OpsDashboard'
 import ImportCsv from './pages/ImportCsv'
@@ -20,6 +21,7 @@ export default function App() {
           <Route index element={<Navigate to="/imoveis" replace />} />
           {/* ND Imóveis */}
           <Route path="imoveis" element={<ImoveisList />} />
+          <Route path="imoveis/novo" element={<ImovelNovo />} />
           <Route path="imoveis/:id" element={<ImovelDetalhes />} />
           <Route path="import" element={<RequireAuth><ImportCsv /></RequireAuth>} />
           <Route path="leads" element={<LeadsList />} />

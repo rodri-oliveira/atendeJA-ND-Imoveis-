@@ -669,7 +669,7 @@ def re_repair_invalid_images(payload: RepairImagesIn):
                 img_stmt = (
                     select(re_models.PropertyImage)
                     .where(re_models.PropertyImage.property_id == prop_id)
-                    .order_by(re_models.PropertyImage.order)
+                    .order_by(re_models.PropertyImage.sort_order)
                 )
                 images = db.execute(img_stmt).scalars().all()
                 

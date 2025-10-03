@@ -7,10 +7,12 @@ import re
 import json
 import httpx
 from bs4 import BeautifulSoup
+import structlog
 
 # Em desenvolvimento, usamos http para evitar problemas de cadeia SSL no Windows.
 ND_BASE = "http://www.ndimoveis.com.br"
 UA = {"User-Agent": "AtendeJA-Bot/1.0"}
+log = structlog.get_logger()
 
 
 @dataclass
@@ -226,13 +228,21 @@ def parse_detail(html: str, page_url: str) -> PropertyDTO:
     if filtered:
         price = max(filtered)
 
-    # purpose and type
+    # purpose and type (priorizar locação)
     purpose = None
     body_text = soup.get_text(" ", strip=True)
-    if re.search(r"\bVenda\b", body_text, re.IGNORECASE):
-        purpose = "sale"
-    elif re.search(r"Loca[cç][aã]o|Aluguel", body_text, re.IGNORECASE):
+    title_lower = (title or "").lower()
+    # 1) Título é mais confiável
+    if re.search(r"loca[cç][aã]o|alug", title_lower):
         purpose = "rent"
+    elif re.search(r"venda", title_lower):
+        purpose = "sale"
+    # 2) Fallback: corpo do documento
+    if purpose is None:
+        if re.search(r"Loca[cç][aã]o|Aluguel", body_text, re.IGNORECASE):
+            purpose = "rent"
+        elif re.search(r"\bVenda\b", body_text, re.IGNORECASE):
+            purpose = "sale"
 
     ptype = None
     bt = body_text
@@ -305,28 +315,23 @@ def parse_detail(html: str, page_url: str) -> PropertyDTO:
     # images - filtrar apenas imagens da galeria do imóvel
     images: list[str] = []
     all_imgs = soup.find_all("img", src=True)
-    print(f"\n[SCRAPING] Total de <img> encontradas: {len(all_imgs)}")
-    
     for img in all_imgs:
         src = img["src"].strip()
         full_url = urljoin(ND_BASE, src)
         
         # Aceitar apenas URLs do CDN de imóveis (cdn-imobibrasil)
         if "cdn-imobibrasil.com.br/imagens/imoveis/" in full_url:
-            print(f"[SCRAPING] ✓ CDN imóvel: {full_url[:80]}...")
             images.append(full_url)
         # Fallback: aceitar imagens em diretórios específicos de upload/galeria (excluir logos/layout)
         elif re.search(r"/(upload|galeria|fotos?)/.*\.(jpe?g|png|webp)", full_url, re.IGNORECASE):
             # Excluir imagens de layout/site
             if not re.search(r"(logo|icon|banner|site_modelo|imagensct|redesp_|whatsapp_modulo)", full_url, re.IGNORECASE):
-                print(f"[SCRAPING] ✓ Upload/galeria: {full_url[:80]}...")
                 images.append(full_url)
-            else:
-                print(f"[SCRAPING] ✗ Layout excluído: {full_url[:80]}...")
-        else:
-            print(f"[SCRAPING] ✗ Não match: {full_url[:80]}...")
-    
-    print(f"[SCRAPING] Total de imagens aceitas: {len(images)}")
+    # Log resumido
+    try:
+        log.info("nd_parse_images", total_all=len(all_imgs), accepted=len(images))
+    except Exception:
+        pass
 
     return PropertyDTO(
         url=page_url,

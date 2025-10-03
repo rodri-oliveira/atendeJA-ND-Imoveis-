@@ -1,4 +1,4 @@
-from typing import Optional
+from __future__ import annotations
 
 def _normalize_image_url(url: Optional[str]) -> Optional[str]:
     if not url:
@@ -23,13 +23,15 @@ def _normalize_image_url(url: Optional[str]) -> Optional[str]:
         return None
 
 from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Request
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
-from sqlalchemy import select, exists, func
+from sqlalchemy import select, func
 import structlog
 import httpx
+import os
+from pathlib import Path
 from app.repositories.db import SessionLocal
 from app.core.config import settings
 from app.domain.realestate.models import (
@@ -42,6 +44,8 @@ from app.domain.realestate.models import (
 
 router = APIRouter()
 log = structlog.get_logger()
+UPLOAD_ROOT = Path("uploads")
+UPLOAD_IMOVEIS_DIR = UPLOAD_ROOT / "imoveis"
 
 
 # Dependency: DB session por request
@@ -195,6 +199,7 @@ def create_property(payload: ImovelCriar, db: Session = Depends(get_db)):
     description="Lista imóveis com filtros comuns: finalidade (compra/locação), tipo, cidade/estado, faixa de preço e dormitórios.",
 )
 def list_properties(
+    response: Response,
     db: Session = Depends(get_db),
     finalidade: Optional[PropertyPurpose] = Query(None),
     tipo: Optional[PropertyType] = Query(None),
@@ -248,6 +253,14 @@ def list_properties(
         # Fallback caso o campo não exista em algum ambiente
         stmt = stmt.order_by(Property.id.desc())
 
+    # Header com total filtrado (para paginação no front)
+    try:
+        stmt_count = stmt.order_by(None)
+        total = db.execute(select(func.count()).select_from(stmt_count.subquery())).scalar_one()
+        response.headers["X-Total-Count"] = str(int(total))
+    except Exception as _e:
+        log.warning("re_list_total_error", error=str(_e))
+
     stmt = stmt.limit(limit).offset(offset)
     rows = db.execute(stmt).scalars().all()
     try:
@@ -275,6 +288,139 @@ def list_properties(
         out.append(item)
     return out
 
+
+@router.post(
+    "/imoveis/{property_id}/imagens/upload",
+    response_model=List[ImagemSaida],
+    summary="Upload de imagens para o imóvel (multipart)",
+    description=(
+        "Aceita múltiplos arquivos de imagem (jpeg/png/webp). "
+        "Salva em disco local e associa ao imóvel como PropertyImage."
+    ),
+)
+def upload_imagens(
+    property_id: int,
+    request: Request,
+    files: List[UploadFile] = File(..., description="Arquivos de imagem"),
+    db: Session = Depends(get_db),
+):
+    """Upload local (MVP). Em produção, prefira storage externo (S3/GCS) com URLs assinadas."""
+    if settings.RE_READ_ONLY:
+        raise HTTPException(status_code=403, detail="read_only_mode")
+
+    prop = db.get(Property, property_id)
+    if not prop:
+        raise HTTPException(status_code=404, detail="property_not_found")
+
+    # Políticas de limite
+    MAX_FILES_PER_REQUEST = 10
+    MAX_IMAGES_PER_PROPERTY = 30
+    allowed_types = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}
+
+    # Contagem atual por imóvel
+    current_count = db.execute(
+        select(func.count()).select_from(PropertyImage).where(PropertyImage.property_id == property_id)
+    ).scalar_one()
+
+    if not files:
+        raise HTTPException(status_code=400, detail="no_files")
+    if len(files) > MAX_FILES_PER_REQUEST:
+        raise HTTPException(status_code=400, detail=f"max_files_per_request={MAX_FILES_PER_REQUEST}")
+    if current_count >= MAX_IMAGES_PER_PROPERTY:
+        raise HTTPException(status_code=400, detail="max_images_per_property_reached")
+
+    # Preparar diretório
+    target_dir = UPLOAD_IMOVEIS_DIR / str(property_id)
+    try:
+        target_dir.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"mkdir_error: {str(e)}")
+
+    # Base URL para montar URL pública
+    base_url = str(request.base_url).rstrip("/")
+    created: list[ImagemSaida] = []
+
+    # Descobrir próxima ordem
+    next_order = 0
+    try:
+        last = db.execute(
+            select(PropertyImage.sort_order)
+            .where(PropertyImage.property_id == property_id)
+            .order_by(PropertyImage.sort_order.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+        next_order = int((last or -1) + 1)
+    except Exception:
+        next_order = 0
+
+    # Verificar se há capa
+    has_cover = bool(
+        db.execute(
+            select(func.count()).select_from(PropertyImage).where(
+                PropertyImage.property_id == property_id, PropertyImage.is_cover == True  # noqa: E712
+            )
+        ).scalar_one()
+    )
+
+    # Salvar arquivos
+    remaining_slots = MAX_IMAGES_PER_PROPERTY - int(current_count)
+    to_process = files[: max(0, min(len(files), remaining_slots))]
+    if not to_process:
+        raise HTTPException(status_code=400, detail="no_slots_available")
+
+    for idx, f in enumerate(to_process):
+        ext = allowed_types.get((f.content_type or "").lower())
+        if not ext:
+            # tenta pela extensão do filename
+            name = f.filename or ""
+            lname = name.lower()
+            if lname.endswith((".jpg", ".jpeg")):
+                ext = ".jpg"
+            elif lname.endswith(".png"):
+                ext = ".png"
+            elif lname.endswith(".webp"):
+                ext = ".webp"
+        if not ext:
+            raise HTTPException(status_code=400, detail=f"unsupported_type:{f.content_type}")
+
+        # Nome de arquivo único
+        import time
+        safe_name = f"{int(time.time() * 1000)}_{idx}{ext}"
+        file_path = target_dir / safe_name
+
+        # Gravar em disco por chunks
+        try:
+            with file_path.open("wb") as out:
+                while True:
+                    chunk = f.file.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    out.write(chunk)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"write_error:{str(e)}")
+        finally:
+            try:
+                f.file.close()
+            except Exception:
+                pass
+
+        public_url = f"{base_url}/static/imoveis/{property_id}/{safe_name}"
+        img = PropertyImage(
+            property_id=property_id,
+            url=public_url,
+            storage_key=str(file_path),
+            is_cover=(not has_cover and idx == 0),
+            sort_order=next_order,
+        )
+        next_order += 1
+        db.add(img)
+        db.flush()
+        created.append(ImagemSaida(id=img.id, url=public_url, is_capa=img.is_cover, ordem=img.sort_order))
+
+    if created:
+        db.commit()
+
+    return created
 
 @router.get(
     "/imoveis/{property_id}",
@@ -695,7 +841,8 @@ async def proxy_image(url: str = Query(..., description="URL da imagem para faze
     Proxy de imagens para contornar CORS.
     Aceita uma URL de imagem e retorna o conteúdo com headers apropriados.
     """
-    print(f"[PROXY] Requisição para: {url}")
+    # Log estruturado da requisição de proxy
+    log.info("img_proxy_enter", url=url)
     if not url:
         raise HTTPException(status_code=400, detail="URL é obrigatória")
     
@@ -703,6 +850,21 @@ async def proxy_image(url: str = Query(..., description="URL da imagem para faze
     normalized = _normalize_image_url(url)
     if not normalized:
         raise HTTPException(status_code=400, detail="URL inválida")
+    # Allowlist de hosts para mitigar SSRF
+    try:
+        from urllib.parse import urlparse
+        host = urlparse(normalized).hostname or ""
+        allowed = {"cdn-imobibrasil.com.br", "imgs2.cdn-imobibrasil.com.br", "imgs.cdn-imobibrasil.com.br"}
+        def is_allowed(h: str) -> bool:
+            return any(h == a or h.endswith("." + a) for a in allowed)
+        if not is_allowed(host):
+            log.warning("img_proxy_blocked_host", host=host)
+            raise HTTPException(status_code=403, detail="host_not_allowed")
+    except HTTPException:
+        raise
+    except Exception as _e:
+        log.warning("img_proxy_host_parse_error", error=str(_e))
+        raise HTTPException(status_code=400, detail="invalid_url")
     
     try:
         async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
@@ -732,6 +894,8 @@ async def proxy_image(url: str = Query(..., description="URL da imagem para faze
                 }
             )
     except httpx.HTTPError as e:
+        log.warning("img_proxy_http_error", error=str(e))
         raise HTTPException(status_code=502, detail=f"Erro ao buscar imagem: {str(e)}")
     except Exception as e:
+        log.error("img_proxy_internal_error", error=str(e))
         raise HTTPException(status_code=500, detail=f"Erro interno: {str(e)}")

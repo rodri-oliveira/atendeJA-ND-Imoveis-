@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 from fastapi.exceptions import RequestValidationError
 from fastapi import HTTPException
 from app.api.errors import http_exception_handler, validation_exception_handler, generic_exception_handler
@@ -132,6 +133,16 @@ app.include_router(auth_router, prefix="/auth", tags=["auth"])
 app.include_router(metrics_router, prefix="/metrics", tags=["metrics"])
 app.include_router(llm_router, prefix="/llm", tags=["llm"]) 
 app.include_router(admin_realestate_router, prefix="/admin/re", tags=["admin-re"]) 
+
+# Servir uploads locais (MVP). Em produção usar CDN/Storage dedicado.
+try:
+    import os
+    from pathlib import Path
+    uploads_path = Path("uploads") / "imoveis"
+    uploads_path.mkdir(parents=True, exist_ok=True)
+    app.mount("/static/imoveis", StaticFiles(directory=str(uploads_path), html=False), name="static-imoveis")
+except Exception as e:
+    log.warning("mount_static_error", error=str(e))
 
 # Global error handlers (uniform error payloads)
 app.add_exception_handler(HTTPException, http_exception_handler)
