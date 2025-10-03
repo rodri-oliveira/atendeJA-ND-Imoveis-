@@ -2,7 +2,7 @@ from __future__ import annotations
 from typing import List, Optional, Tuple, Dict, Any
 from sqlalchemy.orm import Session
 from sqlalchemy import select, func
-from app.domain.realestate.models import Property, PropertyImage
+from app.domain.realestate.models import Property, PropertyImage, PropertyPurpose, PropertyType
 from app.domain.realestate.mappers import to_imovel_dict
 from app.domain.realestate.utils import normalize_image_url
 
@@ -39,8 +39,8 @@ def create_property(db: Session, data: Dict[str, Any]) -> Property:
 
 def list_properties(
     db: Session,
-    finalidade: Optional[str] = None,
-    tipo: Optional[str] = None,
+    finalidade: Optional[PropertyPurpose] = None,
+    tipo: Optional[PropertyType] = None,
     cidade: Optional[str] = None,
     estado: Optional[str] = None,
     preco_min: Optional[float] = None,

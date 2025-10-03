@@ -1,27 +1,5 @@
 from __future__ import annotations
 
-def _normalize_image_url(url: Optional[str]) -> Optional[str]:
-    if not url:
-        return None
-    try:
-        u = str(url).strip()
-        if not u:
-            return None
-        # esquema ausente, mas começa com //host/path
-        if u.startswith("//"):
-            u = "https:" + u
-        # somente aceita http/https
-        if not (u.startswith("http://") or u.startswith("https://")):
-            return None
-        # valida host simples (deve conter ponto)
-        from urllib.parse import urlparse
-        pr = urlparse(u)
-        if not pr.netloc or "." not in pr.netloc:
-            return None
-        return u
-    except Exception:
-        return None
-
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Request
 from fastapi.responses import Response
@@ -40,6 +18,18 @@ from app.domain.realestate.services.property_service import (
 )
 from app.domain.realestate.mappers import to_imovel_dict
 from app.domain.realestate.utils import normalize_image_url
+from app.domain.realestate.schemas import (
+    ImovelCriar,
+    ImovelSaida,
+    ImovelAtualizar,
+    ImagemCriar,
+    ImagemSaida,
+    ImovelDetalhes,
+    LeadCreate,
+    LeadOut,
+    LeadStagingIn,
+    LeadStagingOut,
+)
 from app.repositories.db import SessionLocal
 from app.core.config import settings
 from app.domain.realestate.models import (
@@ -64,131 +54,16 @@ def get_db():
 
 
 # Schemas (simples para MVP)
-class ImovelCriar(BaseModel):
-    titulo: str
-    descricao: Optional[str] = None
-    tipo: PropertyType
-    finalidade: PropertyPurpose
-    preco: float
-    condominio: Optional[float] = None
-    iptu: Optional[float] = None
-    cidade: str
-    estado: str
-    bairro: Optional[str] = None
-    endereco_json: Optional[dict] = None
-    dormitorios: Optional[int] = None
-    banheiros: Optional[int] = None
-    suites: Optional[int] = None
-    vagas: Optional[int] = None
-    area_total: Optional[float] = None
-    area_util: Optional[float] = None
-    ano_construcao: Optional[int] = None
-    
-    model_config = {
-        "json_schema_extra": {
-            "examples": [
-                {
-                    "titulo": "Apto 2 dorm SP - metrô",
-                    "descricao": "Andar alto, 1 vaga, perto do metrô.",
-                    "tipo": "apartment",
-                    "finalidade": "rent",
-                    "preco": 3000,
-                    "condominio": 550,
-                    "iptu": 120,
-                    "cidade": "São Paulo",
-                    "estado": "SP",
-                    "bairro": "Centro",
-                    "endereco_json": {"rua": "Rua Exemplo", "numero": "123", "cep": "01000-000"},
-                    "dormitorios": 2,
-                    "banheiros": 1,
-                    "suites": 0,
-                    "vagas": 1,
-                    "area_total": 65,
-                    "area_util": 60,
-                    "ano_construcao": 2012
-                }
-            ]
-        }
-    }
+# Schemas movidos para app/domain/realestate/schemas.py
 
 
-class ImovelSaida(BaseModel):
-    id: int
-    titulo: str
-    tipo: PropertyType
-    finalidade: PropertyPurpose
-    preco: float
-    cidade: str
-    estado: str
-    bairro: Optional[str] = None
-    dormitorios: Optional[int] = None
-    banheiros: Optional[int] = None
-    suites: Optional[int] = None
-    vagas: Optional[int] = None
-    ativo: bool
-    cover_image_url: Optional[str] = None
-
-    class Config:
-        from_attributes = True
+ # --
 
 
-class ImovelAtualizar(BaseModel):
-    titulo: Optional[str] = None
-    descricao: Optional[str] = None
-    preco: Optional[float] = None
-    condominio: Optional[float] = None
-    iptu: Optional[float] = None
-    cidade: Optional[str] = None
-    estado: Optional[str] = None
-    bairro: Optional[str] = None
-    endereco_json: Optional[dict] = None
-    dormitorios: Optional[int] = None
-    banheiros: Optional[int] = None
-    suites: Optional[int] = None
-    vagas: Optional[int] = None
-    area_total: Optional[float] = None
-    area_util: Optional[float] = None
-    ano_construcao: Optional[int] = None
-    ativo: Optional[bool] = None
-    
-    model_config = {
-        "json_schema_extra": {
-            "examples": [
-                {"preco": 3200, "ativo": True, "descricao": "Atualizado: com armários planejados."}
-            ]
-        }
-    }
+ # --
 
 
-# --- Imagens do imóvel (Schemas) ---
-class ImagemCriar(BaseModel):
-    url: str
-    is_capa: Optional[bool] = False
-    ordem: Optional[int] = 0
-    storage_key: Optional[str] = None
-    
-    model_config = {
-        "json_schema_extra": {
-            "examples": [
-                {
-                    "url": "https://exemplo-cdn.com/imoveis/1/capa.jpg",
-                    "is_capa": True,
-                    "ordem": 0,
-                    "storage_key": "imoveis/1/capa.jpg"
-                }
-            ]
-        }
-    }
-
-
-class ImagemSaida(BaseModel):
-    id: int
-    url: str
-    is_capa: bool
-    ordem: int
-
-    class Config:
-        from_attributes = True
+ # --
 
 
 @router.post(
@@ -226,8 +101,8 @@ def list_properties(
 ):
     items, total = svc_list_properties(
         db,
-        finalidade=str(finalidade) if finalidade else None,
-        tipo=str(tipo) if tipo else None,
+        finalidade=finalidade,
+        tipo=tipo,
         cidade=cidade,
         estado=estado,
         preco_min=preco_min,
@@ -303,46 +178,7 @@ def update_property(property_id: int, payload: ImovelAtualizar, db: Session = De
 
 
 # Leads
-class LeadCreate(BaseModel):
-    nome: Optional[str] = None
-    telefone: Optional[str] = None
-    email: Optional[str] = None
-    origem: Optional[str] = Field(default="whatsapp")
-    preferencias: Optional[dict] = None
-    consentimento_lgpd: bool = Field(default=False)
-    
-    model_config = {
-        "json_schema_extra": {
-            "examples": [
-                {
-                    "nome": "Fulano",
-                    "telefone": "+5511999990000",
-                    "email": "fulano@exemplo.com",
-                    "origem": "whatsapp",
-                    "preferencias": {
-                        "finalidade": "sale",
-                        "cidade": "São Paulo",
-                        "tipo": "apartment",
-                        "dormitorios": 2,
-                        "preco_max": 400000
-                    },
-                    "consentimento_lgpd": True
-                }
-            ]
-        }
-    }
-
-
-class LeadOut(BaseModel):
-    id: int
-    nome: Optional[str]
-    telefone: Optional[str]
-    email: Optional[str]
-    origem: Optional[str]
-    preferencias: Optional[dict]
-
-    class Config:
-        from_attributes = True
+ # --
 
 
 @router.post(
@@ -397,20 +233,7 @@ def list_leads(db: Session = Depends(get_db)):
 
 
 # --- Staging de Leads (MVP sem tabela dedicada) ---
-class LeadStagingIn(BaseModel):
-    external_lead_id: Optional[str] = None
-    source: Optional[str] = None
-    name: Optional[str] = None
-    phone: Optional[str] = None
-    email: Optional[str] = None
-    preferences: Optional[dict] = None
-    updated_at_source: Optional[str] = None  # ISO-8601 string
-
-
-class LeadStagingOut(BaseModel):
-    created: bool
-    updated: bool
-    lead: LeadOut
+ # --
 
 
 @router.post(
@@ -544,7 +367,7 @@ def list_imagens(property_id: int, db: Session = Depends(get_db)):
     rows = db.execute(stmt).scalars().all()
     out: list[ImagemSaida] = []
     for r in rows:
-        nurl = _normalize_image_url(r.url)
+        nurl = normalize_image_url(r.url)
         if not nurl:
             continue
         out.append(ImagemSaida(id=r.id, url=nurl, is_capa=r.is_cover, ordem=r.sort_order))
@@ -620,7 +443,7 @@ async def proxy_image(url: str = Query(..., description="URL da imagem para faze
         raise HTTPException(status_code=400, detail="URL é obrigatória")
     
     # Validar URL
-    normalized = _normalize_image_url(url)
+    normalized = normalize_image_url(url)
     if not normalized:
         raise HTTPException(status_code=400, detail="URL inválida")
     # Allowlist de hosts para mitigar SSRF
