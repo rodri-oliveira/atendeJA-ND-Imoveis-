@@ -30,8 +30,16 @@ from sqlalchemy.orm import Session
 from sqlalchemy import select, func
 import structlog
 import httpx
-import os
-from pathlib import Path
+from app.domain.realestate.services.image_service import upload_property_images
+from app.domain.realestate.services.property_service import (
+    create_property as svc_create_property,
+    list_properties as svc_list_properties,
+    get_property as svc_get_property,
+    update_property as svc_update_property,
+    get_property_details as svc_get_property_details,
+)
+from app.domain.realestate.mappers import to_imovel_dict
+from app.domain.realestate.utils import normalize_image_url
 from app.repositories.db import SessionLocal
 from app.core.config import settings
 from app.domain.realestate.models import (
@@ -44,8 +52,6 @@ from app.domain.realestate.models import (
 
 router = APIRouter()
 log = structlog.get_logger()
-UPLOAD_ROOT = Path("uploads")
-UPLOAD_IMOVEIS_DIR = UPLOAD_ROOT / "imoveis"
 
 
 # Dependency: DB session por request
@@ -154,6 +160,37 @@ class ImovelAtualizar(BaseModel):
     }
 
 
+# --- Imagens do imóvel (Schemas) ---
+class ImagemCriar(BaseModel):
+    url: str
+    is_capa: Optional[bool] = False
+    ordem: Optional[int] = 0
+    storage_key: Optional[str] = None
+    
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "url": "https://exemplo-cdn.com/imoveis/1/capa.jpg",
+                    "is_capa": True,
+                    "ordem": 0,
+                    "storage_key": "imoveis/1/capa.jpg"
+                }
+            ]
+        }
+    }
+
+
+class ImagemSaida(BaseModel):
+    id: int
+    url: str
+    is_capa: bool
+    ordem: int
+
+    class Config:
+        from_attributes = True
+
+
 @router.post(
     "/imoveis",
     response_model=ImovelSaida,
@@ -163,33 +200,8 @@ class ImovelAtualizar(BaseModel):
 def create_property(payload: ImovelCriar, db: Session = Depends(get_db)):
     if settings.RE_READ_ONLY:
         raise HTTPException(status_code=403, detail="read_only_mode")
-    tenant_id = int(1) if settings.DEFAULT_TENANT_ID == "default" else 1
-    prop = Property(
-        tenant_id=tenant_id,
-        title=payload.titulo,
-        description=payload.descricao,
-        type=payload.tipo,
-        purpose=payload.finalidade,
-        price=payload.preco,
-        condo_fee=payload.condominio,
-        iptu=payload.iptu,
-        address_city=payload.cidade,
-        address_state=payload.estado,
-        address_neighborhood=payload.bairro,
-        address_json=payload.endereco_json,
-        bedrooms=payload.dormitorios,
-        bathrooms=payload.banheiros,
-        suites=payload.suites,
-        parking_spots=payload.vagas,
-        area_total=payload.area_total,
-        area_usable=payload.area_util,
-        year_built=payload.ano_construcao,
-        is_active=True,
-    )
-    db.add(prop)
-    db.commit()
-    db.refresh(prop)
-    return _to_imovel_saida(prop)
+    prop = svc_create_property(db, payload.model_dump())
+    return ImovelSaida(**to_imovel_dict(prop))
 
 
 @router.get(
@@ -212,81 +224,21 @@ def list_properties(
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
 ):
-    # Log de diagnóstico: total bruto de imóveis na base
-    try:
-        total_db = db.execute(select(func.count()).select_from(Property)).scalar_one()
-        log.info("re_list_enter", finalidade=str(finalidade) if finalidade else None, tipo=str(tipo) if tipo else None, cidade=cidade, estado=estado, preco_min=preco_min, preco_max=preco_max, dormitorios_min=dormitorios_min, only_with_cover=only_with_cover, total_db=int(total_db))
-    except Exception as _e:
-        log.warning("re_list_count_error", error=str(_e))
-
-    stmt = select(Property).where(Property.is_active == True)  # noqa: E712
-    if finalidade:
-        stmt = stmt.where(Property.purpose == finalidade)
-    if tipo:
-        stmt = stmt.where(Property.type == tipo)
-    if cidade:
-        c = (cidade or "").strip()
-        if c:
-            stmt = stmt.where(Property.address_city.ilike(f"%{c}%"))
-    if estado:
-        uf = (estado or "").strip().upper()
-        if uf:
-            stmt = stmt.where(Property.address_state == uf)
-    if preco_min is not None:
-        stmt = stmt.where(Property.price >= preco_min)
-    if preco_max is not None:
-        stmt = stmt.where(Property.price <= preco_max)
-    if dormitorios_min is not None:
-        stmt = stmt.where(Property.bedrooms >= dormitorios_min)
-    # Filtrar apenas imóveis que possuam imagens quando solicitado
-    if only_with_cover:
-        # Abordagem robusta: inner join + distinct evita armadilhas de correlação
-        from sqlalchemy import distinct
-        stmt = (
-            stmt.join(PropertyImage, PropertyImage.property_id == Property.id)
-                .distinct()
-        )
-    # Ordenação por mais recentes primeiro (melhor UX)
-    try:
-        stmt = stmt.order_by(Property.updated_at.desc(), Property.id.desc())
-    except Exception:
-        # Fallback caso o campo não exista em algum ambiente
-        stmt = stmt.order_by(Property.id.desc())
-
-    # Header com total filtrado (para paginação no front)
-    try:
-        stmt_count = stmt.order_by(None)
-        total = db.execute(select(func.count()).select_from(stmt_count.subquery())).scalar_one()
-        response.headers["X-Total-Count"] = str(int(total))
-    except Exception as _e:
-        log.warning("re_list_total_error", error=str(_e))
-
-    stmt = stmt.limit(limit).offset(offset)
-    rows = db.execute(stmt).scalars().all()
-    try:
-        log.info("re_list_result", returned=len(rows))
-    except Exception:
-        pass
-    # N+1 simples para obter a imagem de capa (MVP)
-    out: list[ImovelSaida] = []
-    for r in rows:
-        cover_url: Optional[str] = None
-        try:
-            img_stmt = (
-                select(PropertyImage)
-                .where(PropertyImage.property_id == r.id)
-                .order_by(PropertyImage.is_cover.desc(), PropertyImage.sort_order.asc(), PropertyImage.id.asc())
-                .limit(1)
-            )
-            img = db.execute(img_stmt).scalars().first()
-            if img:
-                cover_url = _normalize_image_url(img.url)
-        except Exception:
-            cover_url = None
-        item = _to_imovel_saida(r)
-        item.cover_image_url = cover_url
-        out.append(item)
-    return out
+    items, total = svc_list_properties(
+        db,
+        finalidade=str(finalidade) if finalidade else None,
+        tipo=str(tipo) if tipo else None,
+        cidade=cidade,
+        estado=estado,
+        preco_min=preco_min,
+        preco_max=preco_max,
+        dormitorios_min=dormitorios_min,
+        only_with_cover=only_with_cover,
+        limit=limit,
+        offset=offset,
+    )
+    response.headers["X-Total-Count"] = str(total)
+    return [ImovelSaida(**it) for it in items]
 
 
 @router.post(
@@ -304,123 +256,21 @@ def upload_imagens(
     files: List[UploadFile] = File(..., description="Arquivos de imagem"),
     db: Session = Depends(get_db),
 ):
-    """Upload local (MVP). Em produção, prefira storage externo (S3/GCS) com URLs assinadas."""
+    """Upload local (MVP). Encaminha para o service e retorna DTOs de imagem."""
     if settings.RE_READ_ONLY:
         raise HTTPException(status_code=403, detail="read_only_mode")
 
-    prop = db.get(Property, property_id)
-    if not prop:
-        raise HTTPException(status_code=404, detail="property_not_found")
-
-    # Políticas de limite
-    MAX_FILES_PER_REQUEST = 10
-    MAX_IMAGES_PER_PROPERTY = 30
-    allowed_types = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}
-
-    # Contagem atual por imóvel
-    current_count = db.execute(
-        select(func.count()).select_from(PropertyImage).where(PropertyImage.property_id == property_id)
-    ).scalar_one()
-
-    if not files:
-        raise HTTPException(status_code=400, detail="no_files")
-    if len(files) > MAX_FILES_PER_REQUEST:
-        raise HTTPException(status_code=400, detail=f"max_files_per_request={MAX_FILES_PER_REQUEST}")
-    if current_count >= MAX_IMAGES_PER_PROPERTY:
-        raise HTTPException(status_code=400, detail="max_images_per_property_reached")
-
-    # Preparar diretório
-    target_dir = UPLOAD_IMOVEIS_DIR / str(property_id)
-    try:
-        target_dir.mkdir(parents=True, exist_ok=True)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"mkdir_error: {str(e)}")
-
-    # Base URL para montar URL pública
     base_url = str(request.base_url).rstrip("/")
-    created: list[ImagemSaida] = []
-
-    # Descobrir próxima ordem
-    next_order = 0
     try:
-        last = db.execute(
-            select(PropertyImage.sort_order)
-            .where(PropertyImage.property_id == property_id)
-            .order_by(PropertyImage.sort_order.desc())
-            .limit(1)
-        ).scalar_one_or_none()
-        next_order = int((last or -1) + 1)
-    except Exception:
-        next_order = 0
-
-    # Verificar se há capa
-    has_cover = bool(
-        db.execute(
-            select(func.count()).select_from(PropertyImage).where(
-                PropertyImage.property_id == property_id, PropertyImage.is_cover == True  # noqa: E712
-            )
-        ).scalar_one()
-    )
-
-    # Salvar arquivos
-    remaining_slots = MAX_IMAGES_PER_PROPERTY - int(current_count)
-    to_process = files[: max(0, min(len(files), remaining_slots))]
-    if not to_process:
-        raise HTTPException(status_code=400, detail="no_slots_available")
-
-    for idx, f in enumerate(to_process):
-        ext = allowed_types.get((f.content_type or "").lower())
-        if not ext:
-            # tenta pela extensão do filename
-            name = f.filename or ""
-            lname = name.lower()
-            if lname.endswith((".jpg", ".jpeg")):
-                ext = ".jpg"
-            elif lname.endswith(".png"):
-                ext = ".png"
-            elif lname.endswith(".webp"):
-                ext = ".webp"
-        if not ext:
-            raise HTTPException(status_code=400, detail=f"unsupported_type:{f.content_type}")
-
-        # Nome de arquivo único
-        import time
-        safe_name = f"{int(time.time() * 1000)}_{idx}{ext}"
-        file_path = target_dir / safe_name
-
-        # Gravar em disco por chunks
-        try:
-            with file_path.open("wb") as out:
-                while True:
-                    chunk = f.file.read(1024 * 1024)
-                    if not chunk:
-                        break
-                    out.write(chunk)
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"write_error:{str(e)}")
-        finally:
-            try:
-                f.file.close()
-            except Exception:
-                pass
-
-        public_url = f"{base_url}/static/imoveis/{property_id}/{safe_name}"
-        img = PropertyImage(
-            property_id=property_id,
-            url=public_url,
-            storage_key=str(file_path),
-            is_cover=(not has_cover and idx == 0),
-            sort_order=next_order,
-        )
-        next_order += 1
-        db.add(img)
-        db.flush()
-        created.append(ImagemSaida(id=img.id, url=public_url, is_capa=img.is_cover, ordem=img.sort_order))
-
-    if created:
-        db.commit()
-
-    return created
+        created = upload_property_images(db, property_id, files, base_url)
+        return [ImagemSaida(id=i["id"], url=i["url"], is_capa=bool(i["is_capa"]), ordem=int(i["ordem"])) for i in created]
+    except ValueError as e:
+        # Erros de regra do domínio traduzidos para HTTP 400
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"upload_internal_error:{str(e)}")
 
 @router.get(
     "/imoveis/{property_id}",
@@ -429,10 +279,11 @@ def upload_imagens(
     description="Retorna um imóvel pelo seu ID.",
 )
 def get_property(property_id: int, db: Session = Depends(get_db)):
-    prop = db.get(Property, property_id)
-    if not prop:
+    try:
+        prop = svc_get_property(db, property_id)
+        return ImovelSaida(**to_imovel_dict(prop))
+    except ValueError:
         raise HTTPException(status_code=404, detail="property_not_found")
-    return _to_imovel_saida(prop)
 
 
 @router.patch(
@@ -444,35 +295,11 @@ def get_property(property_id: int, db: Session = Depends(get_db)):
 def update_property(property_id: int, payload: ImovelAtualizar, db: Session = Depends(get_db)):
     if settings.RE_READ_ONLY:
         raise HTTPException(status_code=403, detail="read_only_mode")
-    prop = db.get(Property, property_id)
-    if not prop:
+    try:
+        prop = svc_update_property(db, property_id, payload.model_dump(exclude_unset=True))
+        return ImovelSaida(**to_imovel_dict(prop))
+    except ValueError:
         raise HTTPException(status_code=404, detail="property_not_found")
-    data = payload.model_dump(exclude_unset=True)
-    mapping = {
-        "titulo": "title",
-        "descricao": "description",
-        "preco": "price",
-        "condominio": "condo_fee",
-        "iptu": "iptu",
-        "cidade": "address_city",
-        "estado": "address_state",
-        "bairro": "address_neighborhood",
-        "endereco_json": "address_json",
-        "dormitorios": "bedrooms",
-        "banheiros": "bathrooms",
-        "suites": "suites",
-        "vagas": "parking_spots",
-        "area_total": "area_total",
-        "area_util": "area_usable",
-        "ano_construcao": "year_built",
-        "ativo": "is_active",
-    }
-    for k, v in data.items():
-        setattr(prop, mapping.get(k, k), v)
-    db.add(prop)
-    db.commit()
-    db.refresh(prop)
-    return _to_imovel_saida(prop)
 
 
 # Leads
@@ -675,35 +502,7 @@ def upsert_lead_from_staging(payload: LeadStagingIn, db: Session = Depends(get_d
     )
 
 
-# --- Imagens do imóvel ---
-class ImagemCriar(BaseModel):
-    url: str
-    is_capa: Optional[bool] = False
-    ordem: Optional[int] = 0
-    storage_key: Optional[str] = None
-    
-    model_config = {
-        "json_schema_extra": {
-            "examples": [
-                {
-                    "url": "https://exemplo-cdn.com/imoveis/1/capa.jpg",
-                    "is_capa": True,
-                    "ordem": 0,
-                    "storage_key": "imoveis/1/capa.jpg"
-                }
-            ]
-        }
-    }
-
-
-class ImagemSaida(BaseModel):
-    id: int
-    url: str
-    is_capa: bool
-    ordem: int
-
-    class Config:
-        from_attributes = True
+# --- Imagens do imóvel --- (definitions moved above)
 
 
 @router.post(
@@ -781,58 +580,32 @@ class ImovelDetalhes(BaseModel):
     summary="Detalhes do imóvel (com imagens)",
 )
 def get_imovel_detalhes(property_id: int, db: Session = Depends(get_db)):
-    prop = db.get(Property, property_id)
-    if not prop:
+    try:
+        d = svc_get_property_details(db, property_id)
+        d_out = ImovelDetalhes(
+            id=d["id"],
+            titulo=d["titulo"],
+            descricao=d.get("descricao"),
+            tipo=d["tipo"],
+            finalidade=d["finalidade"],
+            preco=d["preco"],
+            cidade=d["cidade"],
+            estado=d["estado"],
+            bairro=d.get("bairro"),
+            dormitorios=d.get("dormitorios"),
+            banheiros=d.get("banheiros"),
+            suites=d.get("suites"),
+            vagas=d.get("vagas"),
+            area_total=d.get("area_total"),
+            area_util=d.get("area_util"),
+            imagens=[ImagemSaida(**img) for img in d.get("imagens", [])],
+        )
+        return d_out
+    except ValueError:
         raise HTTPException(status_code=404, detail="property_not_found")
-    stmt = (
-        select(PropertyImage)
-        .where(PropertyImage.property_id == property_id)
-        .order_by(PropertyImage.is_cover.desc(), PropertyImage.sort_order.asc(), PropertyImage.id.asc())
-    )
-    imgs = db.execute(stmt).scalars().all()
-    norm_imgs: list[ImagemSaida] = []
-    for i in imgs:
-        nurl = _normalize_image_url(i.url)
-        if not nurl:
-            continue
-        norm_imgs.append(ImagemSaida(id=i.id, url=nurl, is_capa=i.is_cover, ordem=i.sort_order))
-    return ImovelDetalhes(
-        id=prop.id,
-        titulo=prop.title,
-        descricao=prop.description,
-        tipo=prop.type,
-        finalidade=prop.purpose,
-        preco=prop.price,
-        cidade=prop.address_city,
-        estado=prop.address_state,
-        bairro=prop.address_neighborhood,
-        dormitorios=prop.bedrooms,
-        banheiros=prop.bathrooms,
-        suites=prop.suites,
-        vagas=prop.parking_spots,
-        area_total=prop.area_total,
-        area_util=prop.area_usable,
-        imagens=norm_imgs,
-    )
 
 
-# --- helpers ---
-def _to_imovel_saida(p: Property) -> ImovelSaida:
-    return ImovelSaida(
-        id=p.id,
-        titulo=p.title,
-        tipo=p.type,
-        finalidade=p.purpose,
-        preco=p.price,
-        cidade=p.address_city,
-        estado=p.address_state,
-        bairro=p.address_neighborhood,
-        dormitorios=p.bedrooms,
-        banheiros=p.bathrooms,
-        suites=p.suites,
-        vagas=p.parking_spots,
-        ativo=p.is_active,
-    )
+# helpers removidos: mapeamento agora em mappers/service
 
 
 @router.get("/images/proxy")
