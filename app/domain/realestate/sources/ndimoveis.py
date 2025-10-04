@@ -20,6 +20,7 @@ class PropertyDTO:
     url: str
     external_id: str | None
     title: str | None
+    description: str | None
     price: float | None
     purpose: Literal["sale", "rent", None]
     ptype: Literal["apartment", "house", "commercial", "land", None]
@@ -131,24 +132,188 @@ def parse_detail(html: str, page_url: str) -> PropertyDTO:
     h1 = soup.find("h1")
     title = txt(h1)
 
-    # external id (ex.: Código: A1234). Tentar múltiplos locais e, se não achar, fallback pela URL.
+    # description (longa): tentar capturar a seção "Descrição do Imóvel"; fallback para bloco textual principal
+    description: str | None = None
+    try:
+        # 1) Procurar seção com o texto "Descrição do Imóvel"
+        desc_header = None
+        # 1a) Primeiro, em headings h1..h6
+        for tag in soup.find_all(re.compile(r'^h[1-6]$')):
+            t = tag.get_text(" ", strip=True)
+            if re.search(r"Descri[cç][aã]o\s+do\s+Im[óo]vel", t, flags=re.IGNORECASE):
+                desc_header = tag
+                break
+        # 1b) Se não achou em heading, aceitar qualquer nó que contenha o rótulo
+        if not desc_header:
+            any_label = soup.find(string=re.compile(r"Descri[cç][aã]o\s+do\s+Im[óo]vel", re.IGNORECASE))
+            if any_label and getattr(any_label, 'parent', None):
+                desc_header = any_label.parent
+
+        collected: list[str] = []
+        collected_len = 0
+
+        def push_text(s: str):
+            nonlocal collected_len
+            s2 = (s or "").strip()
+            if not s2:
+                return
+            collected.append(s2)
+            collected_len += len(s2)
+
+        stop_re = re.compile(r"Central de Neg[oó]cios|Fale agora|Galeria|Características|Proximidades|Cômodos|Mapa de Localiza[çc][aã]o", re.IGNORECASE)
+
+        if desc_header:
+            # 2) Varrer elementos seguintes (inclui nós aninhados) até próxima seção
+            for el in getattr(desc_header, 'next_elements', []):
+                # Parar em um heading H1/H2 que não seja a própria descrição
+                if getattr(el, 'name', None) and re.match(r'^h[1-2]$', el.name):
+                    try:
+                        htext = el.get_text(" ", strip=True)
+                    except Exception:
+                        htext = ""
+                    if htext and not re.search(r"Descri[cç][aã]o\s+do\s+Im[óo]vel", htext, flags=re.IGNORECASE):
+                        break
+                # Texto do elemento atual
+                try:
+                    el_text = getattr(el, 'get_text', lambda *a, **k: "")(" ", strip=True)
+                except Exception:
+                    el_text = ""
+                if el_text and stop_re.search(el_text):
+                    break
+                # Listas
+                if getattr(el, 'name', None) in ('ul', 'ol'):
+                    try:
+                        for li in el.find_all('li'):
+                            li_txt = li.get_text(" ", strip=True)
+                            if li_txt:
+                                push_text(li_txt)
+                    except Exception:
+                        pass
+                if el_text:
+                    push_text(el_text)
+                if collected_len >= 3000:
+                    break
+        else:
+            # 3) Fallback: pega parágrafos e também itens de lista relevantes
+            paragraphs = [p.get_text(" ", strip=True) for p in soup.find_all('p')]
+            list_items = [li.get_text(" ", strip=True) for li in soup.find_all('li')]
+            # Manter apenas textos medianos/grandes e evitar seções de parada
+            for ptxt in paragraphs:
+                if 60 <= len(ptxt) <= 800 and not stop_re.search(ptxt):
+                    push_text(ptxt)
+                if collected_len >= 3000:
+                    break
+            if collected_len < 300:  # ainda curto: complementar com itens de lista
+                for ltxt in list_items:
+                    if 20 <= len(ltxt) <= 400 and not stop_re.search(ltxt):
+                        push_text(ltxt)
+                    if collected_len >= 3000:
+                        break
+
+        # Normalizações leves
+        joined = "\n".join(collected).strip()
+        if joined:
+            joined = re.sub(r"\s*\n\s*", "\n", joined)
+            joined = re.sub(r"\n{3,}", "\n\n", joined)
+            description = joined[:3000]
+        # Fallback adicional: se descrição inexistente ou muito curta, usar meta tags e parágrafos globais
+        def _ensure_min_desc(existing: str | None) -> str | None:
+            try:
+                cur = (existing or "").strip()
+                if len(cur) >= 150:
+                    return cur
+                # 1) OG/meta description
+                metas = []
+                for sel in [
+                    'meta[name="description"][content]',
+                    'meta[property="og:description"][content]',
+                    'meta[name="og:description"][content]'
+                ]:
+                    for m in soup.select(sel):
+                        c = (m.get('content') or '').strip()
+                        if c and c.lower() != 'imóveis disponíveis':
+                            metas.append(c)
+                # 2) Global paragraphs/list items (filtrando stop words)
+                paras = [p.get_text(" ", strip=True) for p in soup.find_all('p') if p]
+                lis = [li.get_text(" ", strip=True) for li in soup.find_all('li') if li]
+                parts: list[str] = []
+                # Prioriza meta
+                for t in metas:
+                    if 40 <= len(t) <= 400 and not stop_re.search(t):
+                        parts.append(t)
+                # Parágrafos
+                for t in paras:
+                    if 60 <= len(t) <= 800 and not stop_re.search(t):
+                        parts.append(t)
+                        if sum(len(x) for x in parts) >= 1200:
+                            break
+                # Complementa com listas
+                if sum(len(x) for x in parts) < 300:
+                    for t in lis:
+                        if 30 <= len(t) <= 400 and not stop_re.search(t):
+                            parts.append(t)
+                            if sum(len(x) for x in parts) >= 1200:
+                                break
+                text = "\n".join(parts).strip()
+                if text:
+                    text = re.sub(r"\s*\n\s*", "\n", text)
+                    text = re.sub(r"\n{3,}", "\n\n", text)
+                return (text[:3000] if text else (cur or None))
+            except Exception:
+                return existing
+        description = _ensure_min_desc(description)
+    except Exception:
+        description = None
+
+    # external id (ex.: Código: A1234 ou Ref: A1234, também aceita 'A-1234' e 'A 1234').
+    # Tentar múltiplos locais e, se não achar, fallback pela URL.
+    def _extract_ext(text: str | None) -> str | None:
+        if not text:
+            return None
+        try:
+            m = re.search(r"([A-Za-z])[\s\-]?(\d{2,})", text)
+            if m:
+                # Normaliza removendo separadores: 'A-1275' -> 'A1275'
+                return (m.group(1).upper() + m.group(2))
+        except Exception:
+            return None
+        return None
     ext = None
     # 1) Qualquer nó de texto que contenha 'Código'
     code_el = soup.find(string=re.compile(r"Código", re.IGNORECASE))
     if code_el:
-        m = re.search(r"([A-Za-z]\d{2,})", str(code_el))
-        if m:
-            ext = m.group(1)
+        ext_try = _extract_ext(str(code_el))
+        if ext_try:
+            ext = ext_try
     # 2) Buscar também em labels ao lado
     if not ext:
         labels = soup.find_all(string=re.compile(r"Código", re.IGNORECASE))
         for lab in labels:
             parent_text = lab.parent.get_text(" ", strip=True) if lab and lab.parent else None
             if parent_text:
-                m2 = re.search(r"([A-Za-z]\d{2,})", parent_text)
-                if m2:
-                    ext = m2.group(1)
+                ext_try2 = _extract_ext(parent_text)
+                if ext_try2:
+                    ext = ext_try2
                     break
+    # 2b) Procurar padrões 'Ref' / 'Referência'
+    if not ext:
+        # Busca direta por strings contendo 'Ref' ou 'Referência'
+        ref_nodes = soup.find_all(string=re.compile(r"Ref|Refer[eê]ncia", re.IGNORECASE))
+        for rn in ref_nodes:
+            try:
+                txtn = rn.parent.get_text(" ", strip=True) if rn and rn.parent else str(rn)
+            except Exception:
+                txtn = str(rn)
+            ext_try3 = _extract_ext(txtn)
+            if ext_try3:
+                ext = ext_try3
+                break
+    # 2c) Varredura de corpo completo como último recurso textual (antes do fallback de URL)
+    if not ext:
+        body_full = soup.get_text(" ", strip=True)
+        ext_try4 = _extract_ext(body_full)
+        if ext_try4:
+            ext = ext_try4
     # 3) Fallback: extrair id numérico da URL /imovel/123456/...
     if not ext:
         murl = re.search(r"/imovel/(\d+)/", page_url)
@@ -337,6 +502,7 @@ def parse_detail(html: str, page_url: str) -> PropertyDTO:
         url=page_url,
         external_id=ext,
         title=title,
+        description=description,
         price=price,
         purpose=purpose,  # type: ignore
         ptype=ptype,      # type: ignore
