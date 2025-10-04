@@ -185,6 +185,8 @@ def get_property_details(db: Session, property_id: int) -> Dict[str, Any]:
         "tipo": prop.type,
         "finalidade": prop.purpose,
         "preco": prop.price,
+        "condominio": prop.condo_fee,
+        "iptu": prop.iptu,
         "cidade": prop.address_city,
         "estado": prop.address_state,
         "bairro": prop.address_neighborhood,
@@ -194,6 +196,7 @@ def get_property_details(db: Session, property_id: int) -> Dict[str, Any]:
         "vagas": prop.parking_spots,
         "area_total": prop.area_total,
         "area_util": prop.area_usable,
+        "ano_construcao": prop.year_built,
         "imagens": norm_imgs,
     }
 
