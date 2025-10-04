@@ -1,6 +1,8 @@
 from __future__ import annotations
 from typing import List, Optional
 from pydantic import BaseModel, Field
+from pydantic.functional_validators import field_validator
+from datetime import datetime
 from app.domain.realestate.models import PropertyType, PropertyPurpose
 
 
@@ -10,19 +12,19 @@ class ImovelCriar(BaseModel):
     descricao: Optional[str] = None
     tipo: PropertyType
     finalidade: PropertyPurpose
-    preco: float
-    condominio: Optional[float] = None
-    iptu: Optional[float] = None
+    preco: float = Field(gt=0)
+    condominio: Optional[float] = Field(default=None, ge=0)
+    iptu: Optional[float] = Field(default=None, ge=0)
     cidade: str
     estado: str
     bairro: Optional[str] = None
     endereco_json: Optional[dict] = None
-    dormitorios: Optional[int] = None
-    banheiros: Optional[int] = None
-    suites: Optional[int] = None
-    vagas: Optional[int] = None
-    area_total: Optional[float] = None
-    area_util: Optional[float] = None
+    dormitorios: Optional[int] = Field(default=None, ge=0)
+    banheiros: Optional[int] = Field(default=None, ge=0)
+    suites: Optional[int] = Field(default=None, ge=0)
+    vagas: Optional[int] = Field(default=None, ge=0)
+    area_total: Optional[float] = Field(default=None, ge=0)
+    area_util: Optional[float] = Field(default=None, ge=0)
     ano_construcao: Optional[int] = None
 
     model_config = {
@@ -52,6 +54,40 @@ class ImovelCriar(BaseModel):
         }
     }
 
+    @field_validator('titulo')
+    @classmethod
+    def _vl_titulo(cls, v: str) -> str:
+        v2 = (v or '').strip()
+        if not v2:
+            raise ValueError('titulo_obrigatorio')
+        return v2
+
+    @field_validator('cidade')
+    @classmethod
+    def _vl_cidade(cls, v: str) -> str:
+        v2 = (v or '').strip()
+        if not v2:
+            raise ValueError('cidade_obrigatoria')
+        return v2
+
+    @field_validator('estado')
+    @classmethod
+    def _vl_estado(cls, v: str) -> str:
+        uf = (v or '').strip().upper()
+        if len(uf) != 2:
+            raise ValueError('estado_uf_invalido')
+        return uf
+
+    @field_validator('ano_construcao')
+    @classmethod
+    def _vl_ano(cls, v: Optional[int]) -> Optional[int]:
+        if v is None:
+            return v
+        current = datetime.now().year + 1
+        if not (1800 <= int(v) <= current):
+            raise ValueError('ano_construcao_range')
+        return int(v)
+
 
 class ImovelSaida(BaseModel):
     id: int
@@ -76,19 +112,19 @@ class ImovelSaida(BaseModel):
 class ImovelAtualizar(BaseModel):
     titulo: Optional[str] = None
     descricao: Optional[str] = None
-    preco: Optional[float] = None
-    condominio: Optional[float] = None
-    iptu: Optional[float] = None
+    preco: Optional[float] = Field(default=None, gt=0)
+    condominio: Optional[float] = Field(default=None, ge=0)
+    iptu: Optional[float] = Field(default=None, ge=0)
     cidade: Optional[str] = None
     estado: Optional[str] = None
     bairro: Optional[str] = None
     endereco_json: Optional[dict] = None
-    dormitorios: Optional[int] = None
-    banheiros: Optional[int] = None
-    suites: Optional[int] = None
-    vagas: Optional[int] = None
-    area_total: Optional[float] = None
-    area_util: Optional[float] = None
+    dormitorios: Optional[int] = Field(default=None, ge=0)
+    banheiros: Optional[int] = Field(default=None, ge=0)
+    suites: Optional[int] = Field(default=None, ge=0)
+    vagas: Optional[int] = Field(default=None, ge=0)
+    area_total: Optional[float] = Field(default=None, ge=0)
+    area_util: Optional[float] = Field(default=None, ge=0)
     ano_construcao: Optional[int] = None
     ativo: Optional[bool] = None
 

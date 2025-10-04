@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Request
 from fastapi.responses import Response
-from pydantic import BaseModel, Field
+ 
 from sqlalchemy.orm import Session
 from sqlalchemy import select, func
 import structlog
@@ -377,26 +377,6 @@ def list_imagens(property_id: int, db: Session = Depends(get_db)):
  # [REMOVIDO] Duplicidade do endpoint de proxy de imagens.
  # Mantida apenas a versão assíncrona definida mais abaixo em "/images/proxy".
 
-# --- Detalhes do imóvel (consolidado) ---
-class ImovelDetalhes(BaseModel):
-    id: int
-    titulo: str
-    descricao: Optional[str] = None
-    tipo: PropertyType
-    finalidade: PropertyPurpose
-    preco: float
-    cidade: str
-    estado: str
-    bairro: Optional[str] = None
-    dormitorios: Optional[int] = None
-    banheiros: Optional[int] = None
-    suites: Optional[int] = None
-    vagas: Optional[int] = None
-    area_total: Optional[float] = None
-    area_util: Optional[float] = None
-    imagens: List[ImagemSaida] = []
-
-
 @router.get(
     "/imoveis/{property_id}/detalhes",
     response_model=ImovelDetalhes,
@@ -462,36 +442,40 @@ async def proxy_image(url: str = Query(..., description="URL da imagem para faze
         log.warning("img_proxy_host_parse_error", error=str(_e))
         raise HTTPException(status_code=400, detail="invalid_url")
     
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Referer": "https://www.ndimoveis.com.br/",
+        "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+    }
     try:
-        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
-            response = await client.get(
-                normalized,
-                headers={
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                    "Referer": "https://www.ndimoveis.com.br/",
-                }
-            )
-            
-            if response.status_code != 200:
-                raise HTTPException(
-                    status_code=response.status_code,
-                    detail=f"Erro ao buscar imagem: {response.status_code}"
-                )
-            
-            # Determinar content-type
-            content_type = response.headers.get("content-type", "image/jpeg")
-            
-            return Response(
-                content=response.content,
-                media_type=content_type,
-                headers={
-                    "Cache-Control": "public, max-age=86400",  # 24 horas
-                    "Access-Control-Allow-Origin": "*",
-                }
-            )
+        # Tentativa padrão (verify=True)
+        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+            response = await client.get(normalized, headers=headers)
     except httpx.HTTPError as e:
-        log.warning("img_proxy_http_error", error=str(e))
-        raise HTTPException(status_code=502, detail=f"Erro ao buscar imagem: {str(e)}")
-    except Exception as e:
-        log.error("img_proxy_internal_error", error=str(e))
-        raise HTTPException(status_code=500, detail=f"Erro interno: {str(e)}")
+        # Retry tolerante a SSL em ambientes dev/Windows
+        try:
+            async with httpx.AsyncClient(timeout=15.0, follow_redirects=True, verify=False) as client2:
+                response = await client2.get(normalized, headers=headers)
+                log.warning("img_proxy_retry_verify_false", reason=repr(e))
+        except httpx.HTTPError as e2:
+            log.warning("img_proxy_http_error", error=repr(e2))
+            raise HTTPException(status_code=502, detail=f"Erro ao buscar imagem: {e2.__class__.__name__}")
+
+    if response.status_code != 200:
+        log.warning("img_proxy_upstream_non_200", status=response.status_code)
+        raise HTTPException(
+            status_code=response.status_code,
+            detail=f"Erro ao buscar imagem: {response.status_code}",
+        )
+
+    # Determinar content-type
+    content_type = response.headers.get("content-type", "image/jpeg")
+
+    return Response(
+        content=response.content,
+        media_type=content_type,
+        headers={
+            "Cache-Control": "public, max-age=86400",  # 24 horas
+            "Access-Control-Allow-Origin": "*",
+        },
+    )

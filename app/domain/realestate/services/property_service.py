@@ -5,10 +5,19 @@ from sqlalchemy import select, func
 from app.domain.realestate.models import Property, PropertyImage, PropertyPurpose, PropertyType
 from app.domain.realestate.mappers import to_imovel_dict
 from app.domain.realestate.utils import normalize_image_url
+from app.services.image_storage import delete_file
+from app.core.config import settings
+
+
+def _resolve_tenant_id() -> int:
+    try:
+        return int(settings.DEFAULT_TENANT_ID)
+    except Exception:
+        return 1
 
 
 def create_property(db: Session, data: Dict[str, Any]) -> Property:
-    tenant_id = int(1)
+    tenant_id = _resolve_tenant_id()
     prop = Property(
         tenant_id=tenant_id,
         title=data["titulo"],
@@ -169,12 +178,62 @@ def get_property_details(db: Session, property_id: int) -> Dict[str, Any]:
             "is_capa": bool(i.is_cover),
             "ordem": int(i.sort_order),
         })
-
-    base = to_imovel_dict(prop, cover_image_url=None)
-    base.update({
+    return {
+        "id": prop.id,
+        "titulo": prop.title,
         "descricao": prop.description,
+        "tipo": prop.type,
+        "finalidade": prop.purpose,
+        "preco": prop.price,
+        "cidade": prop.address_city,
+        "estado": prop.address_state,
+        "bairro": prop.address_neighborhood,
+        "dormitorios": prop.bedrooms,
+        "banheiros": prop.bathrooms,
+        "suites": prop.suites,
+        "vagas": prop.parking_spots,
         "area_total": prop.area_total,
         "area_util": prop.area_usable,
         "imagens": norm_imgs,
-    })
-    return base
+    }
+
+def hard_delete_property(db: Session, property_id: int) -> Dict[str, Any]:
+    prop = db.get(Property, property_id)
+    if not prop:
+        raise ValueError("property_not_found")
+    imgs = db.execute(select(PropertyImage).where(PropertyImage.property_id == property_id)).scalars().all()
+    removed_files = 0
+    for img in imgs:
+        try:
+            if delete_file(img.storage_key or ""):
+                removed_files += 1
+        except Exception:
+            pass
+        db.delete(img)
+    db.delete(prop)
+    db.commit()
+    return {"ok": True, "images_deleted": removed_files}
+
+
+def set_active_property(db: Session, property_id: int, active: bool) -> Property:
+    prop = db.get(Property, property_id)
+    if not prop:
+        raise ValueError("property_not_found")
+    prop.is_active = bool(active)
+    db.add(prop)
+    db.commit()
+    db.refresh(prop)
+    return prop
+
+
+def soft_delete_property(db: Session, property_id: int) -> Dict[str, Any]:
+    # Sem remover arquivos/imagens; apenas marca como inativo
+    prop = db.get(Property, property_id)
+    if not prop:
+        raise ValueError("property_not_found")
+    if not prop.is_active:
+        return {"ok": True, "already_inactive": True}
+    prop.is_active = False
+    db.add(prop)
+    db.commit()
+    return {"ok": True}

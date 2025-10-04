@@ -42,7 +42,7 @@ def upsert_property(db: Session, tenant_id: int, dto) -> Tuple[str, int]:
         prop = re_models.Property(
             tenant_id=tenant_id,
             title=(dto.title or "Sem título"),
-            description=None,
+            description=(getattr(dto, 'description', None) or None),
             type=tipo_enum,
             purpose=purpose_enum,
             price=float(dto.price or 0.0),
@@ -80,6 +80,11 @@ def upsert_property(db: Session, tenant_id: int, dto) -> Tuple[str, int]:
         prop.suites = dto.suites
         prop.parking_spots = dto.parking
         prop.area_total = dto.area_total
+        # Preencher descrição somente se ainda estiver vazia no banco
+        if not (prop.description and prop.description.strip()):
+            incoming_desc = getattr(dto, 'description', None)
+            if incoming_desc and incoming_desc.strip():
+                prop.description = incoming_desc.strip()
         status = "updated"
 
     # Substituir imagens (se houver)
@@ -98,5 +103,16 @@ def upsert_property(db: Session, tenant_id: int, dto) -> Tuple[str, int]:
             )
             order += 1
             images_created += 1
+
+    # Guardar source_url dentro de address_json (sem sobrescrever chaves existentes)
+    try:
+        src_url = getattr(dto, 'url', None)
+        if src_url:
+            data = dict(prop.address_json or {})
+            if not data.get('source_url'):
+                data['source_url'] = src_url
+                prop.address_json = data
+    except Exception:
+        pass
 
     return status, images_created

@@ -55,7 +55,7 @@ class Settings(BaseSettings):
 
     # Auth (login do sistema)
     AUTH_JWT_SECRET: str = "changeme"
-    AUTH_JWT_EXPIRE_MINUTES: int = 60
+    AUTH_JWT_EXPIRE_MINUTES: int = 1440  # 24 horas (1440 minutos)
     AUTH_SEED_ADMIN_EMAIL: str = ""
     AUTH_SEED_ADMIN_PASSWORD: str = ""
 

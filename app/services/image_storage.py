@@ -76,3 +76,25 @@ def save_property_images(
         saved.append((safe_name, file_path))
 
     return saved
+
+
+def delete_file(storage_key: str) -> bool:
+    """Remove um arquivo físico salvo no storage local.
+    Retorna True se removido, False caso não exista ou esteja fora da raiz segura.
+    """
+    try:
+        if not storage_key:
+            return False
+        p = Path(storage_key).resolve(strict=False)
+        root = UPLOAD_ROOT.resolve(strict=False)
+        # Garante que o arquivo está dentro de uploads/
+        try:
+            p.relative_to(root)
+        except Exception:
+            return False
+        if p.is_file():
+            p.unlink(missing_ok=True)
+            return True
+        return False
+    except Exception:
+        return False
