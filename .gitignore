@@ -62,3 +62,7 @@ adapter-wa/qr.png
 # Opcional: se não quiser versionar o lockfile do adapter
 adapter-wa/package-lock.json
 
+
+# ND Imoveis - artefatos gerados
+nd-check*.json
+uploads/
