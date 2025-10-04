@@ -4,6 +4,7 @@ import AppShell from './layouts/AppShell'
 import ImoveisList from './pages/ImoveisList'
 import ImovelDetalhes from './pages/ImovelDetalhes'
 import ImovelNovo from './pages/ImovelNovo'
+import ImovelEditar from './pages/ImovelEditar'
 import LeadsList from './pages/LeadsList'
 import OpsDashboard from './pages/OpsDashboard'
 import ImportCsv from './pages/ImportCsv'
@@ -23,6 +24,7 @@ export default function App() {
           <Route path="imoveis" element={<ImoveisList />} />
           <Route path="imoveis/novo" element={<ImovelNovo />} />
           <Route path="imoveis/:id" element={<ImovelDetalhes />} />
+          <Route path="imoveis/:id/editar" element={<RequireAuth><ImovelEditar /></RequireAuth>} />
           <Route path="import" element={<RequireAuth><ImportCsv /></RequireAuth>} />
           <Route path="leads" element={<LeadsList />} />
           <Route path="ops" element={<OpsDashboard />} />
