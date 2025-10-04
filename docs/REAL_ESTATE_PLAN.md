@@ -1,17 +1,35 @@
-# Plano de Reestruturação – Imobiliária (AtendeJá)
+# Plano Resumido – Imobiliária (AtendeJá)
 
-## Objetivos
-- Simplificar e focar no domínio imobiliário (atendimento + marketing) com custo baixo.
-- Entregar rapidamente um MVP funcional: cadastro/listagem de imóveis e leads; funil básico via WhatsApp.
-- Preparar terreno para escalar: multi-tenant, storage de imagens e deploy em nuvem barata.
+## Objetivos (curto)
+- Focar domínio imobiliário e WhatsApp com baixo custo.
+- MVP com cadastro/listagem, leads e funil básico.
+- Base para escalar (multi-tenant, imagens, deploy simples).
 
-## Stack (MVP)
-- Backend: FastAPI (Python 3.11)
-- Banco: PostgreSQL (Neon/Railway em produção; Docker local)
-- Imagens: Cloudflare R2 (S3 compatível) – iniciar aceitando URLs; upload com URL pré-assinada em etapa posterior
-- Hospedagem API: Railway/Render (deploy via Docker)
-- Logs: structlog (JSON)
-- Filas: adiado para pós-MVP (evitar custo e complexidade)
+## Stack
+- FastAPI (Python 3.11), PostgreSQL, structlog, httpx/respx.
+- Imagens: aceitar URLs agora; Cloudflare R2 futuramente.
+- Deploy: Railway/Render via Docker.
+
+## Endpoints chave (MVP)
+- `POST /re/imoveis`, `GET /re/imoveis`, `GET /re/imoveis/{id}/detalhes`, imagens por imóvel.
+- `POST /admin/re/imoveis/import-csv` (upsert por `external_id`).
+- ND Imóveis (admin): `import/ndimoveis/check|run|repair_*` para coleta/normalização.
+
+## Estado atual
+- Importação ND executada em lotes com sobrescrita de descrição e link curto (`?ref=EXTERNAL_ID`).
+- Import CSV validado (testes passando). Suíte completa do backend OK em `APP_ENV=test`.
+- Frontend: detalhes de imóvel OK; página de edição criada.
+
+## Próximos passos
+- Completar import ND (automação por páginas/ranges).
+- Otimizar scraping e proxy/cache de imagens.
+- Paginação com `X-Total-Count` e melhorias de UX (filtros, loading, placeholders).
+
+## Segurança e LGPD
+- Consentimento de lead; segredos em `.env` (não versionar); `RE_READ_ONLY` em produção.
+
+---
+Conteúdo detalhado legado segue abaixo apenas para referência; pode ser movido para um anexo em tarefa futura.
 
 ## Modelagem de Dados
 - re_properties: imóvel (tipo, finalidade, preço, localização, quartos etc.), ativo, timestamps
