@@ -135,6 +135,26 @@ class Lead(Base):
     preferences: Mapped[dict | None] = mapped_column(JSON, default=None)  # filtros desejados
     consent_lgpd: Mapped[bool] = mapped_column(Boolean, default=False)
 
+    # Status e timestamps de interação
+    status: Mapped[str] = mapped_column(String(32), default="novo", index=True)
+    last_inbound_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_outbound_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    status_updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    # Direcionamento e integrações
+    property_interest_id: Mapped[int | None] = mapped_column(ForeignKey("re_properties.id"), nullable=True, index=True)
+    contact_id: Mapped[int | None] = mapped_column(ForeignKey("contacts.id"), nullable=True, index=True)
+
+    # Preferências denormalizadas para filtros
+    finalidade: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
+    tipo: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    cidade: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
+    estado: Mapped[str | None] = mapped_column(String(2), nullable=True, index=True)
+    bairro: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
+    dormitorios: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    preco_min: Mapped[float | None] = mapped_column(Float, nullable=True, index=True)
+    preco_max: Mapped[float | None] = mapped_column(Float, nullable=True, index=True)
+
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 

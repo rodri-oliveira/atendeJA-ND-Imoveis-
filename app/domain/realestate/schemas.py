@@ -195,6 +195,18 @@ class LeadCreate(BaseModel):
     origem: Optional[str] = Field(default="whatsapp")
     preferencias: Optional[dict] = None
     consentimento_lgpd: bool = Field(default=False)
+    # Direcionamento/integração
+    property_interest_id: Optional[int] = None
+    contact_id: Optional[int] = None
+    # Filtros denormalizados (segmentação)
+    finalidade: Optional[PropertyPurpose] = None
+    tipo: Optional[PropertyType] = None
+    cidade: Optional[str] = None
+    estado: Optional[str] = None
+    bairro: Optional[str] = None
+    dormitorios: Optional[int] = None
+    preco_min: Optional[float] = None
+    preco_max: Optional[float] = None
 
     model_config = {
         "json_schema_extra": {
@@ -225,6 +237,24 @@ class LeadOut(BaseModel):
     email: Optional[str]
     origem: Optional[str]
     preferencias: Optional[dict]
+    consentimento_lgpd: Optional[bool] = None
+    # Status e timestamps
+    status: Optional[str] = None
+    last_inbound_at: Optional[datetime] = None
+    last_outbound_at: Optional[datetime] = None
+    status_updated_at: Optional[datetime] = None
+    # Direcionamento/integração
+    property_interest_id: Optional[int] = None
+    contact_id: Optional[int] = None
+    # Filtros denormalizados (segmentação)
+    finalidade: Optional[PropertyPurpose] = None
+    tipo: Optional[PropertyType] = None
+    cidade: Optional[str] = None
+    estado: Optional[str] = None
+    bairro: Optional[str] = None
+    dormitorios: Optional[int] = None
+    preco_min: Optional[float] = None
+    preco_max: Optional[float] = None
 
     class Config:
         from_attributes = True

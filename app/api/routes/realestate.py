@@ -189,7 +189,7 @@ def update_property(property_id: int, payload: ImovelAtualizar, db: Session = De
 )
 def create_lead(payload: LeadCreate, db: Session = Depends(get_db)):
     tenant_id = int(1) if settings.DEFAULT_TENANT_ID == "default" else 1
-    data = payload.model_dump()
+    data = payload.model_dump(exclude_unset=True)
     lead = Lead(
         tenant_id=tenant_id,
         name=data.get("nome"),
@@ -198,6 +198,18 @@ def create_lead(payload: LeadCreate, db: Session = Depends(get_db)):
         source=data.get("origem"),
         preferences=data.get("preferencias"),
         consent_lgpd=data.get("consentimento_lgpd", False),
+        # direcionado/integrações
+        property_interest_id=data.get("property_interest_id"),
+        contact_id=data.get("contact_id"),
+        # filtros denormalizados
+        finalidade=(data.get("finalidade").value if data.get("finalidade") is not None else None),
+        tipo=(data.get("tipo").value if data.get("tipo") is not None else None),
+        cidade=data.get("cidade"),
+        estado=(data.get("estado").upper() if data.get("estado") else None),
+        bairro=data.get("bairro"),
+        dormitorios=data.get("dormitorios"),
+        preco_min=data.get("preco_min"),
+        preco_max=data.get("preco_max"),
     )
     db.add(lead)
     db.commit()
@@ -209,16 +221,73 @@ def create_lead(payload: LeadCreate, db: Session = Depends(get_db)):
         email=lead.email,
         origem=lead.source,
         preferencias=lead.preferences,
+        consentimento_lgpd=lead.consent_lgpd,
+        status=lead.status,
+        last_inbound_at=lead.last_inbound_at,
+        last_outbound_at=lead.last_outbound_at,
+        status_updated_at=lead.status_updated_at,
+        property_interest_id=lead.property_interest_id,
+        contact_id=lead.contact_id,
+        finalidade=lead.finalidade,
+        tipo=lead.tipo,
+        cidade=lead.cidade,
+        estado=lead.estado,
+        bairro=lead.bairro,
+        dormitorios=lead.dormitorios,
+        preco_min=lead.preco_min,
+        preco_max=lead.preco_max,
     )
 
 @router.get(
     "/leads",
     response_model=List[LeadOut],
     summary="Listar leads",
-    description="Lista leads.",
+    description="Lista leads com filtros básicos.",
 )
-def list_leads(db: Session = Depends(get_db)):
-    rows = db.query(Lead).all()
+def list_leads(
+    db: Session = Depends(get_db),
+    status: Optional[str] = Query(None),
+    finalidade: Optional[PropertyPurpose] = Query(None),
+    tipo: Optional[PropertyType] = Query(None),
+    cidade: Optional[str] = Query(None),
+    estado: Optional[str] = Query(None),
+    bairro: Optional[str] = Query(None),
+    dormitorios: Optional[int] = Query(None),
+    preco_min: Optional[float] = Query(None),
+    preco_max: Optional[float] = Query(None),
+    direcionado: Optional[bool] = Query(None, description="Se True, apenas leads com property_interest_id"),
+):
+    q = db.query(Lead)
+    if status:
+        q = q.filter(Lead.status == status)
+    if finalidade:
+        q = q.filter(Lead.finalidade == finalidade.value)
+    if tipo:
+        q = q.filter(Lead.tipo == tipo.value)
+    if cidade:
+        c = (cidade or "").strip()
+        if c:
+            q = q.filter(Lead.cidade.ilike(f"%{c}%"))
+    if estado:
+        uf = (estado or "").strip().upper()
+        if uf:
+            q = q.filter(Lead.estado == uf)
+    if bairro:
+        b = (bairro or "").strip()
+        if b:
+            q = q.filter(Lead.bairro.ilike(f"%{b}%"))
+    if dormitorios is not None:
+        q = q.filter(Lead.dormitorios == dormitorios)
+    if preco_min is not None:
+        q = q.filter(Lead.preco_min >= preco_min)
+    if preco_max is not None:
+        q = q.filter(Lead.preco_max <= preco_max)
+    if direcionado is True:
+        q = q.filter(Lead.property_interest_id.isnot(None))
+    if direcionado is False:
+        q = q.filter(Lead.property_interest_id.is_(None))
+
+    rows = q.order_by(Lead.id.desc()).all()
     return [
         LeadOut(
             id=r.id,
@@ -227,6 +296,21 @@ def list_leads(db: Session = Depends(get_db)):
             email=r.email,
             origem=r.source,
             preferencias=r.preferences,
+            consentimento_lgpd=r.consent_lgpd,
+            status=r.status,
+            last_inbound_at=r.last_inbound_at,
+            last_outbound_at=r.last_outbound_at,
+            status_updated_at=r.status_updated_at,
+            property_interest_id=r.property_interest_id,
+            contact_id=r.contact_id,
+            finalidade=r.finalidade,
+            tipo=r.tipo,
+            cidade=r.cidade,
+            estado=r.estado,
+            bairro=r.bairro,
+            dormitorios=r.dormitorios,
+            preco_min=r.preco_min,
+            preco_max=r.preco_max,
         )
         for r in rows
     ]
