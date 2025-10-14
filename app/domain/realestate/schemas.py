@@ -1,6 +1,6 @@
 from __future__ import annotations
 from typing import List, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 from pydantic.functional_validators import field_validator
 from datetime import datetime
 from app.domain.realestate.models import PropertyType, PropertyPurpose
@@ -105,8 +105,7 @@ class ImovelSaida(BaseModel):
     ativo: bool
     cover_image_url: Optional[str] = None
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class ImovelAtualizar(BaseModel):
@@ -164,8 +163,7 @@ class ImagemSaida(BaseModel):
     is_capa: bool
     ordem: int
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class ImovelDetalhes(BaseModel):
@@ -207,6 +205,13 @@ class LeadCreate(BaseModel):
     dormitorios: Optional[int] = None
     preco_min: Optional[float] = None
     preco_max: Optional[float] = None
+    # Campanha (opcional)
+    campaign_source: Optional[str] = None
+    campaign_medium: Optional[str] = None
+    campaign_name: Optional[str] = None
+    campaign_content: Optional[str] = None
+    landing_url: Optional[str] = None
+    external_property_id: Optional[str] = None
 
     model_config = {
         "json_schema_extra": {
@@ -255,9 +260,15 @@ class LeadOut(BaseModel):
     dormitorios: Optional[int] = None
     preco_min: Optional[float] = None
     preco_max: Optional[float] = None
+    # Campanha (atribuição)
+    campaign_source: Optional[str] = None
+    campaign_medium: Optional[str] = None
+    campaign_name: Optional[str] = None
+    campaign_content: Optional[str] = None
+    landing_url: Optional[str] = None
+    external_property_id: Optional[str] = None
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class LeadStagingIn(BaseModel):

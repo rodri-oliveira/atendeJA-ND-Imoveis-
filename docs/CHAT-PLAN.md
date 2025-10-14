@@ -12,6 +12,15 @@
 - **Horário do humano**: 09h–19h (configurável em tela futura). Chatbot responde 24/7.
 - **Não responder**: se o lead não responder por **24h** após a última mensagem, classificar `sem_resposta_24h`. Ao retomar a conversa em qualquer momento, o lead deve ser atualizado no banco (status e timestamps) para relatórios.
 
+## Status Atual (implementação)
+- Dependência de banco de dados centralizada via `app.api.deps.get_db`.
+- `tests/conftest.py` sobrescreve apenas `app.api.deps.get_db` para isolamento e controle dos testes.
+- Rotas atualizadas para usar `Depends(get_db)`:
+  - Públicas e MCP: `app/api/routes/realestate.py`, `app/api/routes/mcp.py`.
+  - Administrativas: `app/api/routes/admin.py` (migrado), `app/api/routes/admin_realestate.py` (parcialmente centralizado; alguns fluxos de import ainda usam `SessionLocal`).
+- Migração Pydantic v2: schemas com `from_attributes` atualizados para `ConfigDict` (removendo avisos de depreciação).
+- Suíte de testes (`pytest -q`): todos passando, sem avisos de Pydantic pendentes.
+
 ## Fase 1 — Receptivo (prioridade)
 ### Fluxo Conversacional (alta visão)
 1) Boas-vindas + consentimento LGPD.
@@ -93,12 +102,19 @@ Ao receber uma mensagem do lead:
 ## Configurações (MVP)
 - Horário humano (09h–19h) — tela de ajustes futura.
 - Flags: `WINDOW_24H_ENABLED`, `WA_RATE_LIMIT_*`, `RE_READ_ONLY` (produção), `DEFAULT_TENANT_ID`.
+- Dependência de DB: `get_db` centralizado em `app.api.deps`; nos testes, sobrescrito via `tests/conftest.py`.
 
 ## Roadmap Resumido
 - F1. Receptivo + simulador + testes → produção receptivo.
 - F2. Tela de campanhas (simulador), métricas e relatórios.
 - F3. Templates Meta (campanhas reais) + notificações para equipe.
 - F4. Integrações (CRM/e-mail), melhorias e escalabilidade.
+
+## Próximas Ações (engenharia)
+- Uniformizar `admin_realestate.py`: migrar blocos restantes de `SessionLocal()` para `Depends(get_db)` quando aplicável.
+- Revisar códigos de erro administrativos (ex.: mapear conflitos para `409 Conflict`).
+- Documentação técnica breve (postergar): registrar padrão de dependência de DB e overrides de teste no `README-PT.md`.
+- Observabilidade: granularidade de logs em importação e backfills; métricas por status de lead.
 
 ## Dúvidas Abertas
 - Texto exato do consentimento LGPD (padrão institucional do cliente?).

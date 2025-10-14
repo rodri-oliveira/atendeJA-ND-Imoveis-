@@ -7,17 +7,38 @@ from app.domain.realestate.mappers import to_imovel_dict
 from app.domain.realestate.utils import normalize_image_url
 from app.services.image_storage import delete_file
 from app.core.config import settings
+from app.repositories.models import Tenant
 
 
-def _resolve_tenant_id() -> int:
+def _resolve_tenant_id(db: Session) -> int:
+    """Resolve o tenant ativo para operações de imóveis.
+
+    - Em ambiente de teste, usa/garante um tenant chamado 'test' para isolar dados.
+    - Caso DEFAULT_TENANT_ID seja um número, usa diretamente esse ID.
+    - Caso contrário, procura/cria o tenant pelo nome informado em DEFAULT_TENANT_ID.
+    """
     try:
-        return int(settings.DEFAULT_TENANT_ID)
+        tenant_name = settings.DEFAULT_TENANT_ID
+        if (settings.APP_ENV or "").lower() == "test":
+            tenant_name = "test"
+        # Se for numérico, usar diretamente
+        try:
+            return int(tenant_name)
+        except Exception:
+            pass
+        # Resolver por nome
+        t = db.query(Tenant).filter(Tenant.name == tenant_name).first()
+        if not t:
+            t = Tenant(name=tenant_name)
+            db.add(t)
+            db.flush()
+        return int(t.id)
     except Exception:
         return 1
 
 
 def create_property(db: Session, data: Dict[str, Any]) -> Property:
-    tenant_id = _resolve_tenant_id()
+    tenant_id = _resolve_tenant_id(db)
     prop = Property(
         tenant_id=tenant_id,
         title=data["titulo"],
@@ -59,27 +80,36 @@ def list_properties(
     limit: int = 20,
     offset: int = 0,
 ) -> Tuple[List[Dict[str, Any]], int]:
-    stmt = select(Property).where(Property.is_active == True)  # noqa: E712
+    # Monta condições base (evita duplicação entre consulta e contagem)
+    tenant_id = _resolve_tenant_id(db)
+    conds = [
+        Property.is_active == True,  # noqa: E712
+        Property.tenant_id == tenant_id,
+    ]
     if finalidade:
-        stmt = stmt.where(Property.purpose == finalidade)
+        conds.append(Property.purpose == finalidade)
     if tipo:
-        stmt = stmt.where(Property.type == tipo)
+        conds.append(Property.type == tipo)
     if cidade:
         c = (cidade or "").strip()
         if c:
-            stmt = stmt.where(Property.address_city.ilike(f"%{c}%"))
+            # Filtro por cidade tolerante (substring), conforme plano
+            conds.append(Property.address_city.ilike(f"%{c}%"))
     if estado:
         uf = (estado or "").strip().upper()
         if uf:
-            stmt = stmt.where(Property.address_state == uf)
+            conds.append(Property.address_state == uf)
     if preco_min is not None:
-        stmt = stmt.where(Property.price >= preco_min)
+        conds.append(Property.price >= preco_min)
     if preco_max is not None:
-        stmt = stmt.where(Property.price <= preco_max)
+        conds.append(Property.price <= preco_max)
     if dormitorios_min is not None:
-        stmt = stmt.where(Property.bedrooms >= dormitorios_min)
+        conds.append(Property.bedrooms >= dormitorios_min)
 
+    # Consulta principal
+    stmt = select(Property).where(*conds)
     if only_with_cover:
+        # Garante que apenas imóveis com ao menos uma imagem entrem no resultado
         stmt = stmt.join(PropertyImage, PropertyImage.property_id == Property.id).distinct()
 
     try:
@@ -87,9 +117,13 @@ def list_properties(
     except Exception:
         stmt = stmt.order_by(Property.id.desc())
 
-    # total filtrado
-    stmt_count = stmt.order_by(None)
-    total = db.execute(select(func.count()).select_from(stmt_count.subquery())).scalar_one()
+    # Contagem robusta baseada na mesma consulta/joins do resultado (IDs distintos)
+    ids_stmt = select(Property.id).where(*conds)
+    if only_with_cover:
+        ids_stmt = ids_stmt.join(PropertyImage, PropertyImage.property_id == Property.id).distinct()
+    else:
+        ids_stmt = ids_stmt.distinct()
+    total = db.execute(select(func.count()).select_from(ids_stmt.subquery())).scalar_one()
 
     rows = db.execute(stmt.limit(limit).offset(offset)).scalars().all()
 
@@ -114,6 +148,17 @@ def list_properties(
             cover_url = None
         out.append(to_imovel_dict(r, cover_url))
 
+    try:
+        import structlog
+        log = structlog.get_logger()
+        log.info(
+            "re_list_service_total",
+            tenant_id=int(tenant_id),
+            only_with_cover=bool(only_with_cover),
+            total=int(total),
+        )
+    except Exception:
+        pass
     return out, int(total)
 
 

@@ -48,6 +48,8 @@ class Property(Base):
     external_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
     source: Mapped[str | None] = mapped_column(String(64), nullable=True)
     updated_at_source: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Código interno de referência (ex.: A1273)
+    ref_code: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
 
     # Localização (colunas normalizadas para filtros + JSON opcional)
     address_city: Mapped[str] = mapped_column(String(120), index=True)
@@ -121,6 +123,18 @@ class PropertyAmenity(Base):
     )
 
 
+class PropertyExternalRef(Base):
+    __tablename__ = "re_property_external_refs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[int] = mapped_column(Integer, index=True)
+    provider: Mapped[str] = mapped_column(String(32), index=True)  # chavesnamao, facebook, instagram, etc.
+    external_id: Mapped[str] = mapped_column(String(160))
+    url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    property_id: Mapped[int] = mapped_column(ForeignKey("re_properties.id"), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
 class Lead(Base):
     __tablename__ = "re_leads"
 
@@ -134,6 +148,13 @@ class Lead(Base):
 
     preferences: Mapped[dict | None] = mapped_column(JSON, default=None)  # filtros desejados
     consent_lgpd: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Campanhas / atribuição
+    campaign_source: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    campaign_medium: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    campaign_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    campaign_content: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    landing_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    external_property_id: Mapped[str | None] = mapped_column(String(160), nullable=True)
 
     # Status e timestamps de interação
     status: Mapped[str] = mapped_column(String(32), default="novo", index=True)

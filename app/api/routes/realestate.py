@@ -30,7 +30,7 @@ from app.domain.realestate.schemas import (
     LeadStagingIn,
     LeadStagingOut,
 )
-from app.repositories.db import SessionLocal
+from app.api.deps import get_db
 from app.core.config import settings
 from app.domain.realestate.models import (
     Property,
@@ -42,15 +42,6 @@ from app.domain.realestate.models import (
 
 router = APIRouter()
 log = structlog.get_logger()
-
-
-# Dependency: DB session por request
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
 
 
 # Schemas (simples para MVP)
@@ -112,6 +103,20 @@ def list_properties(
         limit=limit,
         offset=offset,
     )
+    try:
+        log.info(
+            "re_list_total",
+            finalidade=(finalidade.value if finalidade else None),
+            tipo=(tipo.value if tipo else None),
+            cidade=cidade,
+            estado=estado,
+            only_with_cover=only_with_cover,
+            limit=limit,
+            offset=offset,
+            total=int(total),
+        )
+    except Exception:
+        pass
     response.headers["X-Total-Count"] = str(total)
     return [ImovelSaida(**it) for it in items]
 
@@ -210,6 +215,13 @@ def create_lead(payload: LeadCreate, db: Session = Depends(get_db)):
         dormitorios=data.get("dormitorios"),
         preco_min=data.get("preco_min"),
         preco_max=data.get("preco_max"),
+        # campanha
+        campaign_source=data.get("campaign_source"),
+        campaign_medium=data.get("campaign_medium"),
+        campaign_name=data.get("campaign_name"),
+        campaign_content=data.get("campaign_content"),
+        landing_url=data.get("landing_url"),
+        external_property_id=data.get("external_property_id"),
     )
     db.add(lead)
     db.commit()
@@ -236,6 +248,12 @@ def create_lead(payload: LeadCreate, db: Session = Depends(get_db)):
         dormitorios=lead.dormitorios,
         preco_min=lead.preco_min,
         preco_max=lead.preco_max,
+        campaign_source=lead.campaign_source,
+        campaign_medium=lead.campaign_medium,
+        campaign_name=lead.campaign_name,
+        campaign_content=lead.campaign_content,
+        landing_url=lead.landing_url,
+        external_property_id=lead.external_property_id,
     )
 
 @router.get(
@@ -256,6 +274,7 @@ def list_leads(
     preco_min: Optional[float] = Query(None),
     preco_max: Optional[float] = Query(None),
     direcionado: Optional[bool] = Query(None, description="Se True, apenas leads com property_interest_id"),
+    campaign_source: Optional[str] = Query(None, description="Origem de campanha (ex.: facebook, chavesnamao)"),
 ):
     q = db.query(Lead)
     if status:
@@ -286,6 +305,8 @@ def list_leads(
         q = q.filter(Lead.property_interest_id.isnot(None))
     if direcionado is False:
         q = q.filter(Lead.property_interest_id.is_(None))
+    if campaign_source:
+        q = q.filter(Lead.campaign_source == campaign_source)
 
     rows = q.order_by(Lead.id.desc()).all()
     return [
@@ -311,11 +332,15 @@ def list_leads(
             dormitorios=r.dormitorios,
             preco_min=r.preco_min,
             preco_max=r.preco_max,
+            campaign_source=r.campaign_source,
+            campaign_medium=r.campaign_medium,
+            campaign_name=r.campaign_name,
+            campaign_content=r.campaign_content,
+            landing_url=r.landing_url,
+            external_property_id=r.external_property_id,
         )
         for r in rows
     ]
-
-
 # --- Staging de Leads (MVP sem tabela dedicada) ---
  # --
 

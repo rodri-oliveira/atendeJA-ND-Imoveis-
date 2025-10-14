@@ -3,6 +3,7 @@ from pydantic import BaseModel, Field
 from typing import Literal
 from app.api.deps import require_role_admin
 from app.repositories.db import SessionLocal
+from app.api.deps import get_db
 from sqlalchemy import select, func, delete
 from app.domain.realestate import models as re_models
 from app.domain.realestate.sources import ndimoveis as nd
@@ -11,6 +12,7 @@ import httpx
 import re
 import time
 from urllib.parse import urljoin
+import contextlib
 from sqlalchemy.orm import Session
 from app.domain.realestate.services.image_service import (
     delete_property_image,
@@ -36,12 +38,7 @@ def ping():
 
 
 # ===== Dependência DB (admin) =====
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+# Centralizado via app.api.deps.get_db
 
 
 # ====== Gestão de imagens (admin) ======
@@ -149,7 +146,7 @@ def _extract_external_id_from_detail(html: str) -> str | None:
 
 
 @router.post("/import/ndimoveis/check", response_model=NDCheckOut)
-def re_nd_check(payload: NDCheckIn):
+def re_nd_check(payload: NDCheckIn, db: Session = Depends(get_db)):
     try:
         fins = ["venda", "locacao"] if payload.finalidade == "both" else [payload.finalidade]
         discovered_urls: list[str] = []
@@ -191,35 +188,34 @@ def re_nd_check(payload: NDCheckIn):
             new_items: list[dict] = []
             existing_items: list[dict] = []
 
-            with SessionLocal() as db:
-                # garante tenant default via nome em settings (já usado no admin.py)
-                from app.api.routes.admin import _get_or_create_default_tenant  # evitar duplicação
+            # garante tenant default via nome em settings (já usado no admin.py)
+            from app.api.routes.admin import _get_or_create_default_tenant  # evitar duplicação
 
-                tenant = _get_or_create_default_tenant(db)
-                for url in discovered_urls:
-                    ext_id: str | None = None
-                    if payload.per_detail:
-                        try:
-                            dr = client.get(url)
-                            if dr.status_code == 200:
-                                dto = nd.parse_detail(dr.text, url)
-                                ext_id = dto.external_id
-                        except Exception:
-                            ext_id = None
-                        time.sleep(payload.throttle_ms / 1000.0)
+            tenant = _get_or_create_default_tenant(db)
+            for url in discovered_urls:
+                ext_id: str | None = None
+                if payload.per_detail:
+                    try:
+                        dr = client.get(url)
+                        if dr.status_code == 200:
+                            dto = nd.parse_detail(dr.text, url)
+                            ext_id = dto.external_id
+                    except Exception:
+                        ext_id = None
+                    time.sleep(payload.throttle_ms / 1000.0)
 
-                    item = {"url": url}
-                    if ext_id:
-                        item["external_id"] = ext_id
-                        stmt = select(re_models.Property.id).where(
-                            re_models.Property.tenant_id == tenant.id,
-                            re_models.Property.source == "ndimoveis",
-                            re_models.Property.external_id == ext_id,
-                        )
-                        exists = db.execute(stmt).scalar_one_or_none()
-                        (existing_items if exists else new_items).append(item)
-                    else:
-                        new_items.append(item)
+                item = {"url": url}
+                if ext_id:
+                    item["external_id"] = ext_id
+                    stmt = select(re_models.Property.id).where(
+                        re_models.Property.tenant_id == tenant.id,
+                        re_models.Property.source == "ndimoveis",
+                        re_models.Property.external_id == ext_id,
+                    )
+                    exists = db.execute(stmt).scalar_one_or_none()
+                    (existing_items if exists else new_items).append(item)
+                else:
+                    new_items.append(item)
 
         return NDCheckOut(
             discovered=len(discovered_urls),
@@ -250,7 +246,7 @@ class NDRunOut(BaseModel):
 
 
 @router.post("/import/ndimoveis/run", response_model=NDRunOut)
-def re_nd_run(payload: NDRunIn):
+def re_nd_run(payload: NDRunIn, db: Session = Depends(get_db)):
     try:
         fins = ["venda", "locacao"] if payload.finalidade == "both" else [payload.finalidade]
         discovered_urls: list[str] = []
@@ -292,32 +288,31 @@ def re_nd_run(payload: NDRunIn):
             created = updated = images_created = processed = 0
             sample_ids: list[str] = []
 
-            with SessionLocal() as db:
-                tenant = _get_or_create_default_tenant(db)
-                for url in unique_urls:
-                    # Detalhe
-                    try:
-                        dr = client.get(url)
-                        if dr.status_code != 200:
-                            continue
-                        html = dr.text
-                    except Exception:
+            tenant = _get_or_create_default_tenant(db)
+            for url in unique_urls:
+                # Detalhe
+                try:
+                    dr = client.get(url)
+                    if dr.status_code != 200:
                         continue
-                    time.sleep(payload.throttle_ms / 1000.0)
+                    html = dr.text
+                except Exception:
+                    continue
+                time.sleep(payload.throttle_ms / 1000.0)
 
-                    dto = nd.parse_detail(html, url)
-                    if dto.external_id:
-                        sample_ids.append(dto.external_id)
+                dto = nd.parse_detail(html, url)
+                if dto.external_id:
+                    sample_ids.append(dto.external_id)
 
-                    status, imgs_created = upsert_property(db, tenant.id, dto)
-                    if status == "created":
-                        created += 1
-                    else:
-                        updated += 1
-                    images_created += imgs_created
-                    processed += 1
+                status, imgs_created = upsert_property(db, tenant.id, dto)
+                if status == "created":
+                    created += 1
+                else:
+                    updated += 1
+                images_created += imgs_created
+                processed += 1
 
-                db.commit()
+            db.commit()
 
         return NDRunOut(
             created=created,
@@ -575,18 +570,17 @@ class RepairByIdOut(BaseModel):
 
 
 @router.post("/import/ndimoveis/repair_by_id", response_model=RepairByIdOut)
-def re_nd_repair_by_id(payload: RepairByIdIn):
+def re_nd_repair_by_id(payload: RepairByIdIn, db: Session = Depends(get_db)):
     try:
         from app.api.routes.admin import _get_or_create_default_tenant
-        with SessionLocal() as db:
-            tenant = _get_or_create_default_tenant(db)
-            prop = db.get(re_models.Property, payload.property_id)
-            if not prop:
-                raise HTTPException(status_code=404, detail="property_not_found")
-            if (prop.source or "").lower() != "ndimoveis":
-                raise HTTPException(status_code=400, detail="unsupported_source")
-            if not prop.external_id:
-                raise HTTPException(status_code=400, detail="external_id_missing")
+        tenant = _get_or_create_default_tenant(db)
+        prop = db.get(re_models.Property, payload.property_id)
+        if not prop:
+            raise HTTPException(status_code=404, detail="property_not_found")
+        if (prop.source or "").lower() != "ndimoveis":
+            raise HTTPException(status_code=400, detail="unsupported_source")
+        if not prop.external_id:
+            raise HTTPException(status_code=400, detail="external_id_missing")
 
         target_eid = str(prop.external_id)
         fins = ["venda", "locacao"]
@@ -610,10 +604,8 @@ def re_nd_repair_by_id(payload: RepairByIdIn):
                                     continue
                                 dto = nd.parse_detail(dr.text, durl)
                                 if dto.external_id and str(dto.external_id) == target_eid:
-                                    with SessionLocal() as db2:
-                                        tenant2 = _get_or_create_default_tenant(db2)
-                                        st, imgs = upsert_property(db2, tenant2.id, dto)
-                                        db2.commit()
+                                    st, imgs = upsert_property(db, tenant.id, dto)
+                                    db.commit()
                                     return RepairByIdOut(repaired=True, images_created=imgs, external_id=target_eid, url=durl)
                             except Exception:
                                 continue
@@ -1095,7 +1087,7 @@ class NDFromUrlsOut(BaseModel):
 
 
 @router.post("/import/ndimoveis/from_urls", response_model=NDFromUrlsOut)
-def re_nd_import_from_urls(payload: NDFromUrlsIn):
+def re_nd_import_from_urls(payload: NDFromUrlsIn, db: Session = Depends(get_db)):
     try:
         if not payload.urls:
             return NDFromUrlsOut(created=0, updated=0, images_created=0, processed=0, sampled_external_ids=[], errors=[])
@@ -1104,29 +1096,28 @@ def re_nd_import_from_urls(payload: NDFromUrlsIn):
         sample_ids: list[str] = []
         errs: list[dict] = []
         with httpx.Client(timeout=25.0, headers={"User-Agent": "AtendeJA-Bot/1.0"}, verify=False) as client:
-            with SessionLocal() as db:
-                tenant = _get_or_create_default_tenant(db)
-                for url in payload.urls:
-                    try:
-                        r = client.get(url)
-                        if r.status_code != 200:
-                            errs.append({"url": url, "status": r.status_code})
-                            continue
-                        dto = nd.parse_detail(r.text, url)
-                        if dto.external_id:
-                            sample_ids.append(dto.external_id)
-                        st, imgs = upsert_property(db, tenant.id, dto)
-                        if st == "created":
-                            created += 1
-                        else:
-                            updated += 1
-                        images_created += imgs
-                        processed += 1
-                    except Exception as e:  # noqa: BLE001
-                        errs.append({"url": url, "error": str(e)})
-                    finally:
-                        time.sleep(max(0, payload.throttle_ms) / 1000.0)
-                db.commit()
+            tenant = _get_or_create_default_tenant(db)
+            for url in payload.urls:
+                try:
+                    r = client.get(url)
+                    if r.status_code != 200:
+                        errs.append({"url": url, "status": r.status_code})
+                        continue
+                    dto = nd.parse_detail(r.text, url)
+                    if dto.external_id:
+                        sample_ids.append(dto.external_id)
+                    st, imgs = upsert_property(db, tenant.id, dto)
+                    if st == "created":
+                        created += 1
+                    else:
+                        updated += 1
+                    images_created += imgs
+                    processed += 1
+                except Exception as e:  # noqa: BLE001
+                    errs.append({"url": url, "error": str(e)})
+                finally:
+                    time.sleep(max(0, payload.throttle_ms) / 1000.0)
+            db.commit()
         return NDFromUrlsOut(
             created=created,
             updated=updated,
@@ -1160,7 +1151,7 @@ class NDFromUrlsSafeOut(BaseModel):
 
 
 @router.post("/import/ndimoveis/from_urls_safe", response_model=NDFromUrlsSafeOut)
-def re_nd_import_from_urls_safe(payload: NDFromUrlsSafeIn):
+def re_nd_import_from_urls_safe(payload: NDFromUrlsSafeIn, db: Session = Depends(get_db)):
     """Atualiza SOMENTE description (se vazia por padrão) e address_json.source_url, sem tocar em preço, tipo, imagens."""
     try:
         if not payload.urls:
@@ -1170,7 +1161,7 @@ def re_nd_import_from_urls_safe(payload: NDFromUrlsSafeIn):
         not_found: list[str] = []
         errs: list[dict] = []
         with httpx.Client(timeout=25.0, headers={"User-Agent": "AtendeJA-Bot/1.0"}, verify=False) as client:
-            with SessionLocal() as db:
+            with contextlib.nullcontext(db) as db:
                 tenant = _get_or_create_default_tenant(db)
                 for url in payload.urls:
                     try:
@@ -1333,7 +1324,7 @@ class NDBackfillAllOut(BaseModel):
 
 
 @router.post("/import/ndimoveis/backfill_all", response_model=NDBackfillAllOut)
-def re_nd_backfill_all(payload: NDBackfillAllIn, bg: BackgroundTasks):
+def re_nd_backfill_all(payload: NDBackfillAllIn, bg: BackgroundTasks, db: Session = Depends(get_db)):
     """
     Processa TODOS os imóveis da base (source=ndimoveis) em background:
     - Para cada imóvel, busca external_id
@@ -1345,7 +1336,7 @@ def re_nd_backfill_all(payload: NDBackfillAllIn, bg: BackgroundTasks):
     task_id = str(uuid.uuid4())
     
     from app.api.routes.admin import _get_or_create_default_tenant
-    with SessionLocal() as db:
+    with contextlib.nullcontext(db) as db:
         tenant = _get_or_create_default_tenant(db)
         stmt = select(re_models.Property.id, re_models.Property.external_id).where(
             re_models.Property.tenant_id == tenant.id,
@@ -1484,10 +1475,10 @@ class BackfillProgressOut(BaseModel):
 
 
 @router.get("/import/ndimoveis/backfill_progress", response_model=BackfillProgressOut)
-def re_nd_backfill_progress():
+def re_nd_backfill_progress(db: Session = Depends(get_db)):
     """Consulta direta no banco para ver quantos imóveis já têm descrição e source_url preenchidos."""
     from app.api.routes.admin import _get_or_create_default_tenant
-    with SessionLocal() as db:
+    with contextlib.nullcontext(db) as db:
         tenant = _get_or_create_default_tenant(db)
         
         # Total

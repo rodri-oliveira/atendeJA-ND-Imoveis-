@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from sqlalchemy import select
 from app.repositories.db import SessionLocal
+from app.api.deps import get_db
 from app.core.config import settings
 from app.domain.realestate.models import (
     Property,
@@ -17,13 +18,7 @@ router = APIRouter()
 
 
 # --- Dep ---
-
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+# Centralizado via app.api.deps.get_db
 
 
 # --- Schemas ---
@@ -167,6 +162,7 @@ def t_detalhar_imovel(db: Session, imovel_id: int) -> Dict[str, Any]:
 
 
 def t_criar_lead(db: Session, dados: Dict[str, Any]) -> Dict[str, Any]:
+    # Alinha com /re/leads: aceita direcionamento, filtros denormalizados e campanha
     lead = Lead(
         tenant_id=1,
         name=dados.get("nome"),
@@ -175,6 +171,25 @@ def t_criar_lead(db: Session, dados: Dict[str, Any]) -> Dict[str, Any]:
         source=dados.get("origem", "mcp"),
         preferences=dados.get("preferencias"),
         consent_lgpd=bool(dados.get("consentimento_lgpd", False)),
+        # Direcionamento/integração
+        property_interest_id=dados.get("property_interest_id"),
+        contact_id=dados.get("contact_id"),
+        external_property_id=dados.get("external_property_id"),
+        # Filtros denormalizados (segmentação)
+        finalidade=dados.get("finalidade"),
+        tipo=dados.get("tipo"),
+        cidade=dados.get("cidade"),
+        estado=(dados.get("estado") or None),
+        bairro=dados.get("bairro"),
+        dormitorios=dados.get("dormitorios"),
+        preco_min=dados.get("preco_min"),
+        preco_max=dados.get("preco_max"),
+        # Campanha (atribuição)
+        campaign_source=dados.get("campaign_source"),
+        campaign_medium=dados.get("campaign_medium"),
+        campaign_name=dados.get("campaign_name"),
+        campaign_content=dados.get("campaign_content"),
+        landing_url=dados.get("landing_url"),
     )
     db.add(lead)
     db.commit()

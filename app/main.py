@@ -15,18 +15,17 @@ from app.api.routes.admin_realestate import router as admin_realestate_router
 from app.api.routes.metrics import router as metrics_router
 from app.api.routes.llm import router as llm_router
 from app.api.routes.auth import router as auth_router
-from app.repositories.db import engine
+from app.repositories.db import SessionLocal, engine
+from app.api.deps import get_db
+
+
 from app.repositories.models import Base, User, UserRole
 import app.domain.realestate.models  # noqa: F401 - importa modelos para registrar no metadata
 from contextlib import asynccontextmanager
 import structlog
 import traceback
 from fastapi.responses import JSONResponse
-import structlog
-import traceback
-from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
-from app.repositories.db import SessionLocal
 from app.core.security import get_password_hash
 
 configure_logging()
@@ -36,7 +35,17 @@ log = structlog.get_logger()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
-    if settings.APP_ENV != "test":  # skip for tests to speed up
+    if (settings.APP_ENV or "").lower() == "test":
+        # Em testes, garantir schema limpo para isolar dados entre execuções
+        try:
+            Base.metadata.drop_all(bind=engine)
+        except Exception as e:
+            log.warning("metadata_drop_error", error=str(e))
+        try:
+            Base.metadata.create_all(bind=engine)
+        except Exception as e:
+            log.error("metadata_create_error", error=str(e))
+    else:
         Base.metadata.create_all(bind=engine)
         # Seed do usuário admin, se configurado
         try:
@@ -77,6 +86,8 @@ app = FastAPI(
     openapi_tags=tags_metadata,
     lifespan=lifespan,
 )
+
+app.dependency_overrides[get_db] = get_db
 
 @app.middleware("http")
 async def _http_logger(request, call_next):

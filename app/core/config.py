@@ -61,8 +61,12 @@ class Settings(BaseSettings):
 
     @property
     def DATABASE_URL(self) -> str:
+        # Testes: usar SQLite local para isolar e acelerar a suíte
         if self.DATABASE_URL_OVERRIDE:
             return self.DATABASE_URL_OVERRIDE
+        if (self.APP_ENV or "").lower() == "test":
+            # Banco em memória para testes (isolado por execução)
+            return "sqlite:///:memory:"
         return (
             f"postgresql+psycopg2://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}"
             f"@{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
@@ -73,7 +77,6 @@ class Settings(BaseSettings):
         return f"redis://{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB}"
 
 
-@lru_cache
 def get_settings() -> Settings:
     return Settings()  # type: ignore
 
