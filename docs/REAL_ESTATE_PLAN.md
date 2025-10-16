@@ -92,7 +92,6 @@ Eventos de negócio (logs): lead.created, inquiry.created, visit.requested
   - `buscar_imoveis(params)` – usa `GET /re/imoveis`.
   - `detalhar_imovel(imovel_id)` – usa `GET /re/imoveis/{id}` + `GET /re/imoveis/{id}/imagens`.
   - `criar_lead(dados)` – usa `POST /re/leads`.
-  - `calcular_financiamento({preco, entrada_pct, prazo_meses, taxa_pct})` – cálculo local.
   - (próximas) `agendar_visita`, `enviar_campanha` (respeitando opt-in LGPD e templates aprovados).
 - Roteamento no webhook por flag: `MCP_ENABLED=true` delega interpretação ao MCP; fallback para funil determinístico em caso de falha.
 - Políticas: whitelist de tools por tenant, logs estruturados (`mcp.request`, `mcp.tool_call`, `mcp.response`), evitar dados sensíveis.

@@ -78,6 +78,98 @@ class SetActiveIn(BaseModel):
     ativo: bool = Field(...)
 
 
+# ====== Backfill de ref_code (admin) ======
+class BackfillRefCodeIn(BaseModel):
+    provider: Literal["ndimoveis", "any"] = "ndimoveis"
+    limit: int | None = Field(default=None, ge=1, le=5000)
+    dry_run: bool = False
+
+
+class BackfillRefCodeOut(BaseModel):
+    targeted: int
+    updated: int
+    conflicts: list[dict] = []
+    skipped_invalid: int = 0
+
+
+@router.post("/properties/backfill_ref_code", response_model=BackfillRefCodeOut)
+def re_properties_backfill_ref_code(payload: BackfillRefCodeIn):
+    """
+    Preenche `ref_code` para imóveis cujo `external_id` contém código no padrão ND IMÓVEIS (ex.: A738),
+    quando `ref_code` estiver vazio. Evita duplicidades por tenant.
+    """
+    try:
+        from app.api.routes.admin import _get_or_create_default_tenant
+        with SessionLocal() as db:
+            tenant = _get_or_create_default_tenant(db)
+            stmt = (
+                select(
+                    re_models.Property.id,
+                    re_models.Property.external_id,
+                    re_models.Property.ref_code,
+                )
+                .where(
+                    re_models.Property.tenant_id == tenant.id,
+                )
+            )
+            if payload.provider != "any":
+                stmt = stmt.where(re_models.Property.source == payload.provider)
+            stmt = stmt.where(re_models.Property.ref_code.is_(None))
+            stmt = stmt.where(re_models.Property.external_id.isnot(None))
+            if payload.limit:
+                stmt = stmt.limit(payload.limit)
+            rows = db.execute(stmt).all()
+
+            targeted = len(rows)
+            updated = 0
+            conflicts: list[dict] = []
+            skipped_invalid = 0
+
+            # Regex: letra + 2-6 dígitos (normalizado em ndimoveis.parse_detail)
+            rx = re.compile(r"^[A-Za-z][0-9]{2,6}$")
+
+            for pid, ext_id, _ in rows:
+                eid = (ext_id or "").strip()
+                if not eid or not rx.match(eid):
+                    skipped_invalid += 1
+                    continue
+                # Checar conflito (outro imóvel com mesmo ref_code)
+                exists_stmt = (
+                    select(re_models.Property.id)
+                    .where(
+                        re_models.Property.tenant_id == tenant.id,
+                        re_models.Property.ref_code == eid,
+                    )
+                    .limit(1)
+                )
+                existing = db.execute(exists_stmt).scalar_one_or_none()
+                if existing and int(existing) != int(pid):
+                    conflicts.append({"property_id": pid, "conflict_with": int(existing), "ref_code": eid})
+                    continue
+                if payload.dry_run:
+                    updated += 1
+                    continue
+                # Atualizar ref_code
+                prop = db.get(re_models.Property, int(pid))
+                if prop:
+                    prop.ref_code = eid
+                    try:
+                        db.add(prop)
+                        db.commit()
+                        updated += 1
+                    except Exception as e:  # índice único pode disparar conflito em corrida
+                        db.rollback()
+                        conflicts.append({"property_id": pid, "error": str(e), "ref_code": eid})
+
+            return BackfillRefCodeOut(
+                targeted=targeted, updated=updated, conflicts=conflicts, skipped_invalid=skipped_invalid
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail={"code": "backfill_ref_code_error", "message": str(e)})
+
+
 @router.patch("/imoveis/{property_id}/ativo")
 def admin_set_active(property_id: int, payload: SetActiveIn, db: Session = Depends(get_db)):
     try:

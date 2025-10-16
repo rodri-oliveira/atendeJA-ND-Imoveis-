@@ -6,6 +6,8 @@ from app.domain.realestate.models import Property
 def to_imovel_dict(p: Property, cover_image_url: Optional[str] = None) -> Dict[str, Any]:
     return {
         "id": p.id,
+        "ref_code": getattr(p, "ref_code", None),
+        "external_id": getattr(p, "external_id", None),
         "titulo": p.title,
         "tipo": p.type,
         "finalidade": p.purpose,

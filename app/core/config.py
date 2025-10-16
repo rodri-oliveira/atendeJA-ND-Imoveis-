@@ -22,7 +22,7 @@ class Settings(BaseSettings):
     WA_WEBHOOK_SECRET: str = ""
 
     # Database
-    POSTGRES_HOST: str = "postgres"
+    POSTGRES_HOST: str = "localhost"
     POSTGRES_PORT: int = 5432
     POSTGRES_DB: str = "atendeja"
     POSTGRES_USER: str = "atendeja"
@@ -31,7 +31,7 @@ class Settings(BaseSettings):
     DATABASE_URL_OVERRIDE: str = ""
 
     # Redis / Celery
-    REDIS_HOST: str = "redis"
+    REDIS_HOST: str = "localhost"
     REDIS_PORT: int = 6379
     REDIS_DB: int = 0
 
@@ -49,6 +49,8 @@ class Settings(BaseSettings):
     # LLM (Ollama/Local) – provider de IA para geração/chat (substituível)
     OLLAMA_BASE_URL: str = "http://localhost:11434"
     OLLAMA_DEFAULT_MODEL: str = "gemma3:1b"
+    # Integração MCP+LLM: quando ativo, MCP usa LLM para reescrever respostas
+    LLM_ENRICH_MCP: bool = False
 
     # Imóveis somente leitura (produção)
     RE_READ_ONLY: bool = False

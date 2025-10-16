@@ -1,6 +1,6 @@
 # Adapter WA (whatsapp-web.js) — POC local
 
-Este adaptador conecta ao WhatsApp Web usando whatsapp-web.js, mantém sessão persistida (LocalAuth) e encaminha mensagens para o backend (MCP /mcp/execute). Use apenas para desenvolvimento.
+Este adaptador conecta ao WhatsApp Web usando whatsapp-web.js, mantém sessão persistida (LocalAuth) e encaminha mensagens para o backend (MCP /api/v1/mcp/execute). Use apenas para desenvolvimento.
 
 ## Pré-requisitos
 - Node.js LTS
@@ -15,7 +15,7 @@ npm install
 ## Configuração
 Crie um arquivo `.env` dentro de `adapter-wa/` com:
 ```
-MCP_URL=http://localhost:8000/mcp/execute
+MCP_URL=http://localhost:8000/api/v1/mcp/execute
 MCP_TOKEN=
 MCP_TENANT_ID=default
 WA_SESSION_NAME=atendeja-wa

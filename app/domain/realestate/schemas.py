@@ -91,6 +91,8 @@ class ImovelCriar(BaseModel):
 
 class ImovelSaida(BaseModel):
     id: int
+    ref_code: Optional[str] = None
+    external_id: Optional[str] = None
     titulo: str
     tipo: PropertyType
     finalidade: PropertyPurpose
@@ -168,6 +170,8 @@ class ImagemSaida(BaseModel):
 
 class ImovelDetalhes(BaseModel):
     id: int
+    ref_code: Optional[str] = None
+    external_id: Optional[str] = None
     titulo: str
     descricao: Optional[str] = None
     tipo: PropertyType

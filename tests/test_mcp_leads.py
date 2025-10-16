@@ -10,6 +10,7 @@ client = TestClient(app)
 def test_mcp_criar_lead_basic():
     body = {
         "input": "",
+        "sender_id": "tester-001",
         "mode": "tool",
         "tool": "criar_lead",
         "params": {
@@ -21,7 +22,7 @@ def test_mcp_criar_lead_basic():
             "consentimento_lgpd": True,
         },
     }
-    r = client.post("/mcp/execute", json=body)
+    r = client.post("/api/v1/mcp/execute", json=body)
     assert r.status_code == 200, r.text
     data = r.json()
     assert data["message"] == "tool_executed"
@@ -49,6 +50,7 @@ def test_mcp_criar_lead_with_property_and_campaign():
 
     body = {
         "input": "",
+        "sender_id": "tester-002",
         "mode": "tool",
         "tool": "criar_lead",
         "params": {
@@ -72,7 +74,7 @@ def test_mcp_criar_lead_with_property_and_campaign():
             "campaign_name": "campanha_teste",
         },
     }
-    r = client.post("/mcp/execute", json=body)
+    r = client.post("/api/v1/mcp/execute", json=body)
     assert r.status_code == 200, r.text
     data = r.json()
     assert data["message"] == "tool_executed"

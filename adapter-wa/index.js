@@ -11,17 +11,35 @@ const fs = require('fs')
 const path = require('path')
 const qrcode = require('qrcode')
 const fetch = require('node-fetch')
+const puppeteer = require('puppeteer')
 const { Client, LocalAuth } = require('whatsapp-web.js')
 
 require('dotenv').config({ path: path.resolve(__dirname, '.env') })
 
 // Configurações via env
-const MCP_URL = process.env.MCP_URL || 'http://localhost:8000/mcp/execute'
+const MCP_URL = process.env.MCP_URL || 'http://localhost:8000/api/v1/mcp/execute'
 const MCP_TOKEN = process.env.MCP_TOKEN || ''
 const MCP_TENANT_ID = process.env.MCP_TENANT_ID || 'default'
 const WA_SESSION_NAME = process.env.WA_SESSION_NAME || 'atendeja-wa'
 const WA_QR_FILE = process.env.WA_QR_FILE || path.resolve(__dirname, 'qr.png')
 const RATE_S = parseInt(process.env.WA_RATE_LIMIT_PER_CONTACT_SECONDS || '2', 10)
+const OUTBOUND_ENABLED = String(process.env.WA_OUTBOUND_ENABLED || 'false').toLowerCase() === 'true'
+// Permitir auto-teste (processar mensagens fromMe)
+const ALLOW_FROM_ME = String(process.env.WA_ALLOW_FROM_ME || 'false').toLowerCase() === 'true'
+// Whitelist opcional de contatos permitidos (se vazio, atende todos)
+const ONLY_CONTACTS = String(process.env.WA_ONLY_CONTACTS || '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean)
+const allowedJids = new Set(
+  ONLY_CONTACTS.map((n) => {
+    if (n.includes('@')) return n.toLowerCase()
+    const digits = n.replace(/\D/g, '')
+    return `${digits}@c.us`
+  })
+)
+// Guard contra reprocessamento de mensagens antigas ao iniciar
+const START_TIME_MS = Date.now()
 
 // Rate limit simples em memória
 const lastByContact = new Map() // wa_id -> timestamp (ms)
@@ -33,11 +51,26 @@ function allowContact(wa_id) {
   return true
 }
 
+// Anti-eco: rastreia a última mensagem enviada pelo bot por chat
+const lastBotByChat = new Map() // chatId -> { body, ts }
+const ANTI_ECHO_WINDOW_MS = parseInt(process.env.WA_ANTI_ECHO_WINDOW_MS || '30000', 10)
+
 // Cliente WhatsApp com sessão persistente (sem abrir navegador visível)
+// Detecta caminho do navegador (Chromium baixado pelo Puppeteer ou Chrome local)
+let executablePath
+try {
+  executablePath = puppeteer.executablePath()
+} catch {}
+if (!executablePath) {
+  const winChrome = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe'
+  if (fs.existsSync(winChrome)) executablePath = winChrome
+}
+
 const client = new Client({
   authStrategy: new LocalAuth({ clientId: WA_SESSION_NAME }),
   puppeteer: {
-    headless: true,
+    headless: true, // maior compatibilidade em Windows
+    executablePath,
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
@@ -59,6 +92,14 @@ client.on('qr', async (qr) => {
 
 client.on('ready', () => {
   console.log('[wa] Cliente pronto (ready).')
+  if (allowedJids.size > 0) {
+    console.log('[wa] Whitelist ativa (WA_ONLY_CONTACTS):', Array.from(allowedJids).join(', '))
+  } else {
+    console.log('[wa] Whitelist desativada: atendendo todos os contatos (somente DEV).')
+  }
+  if (ALLOW_FROM_ME) {
+    console.log('[wa] ⚠️  Auto-teste habilitado (WA_ALLOW_FROM_ME=true): processará mensagens fromMe')
+  }
 })
 
 client.on('disconnected', (reason) => {
@@ -66,9 +107,10 @@ client.on('disconnected', (reason) => {
 })
 
 // Encaminha mensagem para MCP
-async function sendToMCP(text) {
+async function sendToMCP(text, senderId) {
   const body = {
     input: String(text || ''),
+    sender_id: String(senderId || 'unknown'),
     tenant_id: MCP_TENANT_ID,
     mode: 'auto',
   }
@@ -86,36 +128,158 @@ async function sendToMCP(text) {
   return res.json()
 }
 
-client.on('message_create', async (msg) => {
+// Handler unificado para processar mensagens
+async function handleMessage(msg, source) {
   try {
-    // Tratar mensagens enviadas por você mesmo (auto-teste)
+    console.log(`[wa] ===== MENSAGEM RECEBIDA (${source}) =====`)
+    console.log('[wa] fromMe:', msg.fromMe)
+    console.log('[wa] from:', msg.from)
+    console.log('[wa] to:', msg.to)
+    console.log('[wa] type:', msg.type)
+    console.log('[wa] body:', msg.body)
+    console.log('[wa] timestamp:', msg.timestamp, '→', new Date(msg.timestamp * 1000).toISOString())
+
+    // Mensagens enviadas por este cliente (fromMe)
     if (msg.fromMe) {
-      if (!allowContact(msg.to)) return
-      if (msg.to.endsWith('@g.us')) return // ignora grupos
-      const mcp = await sendToMCP(msg.body || '')
+      if (!ALLOW_FROM_ME) {
+        console.log('[wa] ❌ Ignorando: fromMe=true (auto-teste desabilitado)')
+        return
+      }
+      // Auto-teste habilitado: processar como se fosse mensagem para o destinatário
+      console.log('[wa] 🔄 Processando fromMe (auto-teste): destinatário =', msg.to)
+      const chatId = msg.to
+      
+      // Ignorar grupos
+      if (chatId.endsWith('@g.us')) {
+        console.log('[wa] ❌ Ignorando fromMe: grupo')
+        return
+      }
+      
+      // Whitelist (se configurada)
+      // Permitir bypass quando o próprio remetente (msg.from) consta na whitelist (facilita auto-teste)
+      const whitelistBypassFromMe = allowedJids.size > 0 && allowedJids.has(msg.from)
+      if (allowedJids.size > 0 && !allowedJids.has(chatId) && !whitelistBypassFromMe) {
+        console.log('[wa] ❌ Ignorando fromMe: destinatário fora da whitelist →', chatId)
+        return
+      }
+      if (whitelistBypassFromMe && !allowedJids.has(chatId)) {
+        console.log('[wa] ✅ Whitelist bypass (fromMe): remetente autorizado na whitelist →', msg.from)
+      }
+      
+      // Ignorar tipos que não são chat de texto
+      if (msg.type && msg.type !== 'chat') {
+        console.log('[wa] ❌ Ignorando fromMe: tipo não suportado →', msg.type)
+        return
+      }
+      
+      // Ignorar mensagens antigas
+      const tsMs = msg.timestamp ? Number(msg.timestamp) * 1000 : Date.now()
+      if (tsMs < (START_TIME_MS - 10000)) {
+        console.log('[wa] ❌ Ignorando fromMe: mensagem antiga de', new Date(tsMs).toISOString())
+        return
+      }
+      
+      const text = (msg.body || '').trim()
+      if (!text) {
+        console.log('[wa] ❌ Ignorando fromMe: corpo vazio')
+        return
+      }
+
+      // Anti-eco: ignorar mensagem que é igual à última resposta enviada pelo bot recentemente
+      const last = lastBotByChat.get(chatId)
+      if (last) {
+        const textNorm = text.trim().toLowerCase().replace(/\s+/g, ' ')
+        const lastNorm = last.body.trim().toLowerCase().replace(/\s+/g, ' ')
+        const elapsed = Date.now() - last.ts
+        if (textNorm === lastNorm && elapsed < ANTI_ECHO_WINDOW_MS) {
+          console.log('[wa] ❌ Ignorando fromMe: eco da própria mensagem do bot (elapsed:', elapsed, 'ms)')
+          return
+        }
+      }
+      
+      // Rate limit
+      if (!allowContact(chatId)) {
+        console.log('[wa] ❌ Rate limit atingido (fromMe) para', chatId)
+        return
+      }
+      
+      console.log('[wa] ✅ Processando fromMe para:', chatId)
+      const mcp = await sendToMCP(text, chatId)
       const reply = mcp?.message || 'Ok.'
-      await client.sendMessage(msg.to, reply)
+      
+      console.log('[wa] 📤 Enviando resposta (fromMe) para:', chatId)
+      console.log('[wa] 📝 Resposta:', reply)
+      
+      if (OUTBOUND_ENABLED) {
+        await client.sendMessage(chatId, reply)
+        // Registrar última mensagem enviada pelo bot para anti-eco
+        lastBotByChat.set(chatId, { body: reply, ts: Date.now() })
+        console.log('[wa] ✅ Resposta enviada (fromMe) com sucesso')
+      } else {
+        console.log('[wa] OUTBOUND desabilitado: não enviando resposta (fromMe).')
+      }
       return
     }
 
-    // Mensagens recebidas de contatos
     const chatId = msg.from
-    if (chatId.endsWith('@g.us')) return // ignora grupos
+    if (chatId.endsWith('@g.us')) {
+      console.log('[wa] ❌ Ignorando: grupo')
+      return
+    }
+
+    // Whitelist (se configurada)
+    if (allowedJids.size > 0 && !allowedJids.has(chatId)) {
+      console.log('[wa] ❌ Ignorando: contato fora da whitelist →', chatId)
+      return
+    }
+
+    // Ignorar tipos que não são chat de texto
+    if (msg.type && msg.type !== 'chat') {
+      console.log('[wa] ❌ Ignorando: tipo não suportado →', msg.type)
+      return
+    }
+
+    // Ignorar mensagens antigas carregadas no startup
+    const tsMs = msg.timestamp ? Number(msg.timestamp) * 1000 : Date.now()
+    if (tsMs < (START_TIME_MS - 10000)) {
+      console.log('[wa] ❌ Ignorando mensagem antiga de', chatId, 'ts=', new Date(tsMs).toISOString())
+      return
+    }
+
+    const text = (msg.body || '').trim()
+    if (!text) {
+      console.log('[wa] ❌ Ignorando: corpo vazio após trim')
+      return
+    }
+
     // Rate limit por contato
     if (!allowContact(chatId)) return
 
-    const text = msg.body || ''
-    const mcp = await sendToMCP(text)
+    const mcp = await sendToMCP(text, chatId)
     const reply = mcp?.message || 'Ok.'
-    await client.sendMessage(chatId, reply)
+    if (OUTBOUND_ENABLED) {
+      await client.sendMessage(chatId, reply)
+      // Registrar última mensagem enviada pelo bot para anti-eco
+      lastBotByChat.set(chatId, { body: reply, ts: Date.now() })
+    } else {
+      console.log('[wa] OUTBOUND desabilitado: não enviando resposta (inbound).')
+    }
   } catch (e) {
     console.error('[wa] Erro ao processar mensagem:', e.message)
     try {
       const to = msg.fromMe ? msg.to : msg.from
-      await client.sendMessage(to, '⚠️ Ocorreu um erro ao processar. Tente novamente em instantes.')
+      if (OUTBOUND_ENABLED) {
+        await client.sendMessage(to, '⚠️ Ocorreu um erro ao processar. Tente novamente em instantes.')
+      } else {
+        console.log('[wa] OUTBOUND desabilitado: erro suprimido sem resposta.')
+      }
     } catch {}
   }
-})
+}
+
+// Registrar listeners para ambos os eventos
+client.on('message', (msg) => handleMessage(msg, 'message'))
+client.on('message_create', (msg) => handleMessage(msg, 'message_create'))
 
 async function main() {
   console.log('[wa] Iniciando adapter WA...')

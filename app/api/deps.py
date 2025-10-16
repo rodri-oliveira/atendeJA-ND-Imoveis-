@@ -7,6 +7,31 @@ from sqlalchemy.orm import Session
 from app.core.security import decode_token
 from app.repositories.db import SessionLocal
 from app.repositories.models import User, UserRole
+import redis
+from app.core.config import settings
+from app.services.conversation_state import ConversationStateService
+
+# Pool de conexões com o Redis para reutilização
+_redis_pool = None
+
+def get_redis_client() -> redis.Redis:
+    """
+    Fornece um cliente Redis a partir de um pool de conexões, garantindo eficiência.
+    """
+    global _redis_pool
+    if _redis_pool is None:
+        _redis_pool = redis.ConnectionPool.from_url(settings.REDIS_URL, decode_responses=True)
+    return redis.Redis(connection_pool=_redis_pool)
+
+
+def get_conversation_state_service(
+    redis_client: Annotated[redis.Redis, Depends(get_redis_client)]
+) -> ConversationStateService:
+    """
+    Fornece uma instância do serviço de gerenciamento de estado da conversa.
+    """
+    return ConversationStateService(redis_client=redis_client)
+
 
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")

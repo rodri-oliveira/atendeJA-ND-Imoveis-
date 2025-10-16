@@ -1,128 +1,65 @@
-# Plano do Chat WhatsApp – ND Imóveis (MVP)
-
-## Objetivo
-- **Qualificar leads** e **atender dúvidas** via WhatsApp, com **agendamento de visitas** quando houver interesse.
-- Operação **24/7**. Transferência para humano ocorre **no momento do agendamento**.
-- Construir em **pequenos escopos**, sempre testando com o simulador `adapter-wa/` antes de usar o número do cliente.
-
-## Premissas e Regras
-- **Janela de 24h (Meta)**: fora da janela, somente templates aprovados. MVP foca no receptivo; campanhas ativas reais ficam por último (simulador primeiro).
-- **LGPD**: solicitar consentimento explícito no início. Guardar consentimento no lead.
-- **Tom**: formal e amigável. Mensagens de boas-vindas e encerramento.
-- **Horário do humano**: 09h–19h (configurável em tela futura). Chatbot responde 24/7.
-- **Não responder**: se o lead não responder por **24h** após a última mensagem, classificar `sem_resposta_24h`. Ao retomar a conversa em qualquer momento, o lead deve ser atualizado no banco (status e timestamps) para relatórios.
-
-## Status Atual (implementação)
-- Dependência de banco de dados centralizada via `app.api.deps.get_db`.
-- `tests/conftest.py` sobrescreve apenas `app.api.deps.get_db` para isolamento e controle dos testes.
-- Rotas atualizadas para usar `Depends(get_db)`:
-  - Públicas e MCP: `app/api/routes/realestate.py`, `app/api/routes/mcp.py`.
-  - Administrativas: `app/api/routes/admin.py` (migrado), `app/api/routes/admin_realestate.py` (parcialmente centralizado; alguns fluxos de import ainda usam `SessionLocal`).
-- Migração Pydantic v2: schemas com `from_attributes` atualizados para `ConfigDict` (removendo avisos de depreciação).
-- Suíte de testes (`pytest -q`): todos passando, sem avisos de Pydantic pendentes.
-
-## Fase 1 — Receptivo (prioridade)
-### Fluxo Conversacional (alta visão)
-1) Boas-vindas + consentimento LGPD.
-2) Coleta obrigatória: nome, telefone, e-mail.
-3) Preferências: finalidade (compra/locação), cidade/bairro, tipo (apto/casa), faixa de preço, dormitórios.
-4) Retorna até 3 imóveis: foto + título + preço + bairro.
-5) Pergunta se deseja agendar visita.
-6) Se sim, pedir dia/horário preferidos e **transferir para humano** (registrar solicitação).
-7) Encerramento com instruções e horário de atendimento humano.
-
-### Regra de ausência de resposta
-- Sem resposta por **24h**: classificar o lead como `sem_resposta_24h` e registrar evento de auditoria.
-- Ao receber nova mensagem: atualizar o lead no banco e retomar o fluxo da última pergunta.
-
-#### Lógica ao sair de `sem_resposta_24h` (determinística)
-Ao receber uma mensagem do lead:
-- Atualizar `last_inbound_at` e `status_updated_at`.
-- Se `status == sem_resposta_24h`, recalcular o status conforme:
-  1) Se houver agendamento pendente (existe registro em `re_visit_schedules` com `status=requested` para o `lead_id`): `agendamento_pendente`.
-  2) Senão, se dados obrigatórios + preferências estão completos (nome, telefone, e-mail, finalidade, cidade/estado, tipo, faixa de preço ou imóvel direcionado): `qualificado`.
-  3) Caso contrário: `novo`.
-
-### Mensagens fora de escopo (padrões aprovados)
-- Versão padrão (educada e diretiva):
-  "Para garantir um atendimento correto, esse tema precisa do corretor responsável. Vou registrar sua dúvida e nossa equipe entrará em contato. Podemos seguir com sua busca de imóvel? Sobre a sua última pergunta, poderia me informar: {PERGUNTA_PENDENTE}?"
-- Versão objetiva (quando insistir em temas não tratáveis pelo bot):
-  "Esse assunto só pode ser tratado por um corretor. Posso agendar um contato? Enquanto isso, consigo avançar com sua preferência: {PERGUNTA_PENDENTE}?"
-
-### Estados/Status do Lead (no BD)
-- `novo` → `qualificado` → `agendamento_pendente` → `agendado`.
-- Ramificação de ausência: `sem_resposta_24h`.
-- Campo no lead: `status` (string) e `consent_lgpd` (bool).
-
-### Modelagem — evoluções confirmadas (sem redundância)
-- `status` (enum): `novo`, `qualificado`, `agendamento_pendente`, `agendado`, `sem_resposta_24h`.
-- `last_inbound_at`, `last_outbound_at`, `status_updated_at` (datetime).
-- `property_interest_id` (FK opcional para `re_properties`) — identifica lead direcionado a um imóvel.
-- Preferências denormalizadas para filtros: `finalidade`, `tipo`, `cidade`, `estado`, `bairro`, `dormitorios`, `preco_min`, `preco_max`.
-- `contact_id` (FK opcional para `contacts`) — integra com conversas, respeita `suppressed_contacts`.
-- Manter `preferences` (JSON) como fonte completa das preferências.
-
-### Dados mínimos a persistir
-- Lead: nome, telefone, e-mail, consentimento, preferências (JSON), status, timestamps.
-- Eventos: `lead.created`, `lead.updated`, `inquiry.created`, `visit.requested`, `followup.sent`.
-
-### Endpoints/Serviços utilizados
-- `POST /re/leads` (criar lead c/ consentimento e preferências).
-- `GET /re/imoveis` (com filtros) e `GET /re/imoveis/{id}/detalhes`.
-- `POST /conversation/events` (ou tabela equivalente) para auditar fluxo.
-
-### Critérios de Aceite (Fase 1)
-- Coleta de dados obrigatórios com validação e consentimento salvo.
-- Regra de 24h registra evento e altera status para `sem_resposta_24h`; ao novo contato, atualizar lead e retomar fluxo.
-- Retorno de imóveis com conteúdo mínimo (foto/título/preço/bairro).
-- Solicitação de visita gera evento e notifica equipe (simulação no MVP).
-- Testes passando (unitários e de fluxo com simulador).
-
-## Fase 2 — Ativo/Campanhas (após receptivo)
-### Tela de Campanhas (frontend)
-- Filtros: **status do lead**, finalidade, tipo, cidade/estado, **bairro**, faixa de preço, dormitórios, e flag **direcionado** (com/sem `property_interest_id`).
-- Ação: **Ativar campanha** (no simulador) para o conjunto filtrado.
-- MVP com simulador; produção exigirá **templates** e aprovação no Meta.
-
-### Critérios de Aceite (Fase 2)
-- Tela única de campanhas com filtros e preview de alcance.
-- Disparo simulado via `adapter-wa/` com logs e auditoria por lead.
-- Rate limit respeitado.
-
-## Testes e Validação
-- **Backend**: pytest para regras (consentimento, status, follow-up, filtros de imóveis).
-- **Simulador `adapter-wa/`**: cenários de conversas do fluxo (boas-vindas, coleta, sugestões, agendamento, follow-ups).
-- **Frontend**: testes de UI essenciais (render, filtros e ação de campanha) e validação manual.
-
-## Métricas e Relatórios
-- Dashboard: conversas/dia, leads por status, taxa de qualificação, solicitações de visita.
-- Relatórios por e-mail: alertas configuráveis (ex.: agendamento solicitado, volume diário).
-- Notificação WhatsApp da equipe: somente quando lead fornecer dia/horário para visita.
-
-## Configurações (MVP)
-- Horário humano (09h–19h) — tela de ajustes futura.
-- Flags: `WINDOW_24H_ENABLED`, `WA_RATE_LIMIT_*`, `RE_READ_ONLY` (produção), `DEFAULT_TENANT_ID`.
-- Dependência de DB: `get_db` centralizado em `app.api.deps`; nos testes, sobrescrito via `tests/conftest.py`.
-
-## Roadmap Resumido
-- F1. Receptivo + simulador + testes → produção receptivo.
-- F2. Tela de campanhas (simulador), métricas e relatórios.
-- F3. Templates Meta (campanhas reais) + notificações para equipe.
-- F4. Integrações (CRM/e-mail), melhorias e escalabilidade.
-
-## Próximas Ações (engenharia)
-- Uniformizar `admin_realestate.py`: migrar blocos restantes de `SessionLocal()` para `Depends(get_db)` quando aplicável.
-- Revisar códigos de erro administrativos (ex.: mapear conflitos para `409 Conflict`).
-- Documentação técnica breve (postergar): registrar padrão de dependência de DB e overrides de teste no `README-PT.md`.
-- Observabilidade: granularidade de logs em importação e backfills; métricas por status de lead.
-
-## Dúvidas Abertas
-- Texto exato do consentimento LGPD (padrão institucional do cliente?).
-- Tipos de e-mail/alertas desejados (evento e periodicidade).
-- Lista final de **status** aceitos no lead (confirmar nomenclaturas acima).
-- Frases/casos fora de escopo — mensagens oficiais desejadas.
-
-## Referências
-- `adapter-wa/` (simulador WhatsApp) — usar em ambiente local.
-- `app/domain/realestate/` e `app/api/routes/` — endpoints de imóveis e leads.
-- Políticas Meta: janela 24h e templates.
+ # Plano e Resumo do Chat WhatsApp – ND Imóveis (MVP)
+ 
+ ## Resumo do que foi feito
+ - **[rotas MCP]** Alinhado o endpoint público para `POST /api/v1/mcp/execute`.
+   - `app/main.py`: `app.include_router(mcp_router, prefix="/api/v1/mcp", tags=["mcp"])`.
+   - `app/api/routes/mcp.py`: `@router.post("/execute")`.
+ - **[consumidores corrigidos]**
+   - `tests/test_mcp_leads.py`: atualizado para `"/api/v1/mcp/execute"` e adicionado `sender_id` (obrigatório em `MCPRequest`).
+   - `adapter-wa/index.js` e `adapter-wa/README.md`: `MCP_URL=http://localhost:8000/api/v1/mcp/execute`.
+   - Ajuste no adapter (auto-teste): bypass de whitelist quando `msg.from` está na whitelist.
+ - **[dependências e testes]** venv `.venv` criada; libs instaladas conforme `pyproject.toml`/`requirements.txt`; `pytest -q` verde.
+ - **[infra local produção-like]** Docker Desktop/WSL restabelecidos; `redis` iniciado via `docker compose up -d redis`.
+ 
+ ## Problemas enfrentados (com evidência) e soluções
+ - **[404 Not Found no MCP]**
+   - Causa: consumidores chamavam `"/mcp/execute"` enquanto o servidor expõe `"/api/v1/mcp/execute"`.
+   - Solução: atualizar caminhos nos testes e adapter para incluir o prefixo `/api/v1/mcp`.
+ - **[422 Unprocessable Entity]**
+   - Causa: campo obrigatório `sender_id` ausente no body do MCP.
+   - Solução: incluir `sender_id` nos testes e nas chamadas manuais.
+ - **[500 internal_error no MCP (modo auto)]**
+   - Causa (confirmada no código): `ConversationStateService` usa Redis diretamente (`get/setex/delete`) sem fallback; ausência do Redis gera exceção e o middleware global (`app/main.py`) retorna 500 com `{"error":{"code":"internal_error"...}}`.
+   - Evidências: `app/api/deps.py` injeta `ConversationStateService(redis_client=...)` e `app/services/conversation_state.py` faz chamadas diretas ao Redis.
+   - Solução: subir Redis com `docker compose up -d redis` e testar novamente (resolvido).
+ - **[PowerShell vs curl]**
+   - Causa: no PowerShell, `curl` é alias de `Invoke-WebRequest` (não aceita `-X/-H/-d` como no curl nativo).
+   - Solução: usar `Invoke-RestMethod` ou `curl.exe` para testar o MCP.
+ - **[Adapter WA – tipos e whitelist]**
+   - Comportamento: ignora `type: image/ptt`; processa apenas `type: chat` (texto). Whitelist ativa em `WA_ONLY_CONTACTS`.
+   - Ajuste: bypass para `fromMe` quando `msg.from` está na whitelist (facilita auto-teste).
+ 
+ ## Prevenções para não ocorrer novamente
+ - **[contrato de API consistente]** Centralizar o base path (`/api/v1`) em config compartilhada e adicionar teste de integração que valide `POST /api/v1/mcp/execute` com `sender_id`.
+ - **[observabilidade de Redis]**
+   - Adicionar verificação de readiness do Redis no startup (ex.: `ping`) com log claro.
+   - Tratar indisponibilidade com erro 503 explicitando causa (ao invés de 500 genérico), mantendo paridade com produção.
+ - **[DX no Windows]** Documentar no `README-PT.md` exemplos com `Invoke-RestMethod` e `curl.exe`.
+ - **[scripts de dev]** Criar alvo `dev up` para subir `redis` e checar health.
+ - **[adapter]** Documentar whitelist e tipos suportados; manter `WA_ONLY_CONTACTS` claro durante testes.
+ 
+ ## Plano para o futuro (roadmap)
+ - **Fase 1 (Receptivo)**
+   - Refinar funil em `app/domain/realestate/conversation_handlers.py`:
+     - Textos/tom (saudação, LGPD, coleta, finalização) e transições entre estágios.
+     - Heurística de cidade/UF e tipo; listagem até 3 cards com `ref_code/external_id/id`.
+   - Persistência de status e eventos:
+     - `status`: `novo`, `qualificado`, `agendamento_pendente`, `agendado`, `sem_resposta_24h`.
+     - Eventos: `lead.created`, `lead.updated`, `visit.requested`, `followup.sent`.
+ - **Fase 2 (Campanhas/Simulador)** Tela com filtros e disparo simulado via `adapter-wa/` com auditoria.
+ - **Fases seguintes** Templates Meta, integrações (CRM/e-mail), notificações para equipe, métricas e relatórios.
+ 
+ ## Próximas ações imediatas
+ - **[ajustar funil conversacional]** Iterar nos handlers conforme conversas reais (mensagens, transições, validações).
+ - **[engenharia]**
+   - Uniformizar `admin_realestate.py` para `Depends(get_db)` quando aplicável.
+   - Mapear conflitos para `409 Conflict` nos endpoints administrativos.
+   - Documentar padrão de dependência de DB e overrides de teste no `README-PT.md`.
+ 
+ ## Referências de código
+ - `app/main.py` — roteamento e middleware de erro.
+ - `app/api/routes/mcp.py` — endpoint `POST /execute`.
+ - `app/api/deps.py` — injeção de `ConversationStateService` com Redis.
+ - `app/services/conversation_state.py` — `get_state/set_state/clear_state` no Redis.
+ - `adapter-wa/index.js` — MCP_URL, whitelist e tratamento de mensagens.
+ - `tests/test_mcp_leads.py` — testes do endpoint MCP (modo `tool`).

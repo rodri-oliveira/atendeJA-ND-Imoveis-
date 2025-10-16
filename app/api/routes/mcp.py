@@ -1,18 +1,18 @@
-from typing import Any, Dict, List, Optional
+"""
+MCP (Model Context Protocol) - Orquestrador de Conversação.
+Responsabilidade: Roteamento de requisições e coordenação de handlers.
+"""
+from typing import Any, Dict, List, Optional, Annotated
 from fastapi import APIRouter, Depends, HTTPException, Header
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from sqlalchemy import select
-from app.repositories.db import SessionLocal
-from app.api.deps import get_db
+from app.api.deps import get_db, get_conversation_state_service
+from app.services.conversation_state import ConversationStateService
 from app.core.config import settings
-from app.domain.realestate.models import (
-    Property,
-    PropertyImage,
-    PropertyType,
-    PropertyPurpose,
-    Lead,
-)
+from app.domain.realestate.models import Property, PropertyImage, PropertyType, PropertyPurpose
+from app.domain.realestate.conversation_handlers import ConversationHandler
+from app.services.lead_service import LeadService
 
 router = APIRouter()
 
@@ -25,6 +25,7 @@ router = APIRouter()
 
 class MCPRequest(BaseModel):
     input: str = Field(..., description="Entrada do usuário (texto livre)")
+    sender_id: str = Field(..., description="ID único do remetente (ex: número do WhatsApp)")
     tenant_id: str = Field(default_factory=lambda: settings.DEFAULT_TENANT_ID)
     tools_allow: Optional[List[str]] = Field(default=None, description="Lista de tools permitidas (whitelist)")
     mode: str = Field(default="auto", description="auto|tool")
@@ -58,12 +59,7 @@ class MCPRequest(BaseModel):
                     "tool": "detalhar_imovel",
                     "params": {"imovel_id": 1}
                 },
-                {
-                    "input": "",
-                    "mode": "tool",
-                    "tool": "calcular_financiamento",
-                    "params": {"preco": 400000, "entrada_pct": 20, "prazo_meses": 360, "taxa_pct": 1.0}
-                }
+                
             ]
         }
     }
@@ -78,6 +74,7 @@ class MCPToolCall(BaseModel):
 class MCPResponse(BaseModel):
     message: str
     tool_calls: List[MCPToolCall] = []
+
 
 
 # --- Auth ---
@@ -117,6 +114,8 @@ def t_buscar_imoveis(db: Session, params: Dict[str, Any]) -> List[Dict[str, Any]
     return [
         {
             "id": r.id,
+            "ref_code": getattr(r, "ref_code", None),
+            "external_id": getattr(r, "external_id", None),
             "titulo": r.title,
             "tipo": r.type.value,
             "finalidade": r.purpose.value,
@@ -141,6 +140,8 @@ def t_detalhar_imovel(db: Session, imovel_id: int) -> Dict[str, Any]:
     imgs = db.execute(imgs_stmt).scalars().all()
     return {
         "id": p.id,
+        "ref_code": getattr(p, "ref_code", None),
+        "external_id": getattr(p, "external_id", None),
         "titulo": p.title,
         "descricao": p.description,
         "tipo": p.type.value,
@@ -162,68 +163,20 @@ def t_detalhar_imovel(db: Session, imovel_id: int) -> Dict[str, Any]:
 
 
 def t_criar_lead(db: Session, dados: Dict[str, Any]) -> Dict[str, Any]:
-    # Alinha com /re/leads: aceita direcionamento, filtros denormalizados e campanha
-    lead = Lead(
-        tenant_id=1,
-        name=dados.get("nome"),
-        phone=dados.get("telefone"),
-        email=dados.get("email"),
-        source=dados.get("origem", "mcp"),
-        preferences=dados.get("preferencias"),
-        consent_lgpd=bool(dados.get("consentimento_lgpd", False)),
-        # Direcionamento/integração
-        property_interest_id=dados.get("property_interest_id"),
-        contact_id=dados.get("contact_id"),
-        external_property_id=dados.get("external_property_id"),
-        # Filtros denormalizados (segmentação)
-        finalidade=dados.get("finalidade"),
-        tipo=dados.get("tipo"),
-        cidade=dados.get("cidade"),
-        estado=(dados.get("estado") or None),
-        bairro=dados.get("bairro"),
-        dormitorios=dados.get("dormitorios"),
-        preco_min=dados.get("preco_min"),
-        preco_max=dados.get("preco_max"),
-        # Campanha (atribuição)
-        campaign_source=dados.get("campaign_source"),
-        campaign_medium=dados.get("campaign_medium"),
-        campaign_name=dados.get("campaign_name"),
-        campaign_content=dados.get("campaign_content"),
-        landing_url=dados.get("landing_url"),
-    )
-    db.add(lead)
-    db.commit()
-    db.refresh(lead)
+    """Cria lead usando LeadService."""
+    lead = LeadService.create_lead(db, dados)
     return {"id": lead.id, "nome": lead.name, "telefone": lead.phone}
-
-
-def t_calcular_financiamento(params: Dict[str, Any]) -> Dict[str, Any]:
-    # Fórmula de parcela (Price): A = P * i / (1 - (1+i)^-n)
-    preco = float(params.get("preco", 0))
-    entrada_pct = float(params.get("entrada_pct", 20)) / 100.0
-    prazo_meses = int(params.get("prazo_meses", 360))
-    taxa_pct = float(params.get("taxa_pct", 1.0)) / 100.0 / 12.0
-    principal = max(preco * (1 - entrada_pct), 0)
-    if taxa_pct <= 0 or prazo_meses <= 0:
-        return {"parcela": None, "principal": principal}
-    parcela = principal * taxa_pct / (1 - (1 + taxa_pct) ** (-prazo_meses))
-    return {
-        "principal": round(principal, 2),
-        "parcela": round(parcela, 2),
-        "prazo_meses": prazo_meses,
-        "taxa_mes": round(taxa_pct * 100, 4),
-    }
 
 
 TOOLS = {
     "buscar_imoveis": {"fn": t_buscar_imoveis},
     "detalhar_imovel": {"fn": t_detalhar_imovel},
     "criar_lead": {"fn": t_criar_lead},
-    "calcular_financiamento": {"fn": t_calcular_financiamento},
 }
 
 
 def _whitelist_ok(name: str, allow: Optional[List[str]]) -> bool:
+    """Verifica se tool está na whitelist."""
     if not allow:
         return True
     return name in allow
@@ -235,7 +188,12 @@ def _whitelist_ok(name: str, allow: Optional[List[str]]) -> bool:
     summary="Executa agente MCP (MVP)",
     description="Modo auto interpreta o texto do usuário; modo tool executa uma ferramenta específica. Use Authorization: Bearer <token> se MCP_API_TOKEN estiver definido."
 )
-def execute_mcp(body: MCPRequest, db: Session = Depends(get_db), Authorization: Optional[str] = Header(default=None)):
+def execute_mcp(
+    body: MCPRequest,
+    db: Annotated[Session, Depends(get_db)],
+    state_service: Annotated[ConversationStateService, Depends(get_conversation_state_service)],
+    Authorization: Optional[str] = Header(default=None),
+):
     _check_auth(Authorization)
 
     tool_calls: List[MCPToolCall] = []
@@ -251,8 +209,6 @@ def execute_mcp(body: MCPRequest, db: Session = Depends(get_db), Authorization: 
         fn = TOOLS[body.tool]["fn"]
         if body.tool == "detalhar_imovel":
             res = fn(db, int((body.params or {}).get("imovel_id")))
-        elif body.tool == "calcular_financiamento":
-            res = fn(body.params or {})
         elif body.tool == "buscar_imoveis":
             res = fn(db, body.params or {})
         elif body.tool == "criar_lead":
@@ -262,70 +218,84 @@ def execute_mcp(body: MCPRequest, db: Session = Depends(get_db), Authorization: 
         tool_calls.append(MCPToolCall(tool=body.tool, params=body.params or {}, result=res))
         return MCPResponse(message="tool_executed", tool_calls=tool_calls)
 
-    # Modo auto (heurística melhorada – MVP)
-    text = body.input.lower()
-    if any(k in text for k in ["financi", "parcela", "juros"]):
-        res = t_calcular_financiamento({"preco": 400000, "entrada_pct": 20, "prazo_meses": 360, "taxa_pct": 1.0})
-        tool_calls.append(MCPToolCall(tool="calcular_financiamento", params={}, result=res))
-        return MCPResponse(message=f"Parcela aproximada R$ {res['parcela']}", tool_calls=tool_calls)
+    # Modo auto (stateful) - Arquitetura Modular
+    text_raw = body.input or ""
+    text = text_raw.lower()
+    state = state_service.get_state(body.sender_id) or {}
+    
+    # DEBUG: Log do estado atual
+    import structlog
+    log = structlog.get_logger()
+    log.info("=" * 60)
+    log.info("🔵 MCP REQUEST", sender_id=body.sender_id, input=text_raw, current_stage=state.get("stage", "start"), state_keys=list(state.keys()))
+    log.info("=" * 60)
+    
+    handler = ConversationHandler(db)
+    
+    # Loop para permitir transições de estado internas
+    max_iterations = 10
+    iteration = 0
+    
+    while iteration < max_iterations:
+        iteration += 1
+        stage = state.get("stage", "start")
+        log.debug("mcp_stage", iteration=iteration, stage=stage, state_keys=list(state.keys()))
+        
+        # Roteamento para handlers específicos
+        if stage == "start":
+            msg, state, continue_loop = handler.handle_start(text_raw, state)
+        elif stage == "awaiting_lgpd_consent":
+            msg, state, continue_loop = handler.handle_lgpd_consent(text, state)
+        elif stage == "awaiting_purpose":
+            msg, state, continue_loop = handler.handle_purpose(text, state)
+        elif stage == "awaiting_city":
+            msg, state, continue_loop = handler.handle_city(text_raw, state)
+        elif stage == "awaiting_type":
+            msg, state, continue_loop = handler.handle_type(text, state)
+        elif stage == "awaiting_price_min":
+            msg, state, continue_loop = handler.handle_price_min(text, state)
+        elif stage == "awaiting_price_max":
+            msg, state, continue_loop = handler.handle_price_max(text, state)
+        elif stage == "awaiting_bedrooms":
+            msg, state, continue_loop = handler.handle_bedrooms(text, state)
+        elif stage == "awaiting_neighborhood":
+            msg, state, continue_loop = handler.handle_neighborhood(text_raw, state)
+        elif stage == "searching":
+            msg, state, continue_loop = handler.handle_searching(body.sender_id, state)
+        elif stage == "showing_property":
+            msg, state, continue_loop = handler.handle_showing_property(state)
+        elif stage == "awaiting_property_feedback":
+            msg, state, continue_loop = handler.handle_property_feedback(text, state)
+        elif stage == "awaiting_visit_decision":
+            msg, state, continue_loop = handler.handle_visit_decision(text, state)
+        elif stage == "collecting_name":
+            msg, state, continue_loop = handler.handle_collecting_name(text_raw, state)
+        elif stage == "collecting_email":
+            msg, state, continue_loop = handler.handle_collecting_email(text_raw, body.sender_id, state)
+        else:
+            # Estágio desconhecido - fallback
+            break
+        
+        # Atualizar state no Redis
+        if state:
+            state_service.set_state(body.sender_id, state)
+        else:
+            state_service.clear_state(body.sender_id)
+        
+        # Se há mensagem, retornar
+        if msg:
+            return MCPResponse(message=msg, tool_calls=tool_calls)
+        
+        # Se não deve continuar loop, sair
+        if not continue_loop:
+            break
+        
+        # Limpar texto para próxima iteração
+        text = ""
+        text_raw = ""
 
-    # Busca por intenção + extração de critérios
-    params: Dict[str, Any] = {}
-    if "alugar" in text or "loca" in text:
-        params["finalidade"] = "rent"
-    if "comprar" in text or "compra" in text or "venda" in text:
-        params["finalidade"] = "sale"
-    if "apart" in text:
-        params["tipo"] = "apartment"
-    if "casa" in text:
-        params["tipo"] = "house"
-    # cidade/estado heurística simples
-    if "sao paulo" in text or "são paulo" in text:
-        params["cidade"] = "São Paulo"
-        params["estado"] = "SP"
+    # Fallback: se chegou aqui, algo não foi tratado
+    state_service.clear_state(body.sender_id)
+    msg_fallback = "Desculpe, não entendi. Para começar, me diga: você quer *comprar* ou *alugar* um imóvel?"
+    return MCPResponse(message=msg_fallback, tool_calls=tool_calls)
 
-    # Dormitórios: "2 quartos" | "2 dorm"
-    import re
-    m_quartos = re.search(r"(\d+)\s*(quarto|quart|dorm)", text)
-    if m_quartos:
-        try:
-            params["dormitorios_min"] = int(m_quartos.group(1))
-        except Exception:
-            pass
-
-    # Preço: "até 3500" | "2000-3500" | "3500"
-    t_clean = text.replace("r$", "").replace(" ", "")
-    # faixa 2000-3500
-    if "-" in t_clean:
-        parts = t_clean.split("-", 1)
-        try:
-            min_p = float(re.sub(r"[^0-9]", "", parts[0]))
-            max_p = float(re.sub(r"[^0-9]", "", parts[1]))
-            params["preco_min"] = min_p
-            params["preco_max"] = max_p
-        except Exception:
-            pass
-    # até 3500
-    m_ate = re.search(r"at[eé]?(\d{3,6})", t_clean)
-    if m_ate:
-        try:
-            params["preco_max"] = float(m_ate.group(1))
-        except Exception:
-            pass
-    # número solto como teto
-    elif not params.get("preco_max"):
-        m_num = re.search(r"(\d{3,6})", t_clean)
-        if m_num:
-            try:
-                params["preco_max"] = float(m_num.group(1))
-            except Exception:
-                pass
-
-    res = t_buscar_imoveis(db, params)
-    tool_calls.append(MCPToolCall(tool="buscar_imoveis", params=params, result=res))
-    if not res:
-        return MCPResponse(message="Não encontrei imóveis com seu perfil. Pode me dizer cidade, tipo (apartamento/casa) e faixa de preço?", tool_calls=tool_calls)
-    lines = ["Algumas opções:"]
-    for r in res:
-        lines.append(f"#{r['id']} - {r['titulo']} | R$ {r['preco']:,.0f} | {r['cidade']}-{r['estado']}")
-    return MCPResponse(message="\n".join(lines), tool_calls=tool_calls)
