@@ -4,7 +4,7 @@ Responsabilidade: Lógica de transição entre estágios e processamento de entr
 """
 from typing import Dict, Any, Optional, Tuple
 from sqlalchemy.orm import Session
-from app.domain.realestate import detection_utils as detect
+from app.domain.realestate import detection_utils_llm as detect
 from app.domain.realestate import message_formatters as fmt
 from app.domain.realestate.models import Property, PropertyImage
 from app.services.lead_service import LeadService

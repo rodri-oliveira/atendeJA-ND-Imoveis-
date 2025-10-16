@@ -211,9 +211,9 @@ async function handleMessage(msg, source) {
       console.log('[wa] 📝 Resposta:', reply)
       
       if (OUTBOUND_ENABLED) {
-        await client.sendMessage(chatId, reply)
-        // Registrar última mensagem enviada pelo bot para anti-eco
+        // Registrar ANTES de enviar para evitar race condition
         lastBotByChat.set(chatId, { body: reply, ts: Date.now() })
+        await client.sendMessage(chatId, reply)
         console.log('[wa] ✅ Resposta enviada (fromMe) com sucesso')
       } else {
         console.log('[wa] OUTBOUND desabilitado: não enviando resposta (fromMe).')
@@ -258,9 +258,9 @@ async function handleMessage(msg, source) {
     const mcp = await sendToMCP(text, chatId)
     const reply = mcp?.message || 'Ok.'
     if (OUTBOUND_ENABLED) {
-      await client.sendMessage(chatId, reply)
-      // Registrar última mensagem enviada pelo bot para anti-eco
+      // Registrar ANTES de enviar para evitar race condition
       lastBotByChat.set(chatId, { body: reply, ts: Date.now() })
+      await client.sendMessage(chatId, reply)
     } else {
       console.log('[wa] OUTBOUND desabilitado: não enviando resposta (inbound).')
     }

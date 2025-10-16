@@ -61,5 +61,9 @@
  - `app/api/routes/mcp.py` — endpoint `POST /execute`.
  - `app/api/deps.py` — injeção de `ConversationStateService` com Redis.
  - `app/services/conversation_state.py` — `get_state/set_state/clear_state` no Redis.
- - `adapter-wa/index.js` — MCP_URL, whitelist e tratamento de mensagens.
+ - `app/services/llm_service.py` — cliente Ollama para extração de intenção/entidades via LLM.
+ - `app/domain/realestate/detection_utils_llm.py` — detecção via LLM (substitui regex de `detection_utils.py`).
+ - `app/domain/realestate/conversation_handlers.py` — handlers de estágios (usa `detection_utils_llm`).
+ - `adapter-wa/index.js` — MCP_URL, whitelist, anti-eco e tratamento de mensagens.
  - `tests/test_mcp_leads.py` — testes do endpoint MCP (modo `tool`).
+ - `tests/test_llm_detection.py` — testes de detecção via LLM (requer Ollama).
