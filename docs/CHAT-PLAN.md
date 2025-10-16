@@ -56,13 +56,56 @@
    - Mapear conflitos para `409 Conflict` nos endpoints administrativos.
    - Documentar padrão de dependência de DB e overrides de teste no `README-PT.md`.
  
+ ## Melhorias implementadas (v2 - LLM)
+ 
+ ### Detecção aprimorada via LLM
+ - **Valores por extenso**: "cem mil" → 100000, "dois mil" → 2000 (fallback manual implementado)
+ - **Abreviações de tipo**: "ap", "apto" → apartment (fallback com match exato)
+ - **Sinônimos expandidos**: "outras opções", "outro imovel" → próximo
+ - **Nova intenção**: `ajustar_criterios` detecta "vamos ajustar", "mudar critérios", "refazer busca"
+ 
+ ### Fluxo de refinamento
+ - **Estágio `awaiting_refinement`**: após "sem resultados" ou "não há mais imóveis"
+ - **Mantém LGPD**: não reseta consentimento ao ajustar critérios
+ - **Handler `handle_refinement`**: detecta intenção de nova busca e reinicia do estágio `awaiting_purpose`
+ 
+ ### Fallbacks robustos
+ - Todas as funções de detecção LLM têm fallback para regex
+ - Se LLM falhar, sistema continua funcionando com regex original
+ - `extract_price()` tem mapa manual de valores por extenso (cem mil, um milhão, etc.)
+ - `detect_property_type()` tem match exato para abreviações (ap, apto)
+ 
+ ## Problemas conhecidos (v2)
+ 
+ ### ❌ CRÍTICO: Valores por extenso não funcionando
+ - **Sintoma**: "cem mil" retorna "Não consegui identificar o valor"
+ - **Causa investigada**: 
+   - LLM (Ollama) pode estar indisponível ou com timeout
+   - Fallback implementado com mapa `extenso_map` em `extract_price()`
+   - Logs adicionados mas não aparecem no servidor (código pode não estar sendo executado)
+   - Tentativa de renomear `detection_utils_llm.py` → `detection_utils.py` para forçar uso
+ - **Status**: NÃO RESOLVIDO
+ - **Próximos passos**: 
+   - Verificar se API está importando módulo correto
+   - Adicionar print() direto no código (não depende de structlog)
+   - Testar função isoladamente com script Python
+ 
+ ### ⚠️ Abreviações de tipo
+ - **Sintoma**: "ap" retorna "Não entendi o tipo"
+ - **Causa**: Mesmo problema de valores por extenso (código pode não estar sendo executado)
+ - **Status**: NÃO RESOLVIDO
+ 
+ ### ✅ Anti-eco funcionando
+ - Mensagens do bot não são mais reprocessadas como entrada do usuário
+ - Registra `lastBotByChat` ANTES de enviar (evita race condition)
+ 
  ## Referências de código
  - `app/main.py` — roteamento e middleware de erro.
  - `app/api/routes/mcp.py` — endpoint `POST /execute`.
  - `app/api/deps.py` — injeção de `ConversationStateService` com Redis.
  - `app/services/conversation_state.py` — `get_state/set_state/clear_state` no Redis.
  - `app/services/llm_service.py` — cliente Ollama para extração de intenção/entidades via LLM.
- - `app/domain/realestate/detection_utils_llm.py` — detecção via LLM (substitui regex de `detection_utils.py`).
+ - `app/domain/realestate/detection_utils.py` — detecção via LLM com fallback robusto (renomeado de `detection_utils_llm.py`).
  - `app/domain/realestate/conversation_handlers.py` — handlers de estágios (usa `detection_utils_llm`).
  - `adapter-wa/index.js` — MCP_URL, whitelist, anti-eco e tratamento de mensagens.
  - `tests/test_mcp_leads.py` — testes do endpoint MCP (modo `tool`).

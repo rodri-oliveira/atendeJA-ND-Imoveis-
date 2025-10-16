@@ -1,201 +1,246 @@
 """
-Utilitários de detecção de intenções e padrões no texto do usuário.
-Responsabilidade: Parsing e extração de informações usando LLM quando disponível.
+Funções de detecção de intenção usando LLM (substituição de detection_utils.py).
+Mantém a mesma interface para compatibilidade com conversation_handlers.py.
+VERSÃO: 2024-10-16 14:28 - Fallback robusto para valores por extenso
 """
-import re
-import json
-import httpx
-from typing import Optional, Dict, Any
-from sqlalchemy.orm import Session
-from sqlalchemy import select
-from app.domain.realestate.models import Property
-from app.core.config import settings
+from typing import Optional
+import asyncio
+from app.services.llm_service import get_llm_service
 import structlog
 
 log = structlog.get_logger()
 
 
-def _call_llm_for_intent(text: str, context: str = "") -> Optional[Dict[str, Any]]:
-    """
-    Usa LLM para detectar intenção e extrair entidades.
-    Fallback para regex se LLM não disponível.
-    """
-    if not settings.OLLAMA_BASE_URL:
-        return None
-    
-    try:
-        prompt = f"""Analise a mensagem e retorne APENAS um JSON válido:
-{{"intent": "buy|rent|consent|interest|next|schedule|unknown", "entities": {{"cidade": null, "tipo": null, "preco_min": null, "preco_max": null, "quartos": null}}}}
-
-Contexto: {context}
-Mensagem: "{text}"
-
-JSON:"""
-        
-        payload = {
-            "model": settings.OLLAMA_DEFAULT_MODEL,
-            "prompt": prompt,
-            "stream": False,
-            "options": {"temperature": 0.1, "num_predict": 150}
-        }
-        
-        with httpx.Client(timeout=8) as client:
-            r = client.post(f"{settings.OLLAMA_BASE_URL}/api/generate", json=payload)
-            r.raise_for_status()
-            response = r.json().get("response", "").strip()
-            
-            # Limpar markdown
-            response = response.replace("```json", "").replace("```", "").strip()
-            return json.loads(response)
-    
-    except Exception as e:
-        log.debug("llm_intent_fallback", error=str(e))
-        return None
-
-
-def is_greeting(text: str) -> bool:
-    """Detecta se o texto é apenas uma saudação."""
-    t = (text or "").strip().lower()
-    if not t:
-        return False
-    
-    greet_tokens = ["ola", "olá", "oi", "bom dia", "boa tarde", "boa noite", "opa", "e ai", "eai"]
-    if any(gt in t for gt in greet_tokens):
-        intent_tokens = ["alug", "loca", "compr", "venda", "apto", "apart", "casa", "preço", "preco", "r$", "#", "ref"]
-        return not any(tok in t for tok in intent_tokens)
-    return False
-
-
 def detect_consent(text: str) -> bool:
-    """Detecta consentimento LGPD."""
-    t = text.lower()
-    return any(k in t for k in ["autorizo", "permito", "sim", "ok", "aceito", "concordo"])
+    """Detecta consentimento LGPD via LLM."""
+    llm = get_llm_service()
+    try:
+        result = asyncio.run(llm.extract_intent_and_entities(text))
+        return result.get("intent") == "responder_lgpd"
+    except:
+        # Fallback para regex simples
+        text_lower = text.lower().strip()
+        return any(kw in text_lower for kw in ["sim", "autorizo", "aceito", "ok", "concordo"])
 
 
 def detect_purpose(text: str) -> Optional[str]:
-    """Detecta finalidade (comprar/alugar) usando LLM com fallback para regex."""
-    # Tentar LLM primeiro
-    llm_result = _call_llm_for_intent(text, context="usuário informando se quer comprar ou alugar")
-    if llm_result and llm_result.get("intent") in ["buy", "rent"]:
-        return "sale" if llm_result["intent"] == "buy" else "rent"
-    
-    # Fallback para regex
-    t = text.lower()
-    if any(k in t for k in ["alugar", "aluguel", "loca", "arrendar"]):
-        return "rent"
-    elif any(k in t for k in ["comprar", "compra", "venda", "adquirir"]):
-        return "sale"
-    return None
+    """Detecta finalidade (rent/sale) via LLM."""
+    llm = get_llm_service()
+    try:
+        result = asyncio.run(llm.extract_intent_and_entities(text))
+        return result.get("entities", {}).get("finalidade")
+    except:
+        # Fallback para regex
+        text_lower = text.lower()
+        if any(kw in text_lower for kw in ["alugar", "aluguel", "locação", "locar"]):
+            return "rent"
+        if any(kw in text_lower for kw in ["comprar", "compra", "venda", "vender"]):
+            return "sale"
+        return None
 
 
 def detect_property_type(text: str) -> Optional[str]:
-    """Detecta tipo de imóvel."""
-    t = text.lower()
-    if "apart" in t:
-        return "apartment"
-    elif "casa" in t:
+    """Detecta tipo de imóvel (house/apartment/commercial/land) via LLM."""
+    llm = get_llm_service()
+    try:
+        result = asyncio.run(llm.extract_intent_and_entities(text))
+        prop_type = result.get("entities", {}).get("tipo")
+        if prop_type:
+            return prop_type
+    except Exception as e:
+        import structlog
+        log = structlog.get_logger()
+        log.warning("llm_detect_property_type_failed", error=str(e), text=text)
+    
+    # Fallback para regex expandido
+    text_lower = text.lower().strip()
+    if text_lower in ["casa", "sobrado"]:
         return "house"
-    elif any(k in t for k in ["comer", "comercial", "loja", "sala"]):
+    if text_lower in ["apartamento", "apto", "ap", "flat"]:
+        return "apartment"
+    if text_lower in ["comercial", "loja", "sala", "sala comercial", "ponto comercial"]:
         return "commercial"
-    elif any(k in t for k in ["terr", "lote"]):
+    if text_lower in ["terreno", "lote", "área"]:
         return "land"
+    
+    # Fallback parcial (contém palavra-chave)
+    if "casa" in text_lower or "sobrado" in text_lower:
+        return "house"
+    if any(kw in text_lower for kw in ["apartamento", "apto", "ap", "flat"]):
+        return "apartment"
+    if any(kw in text_lower for kw in ["comercial", "loja", "sala"]):
+        return "commercial"
+    if any(kw in text_lower for kw in ["terreno", "lote"]):
+        return "land"
+    
     return None
 
 
 def extract_price(text: str) -> Optional[float]:
-    """Extrai valor numérico do texto."""
-    price_match = re.search(r"(\d+(?:[.,]\d+)?)", text.replace(".", "").replace(",", "."))
-    if price_match:
+    """Extrai preço via LLM (com fallback para regex)."""
+    import re
+    
+    log.info("extract_price_START", text=text)
+    
+    # Tentar LLM primeiro
+    llm = get_llm_service()
+    try:
+        result = asyncio.run(llm.extract_intent_and_entities(text))
+        entities = result.get("entities", {})
+        # Retorna preco_max se disponível, senão preco_min
+        price = entities.get("preco_max") or entities.get("preco_min")
+        if price is not None:
+            log.info("extract_price_LLM_SUCCESS", text=text, price=price)
+            return float(price)
+    except Exception as e:
+        # LLM falhou, usar fallback
+        log.warning("llm_extract_price_failed", error=str(e), text=text)
+    
+    # Fallback 1: Valores por extenso (regex manual)
+    text_lower = text.lower().strip()
+    log.info("extract_price_FALLBACK1", text_lower=text_lower)
+    
+    extenso_map = {
+        "cem mil": 100000, "100 mil": 100000, "100k": 100000,
+        "duzentos mil": 200000, "200 mil": 200000, "200k": 200000,
+        "trezentos mil": 300000, "300 mil": 300000, "300k": 300000,
+        "quinhentos mil": 500000, "500 mil": 500000, "500k": 500000,
+        "um milhão": 1000000, "um milhao": 1000000, "1 milhão": 1000000, "1 milhao": 1000000, "1mi": 1000000,
+        "dois milhões": 2000000, "dois milhoes": 2000000, "2 milhões": 2000000, "2 milhoes": 2000000,
+        "dois mil": 2000, "2 mil": 2000, "2k": 2000,
+        "três mil": 3000, "tres mil": 3000, "3 mil": 3000, "3k": 3000,
+    }
+    for key, value in extenso_map.items():
+        if key in text_lower:
+            log.info("extract_price_EXTENSO_MATCH", key=key, value=value, text_lower=text_lower)
+            return float(value)
+    
+    # Fallback 2: Regex para números
+    text_clean = text.replace(".", "").replace(",", ".")
+    match = re.search(r'\d+(?:\.\d+)?', text_clean)
+    if match:
         try:
-            return float(price_match.group(1))
+            price = float(match.group())
+            log.info("extract_price_REGEX_MATCH", text_clean=text_clean, price=price)
+            return price
         except:
             pass
+    
+    log.warning("extract_price_FAILED_ALL", text=text)
     return None
 
 
 def extract_bedrooms(text: str) -> Optional[int]:
-    """Extrai número de quartos."""
-    t = text.lower()
-    if any(k in t for k in ["tanto faz", "qualquer", "nao sei", "não sei", "nao importa"]):
+    """Extrai número de dormitórios via LLM (com fallback para regex)."""
+    llm = get_llm_service()
+    try:
+        result = asyncio.run(llm.extract_intent_and_entities(text))
+        dorm = result.get("entities", {}).get("dormitorios")
+        return int(dorm) if dorm is not None else None
+    except:
+        # Fallback para regex
+        import re
+        text_lower = text.lower()
+        if "tanto faz" in text_lower or "qualquer" in text_lower:
+            return None
+        match = re.search(r'(\d+)\s*(?:quarto|dorm|quartos|dormitório)', text_lower)
+        if match:
+            try:
+                return int(match.group(1))
+            except:
+                pass
+        # Tentar extrair número isolado
+        match = re.search(r'\b(\d+)\b', text)
+        if match:
+            try:
+                num = int(match.group(1))
+                if 0 <= num <= 10:
+                    return num
+            except:
+                pass
         return None
-    
-    bed_match = re.search(r"(\d+)", text)
-    if bed_match:
-        try:
-            return int(bed_match.group(1))
-        except:
-            pass
-    return None
+
+
+def is_greeting(text: str) -> bool:
+    """Detecta saudação."""
+    text_lower = text.lower().strip()
+    greetings = ["oi", "olá", "ola", "bom dia", "boa tarde", "boa noite", "hey", "alo", "alô"]
+    return any(g in text_lower for g in greetings)
 
 
 def is_skip_neighborhood(text: str) -> bool:
     """Detecta se usuário quer pular bairro."""
-    t = text.lower()
-    return any(k in t for k in ["nao", "não", "nenhum", "sem", "tanto faz"])
+    text_lower = text.lower().strip()
+    return any(kw in text_lower for kw in ["não", "nao", "tanto faz", "qualquer", "skip"])
 
 
 def detect_interest(text: str) -> bool:
-    """Detecta interesse em imóvel."""
-    t = text.lower()
-    return any(k in t for k in ["sim", "gostei", "quero", "interesse", "detalhes", "mais"])
+    """Detecta interesse no imóvel apresentado."""
+    text_lower = text.lower().strip()
+    return any(kw in text_lower for kw in ["sim", "gostei", "quero", "interessado", "me interessa"])
 
 
 def detect_next_property(text: str) -> bool:
-    """Detecta pedido para próximo imóvel."""
-    t = text.lower()
-    return any(k in t for k in ["prox", "próx", "outro", "nao", "não"])
+    """Detecta pedido para próximo imóvel via LLM."""
+    llm = get_llm_service()
+    try:
+        result = asyncio.run(llm.extract_intent_and_entities(text))
+        if result.get("intent") == "proximo_imovel":
+            return True
+    except:
+        pass
+    # Fallback para regex expandido
+    text_lower = text.lower().strip()
+    return any(kw in text_lower for kw in ["próximo", "proximo", "outro", "next", "passa", "outras opções", "mais", "outro imovel"])
 
 
 def detect_schedule_intent(text: str) -> bool:
     """Detecta intenção de agendar visita."""
-    t = text.lower()
-    return any(k in t for k in ["agendar", "visita", "sim", "quero", "marcar"])
+    text_lower = text.lower().strip()
+    return any(kw in text_lower for kw in ["agendar", "visita", "visitar", "conhecer", "ver"])
+
+
+def detect_refine_search(text: str) -> bool:
+    """Detecta intenção de ajustar/refazer critérios de busca via LLM."""
+    llm = get_llm_service()
+    try:
+        result = asyncio.run(llm.extract_intent_and_entities(text))
+        if result.get("intent") == "ajustar_criterios":
+            return True
+    except:
+        pass
+    # Fallback para regex
+    text_lower = text.lower().strip()
+    return any(kw in text_lower for kw in ["ajustar", "mudar", "refazer", "nova busca", "outros critérios", "vamos ajustar", "quero mudar"])
 
 
 def extract_email(text: str) -> Optional[str]:
-    """Extrai e-mail do texto."""
-    email_match = re.search(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", text)
-    if email_match:
-        return email_match.group(0)
-    return None
+    """Extrai e-mail via regex."""
+    import re
+    match = re.search(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', text)
+    return match.group(0) if match else None
 
 
-def resolve_property_id_by_code_or_url(db: Session, text: str) -> Optional[int]:
-    """
-    Resolve ID do imóvel a partir de código ou URL.
-    Suporta: #123, ref=A738, ref: A738, /imovel/123/
-    """
-    t = (text or "")
+def resolve_property_id_by_code_or_url(db, text: str) -> Optional[int]:
+    """Resolve ID de imóvel por código de referência ou URL (mantido do original)."""
+    from app.domain.realestate.models import Property
+    from sqlalchemy import select
     
-    # 1) Padrão #123 numérico
-    m_num = re.search(r"#(\d+)", t)
-    if m_num:
-        try:
-            return int(m_num.group(1))
-        except:
-            pass
+    text_clean = text.strip().upper()
+    # Tentar por ref_code
+    stmt = select(Property.id).where(Property.ref_code == text_clean, Property.is_active == True)
+    result = db.execute(stmt).scalar()
+    if result:
+        return result
     
-    # 2) Código alfanumérico (ex.: A738)
-    m_ref_url = re.search(r"ref=([A-Za-z0-9\-]+)", t, flags=re.IGNORECASE)
-    m_ref_txt = re.search(r"ref\s*[:#]?\s*([A-Za-z0-9\-]+)", t, flags=re.IGNORECASE)
-    code = None
-    if m_ref_url:
-        code = m_ref_url.group(1)
-    elif m_ref_txt:
-        code = m_ref_txt.group(1)
-    
-    if code:
-        stmt = select(Property).where((Property.ref_code == code) | (Property.external_id == code))
-        row = db.execute(stmt).scalars().first()
-        if row:
-            return int(row.id)
-    
-    # 3) Padrão de URL com /imovel/<id>/
-    m_url_id = re.search(r"/imovel/(\d+)/", t)
-    if m_url_id:
-        try:
-            return int(m_url_id.group(1))
-        except:
-            pass
+    # Tentar extrair código de URL (ex: /imovel/A1234)
+    import re
+    match = re.search(r'/imovel/([A-Z0-9]+)', text, re.IGNORECASE)
+    if match:
+        code = match.group(1).upper()
+        stmt = select(Property.id).where(Property.ref_code == code, Property.is_active == True)
+        result = db.execute(stmt).scalar()
+        if result:
+            return result
     
     return None

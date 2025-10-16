@@ -71,10 +71,10 @@ class LLMService:
 
 Retorne APENAS um JSON válido no formato:
 {
-  "intent": "buscar_imovel" ou "responder_lgpd" ou "outro",
+  "intent": "buscar_imovel" ou "responder_lgpd" ou "proximo_imovel" ou "ajustar_criterios" ou "outro",
   "entities": {
-    "finalidade": "rent" (alugar/locação) ou "sale" (comprar/venda) ou null,
-    "tipo": "house" (casa) ou "apartment" (apartamento) ou "commercial" (comercial) ou "land" (terreno) ou null,
+    "finalidade": "rent" (alugar/locação/aluguel) ou "sale" (comprar/venda/compra) ou null,
+    "tipo": "house" (casa) ou "apartment" (apartamento/ap/apto) ou "commercial" (comercial) ou "land" (terreno) ou null,
     "cidade": nome da cidade ou null,
     "estado": sigla UF (2 letras) ou null,
     "preco_min": número ou null,
@@ -84,13 +84,29 @@ Retorne APENAS um JSON válido no formato:
 }
 
 Regras:
-- Se o usuário responder "sim", "autorizo", "aceito" → intent: "responder_lgpd"
+- Se o usuário responder "sim", "autorizo", "aceito", "ok", "concordo" → intent: "responder_lgpd"
+- Se mencionar "próximo", "outro", "mais", "outras opções", "próximo imóvel" → intent: "proximo_imovel"
+- Se mencionar "ajustar", "mudar", "refazer", "nova busca", "outros critérios" → intent: "ajustar_criterios"
 - Se mencionar busca de imóvel → intent: "buscar_imovel"
 - Caso contrário → intent: "outro"
-- Normalize: "locação"/"alugar" → "rent", "comprar"/"venda" → "sale"
-- Normalize: "casa" → "house", "apartamento"/"ap" → "apartment"
-- Extraia números de preço e dormitórios quando mencionados
-- Se não houver informação, use null
+
+Normalização de finalidade:
+- "locação", "alugar", "aluguel", "locar", "alugo" → "rent"
+- "comprar", "venda", "compra", "vender", "compro" → "sale"
+
+Normalização de tipo:
+- "casa", "sobrado" → "house"
+- "apartamento", "ap", "apto", "flat" → "apartment"
+- "comercial", "loja", "sala comercial", "ponto comercial" → "commercial"
+- "terreno", "lote", "área" → "land"
+
+Conversão de valores por extenso:
+- "cem mil", "100 mil", "100k" → 100000
+- "duzentos mil", "200 mil", "200k" → 200000
+- "quinhentos mil", "500 mil", "500k" → 500000
+- "um milhão", "1 milhão", "1mi" → 1000000
+- "dois mil", "2 mil", "2k" → 2000
+- "três mil", "3 mil", "3k" → 3000
 
 Exemplos:
 Input: "quero alugar casa em Mogi das Cruzes 3 quartos até 2000"
@@ -98,6 +114,21 @@ Output: {"intent":"buscar_imovel","entities":{"finalidade":"rent","tipo":"house"
 
 Input: "sim"
 Output: {"intent":"responder_lgpd","entities":{"finalidade":null,"tipo":null,"cidade":null,"estado":null,"preco_min":null,"preco_max":null,"dormitorios":null}}
+
+Input: "próximo"
+Output: {"intent":"proximo_imovel","entities":{"finalidade":null,"tipo":null,"cidade":null,"estado":null,"preco_min":null,"preco_max":null,"dormitorios":null}}
+
+Input: "outras opções"
+Output: {"intent":"proximo_imovel","entities":{"finalidade":null,"tipo":null,"cidade":null,"estado":null,"preco_min":null,"preco_max":null,"dormitorios":null}}
+
+Input: "vamos ajustar os critérios"
+Output: {"intent":"ajustar_criterios","entities":{"finalidade":null,"tipo":null,"cidade":null,"estado":null,"preco_min":null,"preco_max":null,"dormitorios":null}}
+
+Input: "ap"
+Output: {"intent":"buscar_imovel","entities":{"finalidade":null,"tipo":"apartment","cidade":null,"estado":null,"preco_min":null,"preco_max":null,"dormitorios":null}}
+
+Input: "cem mil"
+Output: {"intent":"buscar_imovel","entities":{"finalidade":null,"tipo":null,"cidade":null,"estado":null,"preco_min":null,"preco_max":100000,"dormitorios":null}}
 
 Input: "locação"
 Output: {"intent":"buscar_imovel","entities":{"finalidade":"rent","tipo":null,"cidade":null,"estado":null,"preco_min":null,"preco_max":null,"dormitorios":null}}

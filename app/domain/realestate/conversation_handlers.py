@@ -4,7 +4,7 @@ Responsabilidade: Lógica de transição entre estágios e processamento de entr
 """
 from typing import Dict, Any, Optional, Tuple
 from sqlalchemy.orm import Session
-from app.domain.realestate import detection_utils_llm as detect
+from app.domain.realestate import detection_utils as detect
 from app.domain.realestate import message_formatters as fmt
 from app.domain.realestate.models import Property, PropertyImage
 from app.services.lead_service import LeadService
@@ -57,7 +57,9 @@ class ConversationHandler:
         import structlog
         log = structlog.get_logger()
         
-        purpose = detect.detect_purpose(text)
+        # Priorizar LLM
+        ent = (state.get("llm_entities") or {})
+        purpose = ent.get("finalidade") or detect.detect_purpose(text)
         log.info("detect_purpose_result", text=text, detected_purpose=purpose)
         
         if purpose:
@@ -73,7 +75,8 @@ class ConversationHandler:
     
     def handle_city(self, text: str, state: Dict[str, Any]) -> Tuple[str, Dict[str, Any], bool]:
         """Estágio de cidade."""
-        cidade = text.strip().title()
+        ent = (state.get("llm_entities") or {})
+        cidade = (ent.get("cidade") or text).strip().title()
         state["city"] = cidade
         state["stage"] = "awaiting_neighborhood"
         msg = f"Ótimo! Você tem preferência por algum *bairro* em {cidade}? (ou 'não')"
@@ -81,7 +84,8 @@ class ConversationHandler:
     
     def handle_type(self, text: str, state: Dict[str, Any]) -> Tuple[str, Dict[str, Any], bool]:
         """Estágio de tipo de imóvel."""
-        prop_type = detect.detect_property_type(text)
+        ent = (state.get("llm_entities") or {})
+        prop_type = ent.get("tipo") or detect.detect_property_type(text)
         
         if prop_type:
             state["type"] = prop_type
@@ -95,7 +99,15 @@ class ConversationHandler:
     
     def handle_price_min(self, text: str, state: Dict[str, Any]) -> Tuple[str, Dict[str, Any], bool]:
         """Estágio de preço mínimo."""
-        price_min = detect.extract_price(text)
+        import structlog
+        log = structlog.get_logger()
+        
+        ent = (state.get("llm_entities") or {})
+        # Preferir preco_min da LLM, senão usar detect.extract_price
+        price_min = ent.get("preco_min")
+        if price_min is None:
+            price_min = detect.extract_price(text)
+        log.info("handle_price_min", input_text=text, extracted_price=price_min)
         
         if price_min is not None:
             state["price_min"] = price_min
@@ -109,7 +121,10 @@ class ConversationHandler:
     
     def handle_price_max(self, text: str, state: Dict[str, Any]) -> Tuple[str, Dict[str, Any], bool]:
         """Estágio de preço máximo."""
-        price_max = detect.extract_price(text)
+        ent = (state.get("llm_entities") or {})
+        price_max = ent.get("preco_max")
+        if price_max is None:
+            price_max = detect.extract_price(text)
         
         if price_max is not None:
             state["price_max"] = price_max
@@ -122,7 +137,10 @@ class ConversationHandler:
     
     def handle_bedrooms(self, text: str, state: Dict[str, Any]) -> Tuple[str, Dict[str, Any], bool]:
         """Estágio de quartos."""
-        bedrooms = detect.extract_bedrooms(text)
+        ent = (state.get("llm_entities") or {})
+        bedrooms = ent.get("dormitorios")
+        if bedrooms is None:
+            bedrooms = detect.extract_bedrooms(text)
         
         state["bedrooms"] = bedrooms
         state["stage"] = "awaiting_city"
@@ -173,7 +191,12 @@ class ConversationHandler:
                 state.get("lgpd_consent", False)
             )
             msg = fmt.format_no_results_message(state.get("city", "sua cidade"))
-            return (msg, {}, False)  # Limpar state
+            # Manter LGPD e aguardar decisão de ajustar
+            new_state = {
+                "stage": "awaiting_refinement",
+                "lgpd_consent": state.get("lgpd_consent", True)
+            }
+            return (msg, new_state, False)
         
         # Salvar IDs dos resultados
         state["search_results"] = [r.id for r in results]
@@ -182,15 +205,17 @@ class ConversationHandler:
         return ("", state, True)  # Continuar para mostrar primeiro imóvel
     
     def handle_showing_property(self, state: Dict[str, Any]) -> Tuple[str, Dict[str, Any], bool]:
-        """Estágio de apresentação de imóvel."""
+        """Estágio de apresentação de imóveis."""
         results = state.get("search_results", [])
         idx = state.get("current_property_index", 0)
         
+        # Se não há mais imóveis
         if idx >= len(results):
-            msg = fmt.format_end_of_results_message()
-            return (msg, {}, False)  # Limpar state
+            msg = fmt.format_no_more_properties()
+            state["stage"] = "awaiting_refinement"  # Aguardar decisão de ajustar critérios
+            return (msg, state, False)
         
-        # Buscar detalhes do imóvel
+        # Buscar próximo imóvel
         prop_id = results[idx]
         prop = self.db.get(Property, prop_id)
         
@@ -307,3 +332,22 @@ class ConversationHandler:
         
         msg = fmt.format_schedule_confirmation(state.get("lead_name"))
         return (msg, {}, False)  # Limpar state
+    
+    def handle_refinement(self, text: str, state: Dict[str, Any]) -> Tuple[str, Dict[str, Any], bool]:
+        """Estágio de decisão após ver todos os imóveis ou não gostar."""
+        if detect.detect_refine_search(text):
+            # Usuário quer ajustar critérios - manter LGPD, resetar busca
+            msg = "Perfeito! Vamos refazer a busca. Você quer *comprar* ou *alugar*?"
+            new_state = {
+                "stage": "awaiting_purpose",
+                "lgpd_consent": state.get("lgpd_consent", True)  # Manter consentimento
+            }
+            return (msg, new_state, False)
+        else:
+            # Resposta não reconhecida - voltar para início
+            msg = "Não entendi. Para começar uma nova busca, me diga: você quer *comprar* ou *alugar* um imóvel?"
+            new_state = {
+                "stage": "awaiting_purpose",
+                "lgpd_consent": state.get("lgpd_consent", True)
+            }
+            return (msg, new_state, False)

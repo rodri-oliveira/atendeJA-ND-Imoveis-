@@ -13,6 +13,7 @@ from app.core.config import settings
 from app.domain.realestate.models import Property, PropertyImage, PropertyType, PropertyPurpose
 from app.domain.realestate.conversation_handlers import ConversationHandler
 from app.services.lead_service import LeadService
+from app.services.llm_service import get_llm_service
 
 router = APIRouter()
 
@@ -74,7 +75,6 @@ class MCPToolCall(BaseModel):
 class MCPResponse(BaseModel):
     message: str
     tool_calls: List[MCPToolCall] = []
-
 
 
 # --- Auth ---
@@ -188,7 +188,7 @@ def _whitelist_ok(name: str, allow: Optional[List[str]]) -> bool:
     summary="Executa agente MCP (MVP)",
     description="Modo auto interpreta o texto do usuário; modo tool executa uma ferramenta específica. Use Authorization: Bearer <token> se MCP_API_TOKEN estiver definido."
 )
-def execute_mcp(
+async def execute_mcp(
     body: MCPRequest,
     db: Annotated[Session, Depends(get_db)],
     state_service: Annotated[ConversationStateService, Depends(get_conversation_state_service)],
@@ -241,6 +241,18 @@ def execute_mcp(
         stage = state.get("stage", "start")
         log.debug("mcp_stage", iteration=iteration, stage=stage, state_keys=list(state.keys()))
         
+        # Pré-processamento por LLM: extrair intenção e entidades da mensagem bruta
+        if text_raw or text:
+            try:
+                llm = get_llm_service()
+                llm_result = await llm.extract_intent_and_entities(text_raw or text)
+                if isinstance(llm_result, dict):
+                    state["llm_intent"] = llm_result.get("intent")
+                    state["llm_entities"] = llm_result.get("entities") or {}
+                    state_service.set_state(body.sender_id, state)
+            except Exception as e:
+                log.warning("llm_preparse_failed", error=str(e))
+        
         # Roteamento para handlers específicos
         if stage == "start":
             msg, state, continue_loop = handler.handle_start(text_raw, state)
@@ -272,6 +284,8 @@ def execute_mcp(
             msg, state, continue_loop = handler.handle_collecting_name(text_raw, state)
         elif stage == "collecting_email":
             msg, state, continue_loop = handler.handle_collecting_email(text_raw, body.sender_id, state)
+        elif stage == "awaiting_refinement":
+            msg, state, continue_loop = handler.handle_refinement(text, state)
         else:
             # Estágio desconhecido - fallback
             break
@@ -299,3 +313,29 @@ def execute_mcp(
     msg_fallback = "Desculpe, não entendi. Para começar, me diga: você quer *comprar* ou *alugar* um imóvel?"
     return MCPResponse(message=msg_fallback, tool_calls=tool_calls)
 
+
+# ===== Admin: limpar estado de conversas (DEV only) =====
+class ClearStateIn(BaseModel):
+    sender_ids: List[str]
+
+
+@router.post("/admin/state/clear")
+def mcp_admin_clear_state(
+    payload: ClearStateIn,
+    state_service: Annotated[ConversationStateService, Depends(get_conversation_state_service)],
+    Authorization: Optional[str] = Header(default=None),
+):
+    """Limpa o estado de conversa para os sender_ids informados. Protegido por MCP_API_TOKEN.
+    Uso destinado a desenvolvimento/auto-teste.
+    """
+    _check_auth(Authorization)
+    sender_ids = [s for s in (payload.sender_ids or []) if str(s).strip()]
+    cleared = 0
+    for sid in sender_ids:
+        try:
+            state_service.clear_state(sid)
+            cleared += 1
+        except Exception:
+            # ignora erros por sender_id inexistente
+            pass
+    return {"ok": True, "cleared": cleared}

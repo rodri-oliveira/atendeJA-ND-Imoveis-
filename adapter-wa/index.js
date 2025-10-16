@@ -26,6 +26,7 @@ const RATE_S = parseInt(process.env.WA_RATE_LIMIT_PER_CONTACT_SECONDS || '2', 10
 const OUTBOUND_ENABLED = String(process.env.WA_OUTBOUND_ENABLED || 'false').toLowerCase() === 'true'
 // Permitir auto-teste (processar mensagens fromMe)
 const ALLOW_FROM_ME = String(process.env.WA_ALLOW_FROM_ME || 'false').toLowerCase() === 'true'
+const CLEAR_ON_START = String(process.env.WA_CLEAR_STATE_ON_START || 'false').toLowerCase() === 'true'
 // Whitelist opcional de contatos permitidos (se vazio, atende todos)
 const ONLY_CONTACTS = String(process.env.WA_ONLY_CONTACTS || '')
   .split(',')
@@ -99,6 +100,24 @@ client.on('ready', () => {
   }
   if (ALLOW_FROM_ME) {
     console.log('[wa] ⚠️  Auto-teste habilitado (WA_ALLOW_FROM_ME=true): processará mensagens fromMe')
+  }
+  // DEV: limpar estado no backend para contatos da whitelist
+  if (CLEAR_ON_START && allowedJids.size > 0) {
+    (async () => {
+      try {
+        const url = MCP_URL.replace(/\/execute$/, '/admin/state/clear')
+        const sender_ids = Array.from(allowedJids)
+        const headers = { 'Content-Type': 'application/json' }
+        if (MCP_TOKEN) headers['Authorization'] = `Bearer ${MCP_TOKEN}`
+        console.log('[wa] 🧹 URL de limpeza:', url)
+        console.log('[wa] 🧹 Limpando estado no backend para:', sender_ids.join(', '))
+        const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify({ sender_ids }) })
+        const js = await res.json().catch(() => ({}))
+        console.log('[wa] 🧹 Resultado limpeza:', res.status, js)
+      } catch (e) {
+        console.warn('[wa] ⚠️ Falha ao limpar estado no backend:', e.message)
+      }
+    })()
   }
 })
 
