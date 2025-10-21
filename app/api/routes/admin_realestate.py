@@ -195,6 +195,45 @@ def admin_hard_delete_property(property_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail=str(e))
 
 
+# ====== Exclusão em lote (admin) ======
+class BulkDeleteIn(BaseModel):
+    title_contains: str | None = None
+    description_contains: str | None = None
+    mode: str = "soft"
+
+
+@router.post("/imoveis/bulk-delete")
+def admin_bulk_delete_properties(payload: BulkDeleteIn, db: Session = Depends(get_db)):
+    try:
+        from app.api.routes.admin import _get_or_create_default_tenant
+        tenant = _get_or_create_default_tenant(db)
+        term_title = (payload.title_contains or "").strip()
+        term_desc = (payload.description_contains or "").strip()
+        if not term_title and not term_desc:
+            raise HTTPException(status_code=400, detail="missing_filters")
+        stmt = select(re_models.Property).where(re_models.Property.tenant_id == tenant.id)
+        if term_title:
+            stmt = stmt.where(re_models.Property.title.ilike(f"%{term_title}%"))
+        if term_desc:
+            stmt = stmt.where(re_models.Property.description.ilike(f"%{term_desc}%"))
+        props = db.execute(stmt).scalars().all()
+        deleted = 0
+        for p in props:
+            try:
+                if (payload.mode or "soft").lower() == "hard":
+                    hard_delete_property(db, int(p.id))
+                else:
+                    soft_delete_property(db, int(p.id))
+                deleted += 1
+            except Exception:
+                continue
+        return {"ok": True, "matched": len(props), "deleted": deleted, "mode": (payload.mode or "soft").lower()}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail={"code": "bulk_delete_error", "message": str(e)})
+
+
 # Em desenvolvimento, usamos http para evitar problemas de cadeia SSL no Windows.
 # Em produção, prefira https.
 ND_BASE = "http://www.ndimoveis.com.br"

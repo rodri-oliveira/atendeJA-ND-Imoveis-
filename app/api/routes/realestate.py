@@ -15,6 +15,9 @@ from app.domain.realestate.services.property_service import (
     get_property as svc_get_property,
     update_property as svc_update_property,
     get_property_details as svc_get_property_details,
+    soft_delete_property as svc_soft_delete_property,
+    hard_delete_property as svc_hard_delete_property,
+    _resolve_tenant_id as svc_resolve_tenant_id,
 )
 from app.domain.realestate.mappers import to_imovel_dict
 from app.domain.realestate.utils import normalize_image_url
@@ -39,6 +42,7 @@ from app.domain.realestate.models import (
     Lead,
     PropertyImage,
 )
+from pydantic import BaseModel
 
 router = APIRouter()
 log = structlog.get_logger()
@@ -151,6 +155,70 @@ def upload_imagens(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"upload_internal_error:{str(e)}")
+
+@router.delete(
+    "/admin/re/imoveis/{property_id}",
+    summary="Soft delete de imóvel",
+)
+def admin_soft_delete_property(property_id: int, db: Session = Depends(get_db)):
+    if settings.RE_READ_ONLY:
+        raise HTTPException(status_code=403, detail="read_only_mode")
+    try:
+        res = svc_soft_delete_property(db, property_id)
+        return res
+    except ValueError:
+        raise HTTPException(status_code=404, detail="property_not_found")
+
+
+@router.delete(
+    "/admin/re/imoveis/{property_id}/hard",
+    summary="Hard delete de imóvel",
+)
+def admin_hard_delete_property(property_id: int, db: Session = Depends(get_db)):
+    if settings.RE_READ_ONLY:
+        raise HTTPException(status_code=403, detail="read_only_mode")
+    try:
+        res = svc_hard_delete_property(db, property_id)
+        return res
+    except ValueError:
+        raise HTTPException(status_code=404, detail="property_not_found")
+
+
+class BulkDeleteIn(BaseModel):
+    title_contains: Optional[str] = None
+    description_contains: Optional[str] = None
+    mode: str = "soft"
+
+
+@router.post(
+    "/admin/re/imoveis/bulk-delete",
+    summary="Exclusão em lote por filtros",
+)
+def admin_bulk_delete_properties(payload: BulkDeleteIn, db: Session = Depends(get_db)):
+    if settings.RE_READ_ONLY:
+        raise HTTPException(status_code=403, detail="read_only_mode")
+    term_title = (payload.title_contains or "").strip()
+    term_desc = (payload.description_contains or "").strip()
+    if not term_title and not term_desc:
+        raise HTTPException(status_code=400, detail="missing_filters")
+    tenant_id = svc_resolve_tenant_id(db)
+    q = db.query(Property).filter(Property.tenant_id == tenant_id)
+    if term_title:
+        q = q.filter(Property.title.ilike(f"%{term_title}%"))
+    if term_desc:
+        q = q.filter(Property.description.ilike(f"%{term_desc}%"))
+    rows: List[Property] = q.all()
+    count = 0
+    for r in rows:
+        try:
+            if (payload.mode or "soft").lower() == "hard":
+                svc_hard_delete_property(db, int(r.id))
+            else:
+                svc_soft_delete_property(db, int(r.id))
+            count += 1
+        except Exception:
+            continue
+    return {"ok": True, "matched": len(rows), "deleted": count, "mode": (payload.mode or "soft").lower()}
 
 @router.get(
     "/imoveis/{property_id}",
