@@ -11,6 +11,34 @@ import structlog
 log = structlog.get_logger()
 
 
+# ===== COMANDOS GLOBAIS =====
+
+def detect_restart_command(text: str) -> bool:
+    """Detecta comandos de reiniciar conversa."""
+    text_lower = text.lower().strip()
+    keywords = [
+        "refazer", "recomeçar", "reiniciar", "começar de novo", "nova busca",
+        "limpar", "resetar", "restart", "começar novamente", "zerar"
+    ]
+    return any(kw in text_lower for kw in keywords)
+
+
+def detect_help_command(text: str) -> bool:
+    """Detecta comandos de ajuda."""
+    text_lower = text.lower().strip()
+    keywords = ["ajuda", "help", "comandos", "opções", "o que posso fazer"]
+    return any(kw in text_lower for kw in keywords)
+
+
+def detect_back_command(text: str) -> bool:
+    """Detecta comandos de voltar."""
+    text_lower = text.lower().strip()
+    keywords = ["voltar", "anterior", "back"]
+    return any(kw in text_lower for kw in keywords)
+
+
+# ===== DETECÇÃO DE INTENÇÃO =====
+
 def detect_consent(text: str) -> bool:
     """Detecta consentimento LGPD via LLM."""
     llm = get_llm_service()
@@ -77,47 +105,56 @@ def detect_property_type(text: str) -> Optional[str]:
 
 
 def extract_price(text: str) -> Optional[float]:
-    """Extrai preço via LLM (com fallback para regex)."""
+    """Extrai preço priorizando regex/extenso (LLM como último recurso)."""
     import re
     
     log.info("extract_price_START", text=text)
-    
-    # Tentar LLM primeiro
-    llm = get_llm_service()
-    try:
-        result = asyncio.run(llm.extract_intent_and_entities(text))
-        entities = result.get("entities", {})
-        # Retorna preco_max se disponível, senão preco_min
-        price = entities.get("preco_max") or entities.get("preco_min")
-        if price is not None:
-            log.info("extract_price_LLM_SUCCESS", text=text, price=price)
-            return float(price)
-    except Exception as e:
-        # LLM falhou, usar fallback
-        log.warning("llm_extract_price_failed", error=str(e), text=text)
-    
-    # Fallback 1: Valores por extenso (regex manual)
     text_lower = text.lower().strip()
-    log.info("extract_price_FALLBACK1", text_lower=text_lower)
     
+    # PRIORIDADE 1: Valores por extenso (mais confiável)
     extenso_map = {
+        # Milhões
+        "um milhão": 1000000, "um milhao": 1000000, "1 milhão": 1000000, "1 milhao": 1000000, "1mi": 1000000,
+        "dois milhões": 2000000, "dois milhoes": 2000000, "2 milhões": 2000000, "2 milhoes": 2000000, "2mi": 2000000,
+        "três milhões": 3000000, "tres milhoes": 3000000, "3 milhões": 3000000, "3 milhoes": 3000000, "3mi": 3000000,
+        # Centenas de mil
         "cem mil": 100000, "100 mil": 100000, "100k": 100000,
         "duzentos mil": 200000, "200 mil": 200000, "200k": 200000,
         "trezentos mil": 300000, "300 mil": 300000, "300k": 300000,
+        "quatrocentos mil": 400000, "400 mil": 400000, "400k": 400000,
         "quinhentos mil": 500000, "500 mil": 500000, "500k": 500000,
-        "um milhão": 1000000, "um milhao": 1000000, "1 milhão": 1000000, "1 milhao": 1000000, "1mi": 1000000,
-        "dois milhões": 2000000, "dois milhoes": 2000000, "2 milhões": 2000000, "2 milhoes": 2000000,
+        "seiscentos mil": 600000, "600 mil": 600000, "600k": 600000,
+        "setecentos mil": 700000, "700 mil": 700000, "700k": 700000,
+        "oitocentos mil": 800000, "800 mil": 800000, "800k": 800000,
+        "novecentos mil": 900000, "900 mil": 900000, "900k": 900000,
+        # Dezenas de mil
+        "dez mil": 10000, "10 mil": 10000, "10k": 10000,
+        "vinte mil": 20000, "20 mil": 20000, "20k": 20000,
+        "trinta mil": 30000, "30 mil": 30000, "30k": 30000,
+        "quarenta mil": 40000, "40 mil": 40000, "40k": 40000,
+        "cinquenta mil": 50000, "50 mil": 50000, "50k": 50000,
+        "sessenta mil": 60000, "60 mil": 60000, "60k": 60000,
+        "setenta mil": 70000, "70 mil": 70000, "70k": 70000,
+        "oitenta mil": 80000, "80 mil": 80000, "80k": 80000,
+        "noventa mil": 90000, "90 mil": 90000, "90k": 90000,
+        # Milhares
         "dois mil": 2000, "2 mil": 2000, "2k": 2000,
         "três mil": 3000, "tres mil": 3000, "3 mil": 3000, "3k": 3000,
+        "quatro mil": 4000, "4 mil": 4000, "4k": 4000,
+        "cinco mil": 5000, "5 mil": 5000, "5k": 5000,
     }
-    for key, value in extenso_map.items():
+    
+    # Verificar matches (ordem decrescente de tamanho para evitar matches parciais)
+    for key in sorted(extenso_map.keys(), key=len, reverse=True):
         if key in text_lower:
+            value = extenso_map[key]
             log.info("extract_price_EXTENSO_MATCH", key=key, value=value, text_lower=text_lower)
             return float(value)
     
-    # Fallback 2: Regex para números
-    text_clean = text.replace(".", "").replace(",", ".")
-    match = re.search(r'\d+(?:\.\d+)?', text_clean)
+    # PRIORIDADE 2: Regex para números puros (sem "mil" ou "milhão")
+    # Ex: "250000", "1500000"
+    text_clean = text.replace(".", "").replace(",", "").replace(" ", "")
+    match = re.search(r'\d{5,}', text_clean)  # Mínimo 5 dígitos (10k+)
     if match:
         try:
             price = float(match.group())
@@ -125,6 +162,18 @@ def extract_price(text: str) -> Optional[float]:
             return price
         except:
             pass
+    
+    # PRIORIDADE 3: LLM (último recurso)
+    llm = get_llm_service()
+    try:
+        result = asyncio.run(llm.extract_intent_and_entities(text))
+        entities = result.get("entities", {})
+        price = entities.get("preco_max") or entities.get("preco_min")
+        if price is not None:
+            log.info("extract_price_LLM_SUCCESS", text=text, price=price)
+            return float(price)
+    except Exception as e:
+        log.warning("llm_extract_price_failed", error=str(e), text=text)
     
     log.warning("extract_price_FAILED_ALL", text=text)
     return None

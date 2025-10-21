@@ -75,10 +75,25 @@ class ConversationHandler:
     
     def handle_city(self, text: str, state: Dict[str, Any]) -> Tuple[str, Dict[str, Any], bool]:
         """Estágio de cidade."""
+        import structlog
+        log = structlog.get_logger()
+        
         ent = (state.get("llm_entities") or {})
         cidade = (ent.get("cidade") or text).strip().title()
         state["city"] = cidade
-        state["stage"] = "awaiting_neighborhood"
+        
+        # Log para debug: verificar se type está preservado
+        log.info("handle_city_state", 
+                 city=cidade,
+                 type=state.get("type"),
+                 purpose=state.get("purpose"),
+                 price_max=state.get("price_max"))
+            
+        # Se já tem tipo e preço (refinamento), buscar direto após bairro
+        if state.get("type") and state.get("price_max"):
+            state["stage"] = "awaiting_neighborhood"
+        else:
+            state["stage"] = "awaiting_neighborhood"
         msg = f"Ótimo! Você tem preferência por algum *bairro* em {cidade}? (ou 'não')"
         return (msg, state, False)
     
@@ -102,35 +117,51 @@ class ConversationHandler:
         import structlog
         log = structlog.get_logger()
         
-        ent = (state.get("llm_entities") or {})
-        # Preferir preco_min da LLM, senão usar detect.extract_price
-        price_min = ent.get("preco_min")
+        # PRIORIDADE: extract_price (regex/extenso) sobre LLM
+        price_min = detect.extract_price(text)
         if price_min is None:
-            price_min = detect.extract_price(text)
+            ent = (state.get("llm_entities") or {})
+            price_min = ent.get("preco_min")
+        
         log.info("handle_price_min", input_text=text, extracted_price=price_min)
         
         if price_min is not None:
             state["price_min"] = price_min
-            state["stage"] = "awaiting_price_max"
-            purpose_txt = "aluguel" if state.get("purpose") == "rent" else "compra"
-            msg = f"Perfeito! E qual o valor *máximo* para {purpose_txt}?"
-            return (msg, state, False)
+            
+            # Se já tem cidade (refinamento), buscar direto SEM mensagem
+            if state.get("city"):
+                state["stage"] = "searching"
+                return ("", state, True)  # Busca silenciosa
+            else:
+                # Primeira vez, continuar fluxo normal
+                state["stage"] = "awaiting_price_max"
+                purpose_txt = "aluguel" if state.get("purpose") == "rent" else "compra"
+                msg = f"Perfeito! E qual o valor *máximo* para {purpose_txt}?"
+                return (msg, state, False)
         else:
             msg = "Não consegui identificar o valor. Por favor, informe o valor mínimo em números (ex: 200000)."
             return (msg, state, False)
     
     def handle_price_max(self, text: str, state: Dict[str, Any]) -> Tuple[str, Dict[str, Any], bool]:
         """Estágio de preço máximo."""
-        ent = (state.get("llm_entities") or {})
-        price_max = ent.get("preco_max")
+        # PRIORIDADE: extract_price (regex/extenso) sobre LLM
+        price_max = detect.extract_price(text)
         if price_max is None:
-            price_max = detect.extract_price(text)
+            ent = (state.get("llm_entities") or {})
+            price_max = ent.get("preco_max")
         
         if price_max is not None:
             state["price_max"] = price_max
-            state["stage"] = "awaiting_bedrooms"
-            msg = "Ótimo! Quantos quartos você precisa? (Ex: 2, 3 ou 'tanto faz')"
-            return (msg, state, False)
+            
+            # Se já tem cidade (refinamento), buscar direto SEM mensagem
+            if state.get("city"):
+                state["stage"] = "searching"
+                return ("", state, True)  # Busca silenciosa
+            else:
+                # Primeira vez, continuar fluxo normal
+                state["stage"] = "awaiting_bedrooms"
+                msg = "Ótimo! Quantos quartos você precisa? (Ex: 2, 3 ou 'tanto faz')"
+                return (msg, state, False)
         else:
             msg = "Não consegui identificar o valor. Por favor, informe o valor máximo em números (ex: 500000)."
             return (msg, state, False)
@@ -143,6 +174,12 @@ class ConversationHandler:
             bedrooms = detect.extract_bedrooms(text)
         
         state["bedrooms"] = bedrooms
+        
+        # Se já tem cidade (refinamento), buscar direto SEM mensagem
+        if state.get("city"):
+            state["stage"] = "searching"
+            return ("", state, True)  # Busca silenciosa
+        
         state["stage"] = "awaiting_city"
         msg = "Perfeito! Em qual cidade você está procurando?"
         return (msg, state, False)
@@ -159,7 +196,18 @@ class ConversationHandler:
     
     def handle_searching(self, sender_id: str, state: Dict[str, Any]) -> Tuple[str, Dict[str, Any], bool]:
         """Estágio de busca de imóveis."""
+        import structlog
+        log = structlog.get_logger()
         from app.domain.realestate.models import PropertyType, PropertyPurpose
+        
+        # Log dos critérios de busca
+        log.info("searching_criteria", 
+                 purpose=state.get("purpose"),
+                 type=state.get("type"),
+                 city=state.get("city"),
+                 price_min=state.get("price_min"),
+                 price_max=state.get("price_max"),
+                 bedrooms=state.get("bedrooms"))
         
         # Montar query
         stmt = select(Property).where(Property.is_active == True)
@@ -191,12 +239,9 @@ class ConversationHandler:
                 state.get("lgpd_consent", False)
             )
             msg = fmt.format_no_results_message(state.get("city", "sua cidade"))
-            # Manter LGPD e aguardar decisão de ajustar
-            new_state = {
-                "stage": "awaiting_refinement",
-                "lgpd_consent": state.get("lgpd_consent", True)
-            }
-            return (msg, new_state, False)
+            # IMPORTANTE: Manter TODOS os critérios para permitir refinamento pontual
+            state["stage"] = "awaiting_refinement"
+            return (msg, state, False)
         
         # Salvar IDs dos resultados
         state["search_results"] = [r.id for r in results]
@@ -224,7 +269,7 @@ class ConversationHandler:
             state["current_property_index"] = idx + 1
             return ("", state, True)
         
-        # Formatar card do imóvel
+        # Formatar card do imóvel com contador
         prop_details = {
             "id": prop.id,
             "ref_code": prop.ref_code,
@@ -238,7 +283,12 @@ class ConversationHandler:
             "dormitorios": prop.bedrooms,
         }
         
-        msg = fmt.format_property_card(prop_details, state.get("purpose", "rent"))
+        # Adicionar contador: "Imóvel 1 de 3"
+        total = len(results)
+        current = idx + 1
+        counter = f"\n\n📊 Imóvel {current} de {total}" if total > 1 else ""
+        
+        msg = fmt.format_property_card(prop_details, state.get("purpose", "rent")) + counter
         state["stage"] = "awaiting_property_feedback"
         return (msg, state, False)
     
@@ -276,7 +326,39 @@ class ConversationHandler:
             state["stage"] = "showing_property"
             return ("", state, True)
         else:
-            msg = "Digite *'sim'* se gostou ou *'próximo'* para ver outra opção."
+            # Verificar se quer ajustar critérios
+            llm_intent = state.get("llm_intent", "")
+            if llm_intent == "ajustar_criterios" or any(kw in text.lower() for kw in ["ajustar", "refinar", "mudar critério", "mudar criterio"]):
+                # Mostrar critérios atuais e pedir especificação
+                current_criteria = []
+                if state.get("purpose"):
+                    current_criteria.append(f"• Finalidade: {self._translate_purpose(state['purpose'])}")
+                if state.get("type"):
+                    current_criteria.append(f"• Tipo: {self._translate_type(state['type'])}")
+                if state.get("price_min"):
+                    current_criteria.append(f"• Valor mínimo: R$ {state['price_min']:,.2f}")
+                if state.get("price_max"):
+                    current_criteria.append(f"• Valor máximo: R$ {state['price_max']:,.2f}")
+                if state.get("bedrooms"):
+                    current_criteria.append(f"• Quartos: {state['bedrooms']}")
+                if state.get("city"):
+                    current_criteria.append(f"• Cidade: {state['city']}")
+                
+                criteria_text = "\n".join(current_criteria) if current_criteria else "Nenhum critério definido ainda."
+                
+                msg = (
+                    f"📋 *Seus critérios atuais:*\n{criteria_text}\n\n"
+                    "Seja mais específico, por favor. Exemplos:\n"
+                    "• \"ajustar o valor máximo\"\n"
+                    "• \"mudar para apartamento\"\n"
+                    "• \"buscar em outra cidade\"\n"
+                    "• \"quero 3 quartos\"\n"
+                    "• \"recomeçar do zero\""
+                )
+                state["stage"] = "awaiting_refinement"
+                return (msg, state, False)
+            
+            msg = "Gostou deste imóvel? Digite *'sim'* para mais detalhes, *'próximo'* para ver outra opção ou *'ajustar critérios'* para refinar a busca."
             return (msg, state, False)
     
     def handle_visit_decision(self, text: str, state: Dict[str, Any]) -> Tuple[str, Dict[str, Any], bool]:
@@ -291,7 +373,39 @@ class ConversationHandler:
             state["stage"] = "showing_property"
             return ("", state, True)
         else:
-            msg = "Digite *'agendar'* para marcar uma visita ou *'próximo'* para ver outras opções."
+            # Verificar se quer ajustar critérios
+            llm_intent = state.get("llm_intent", "")
+            if llm_intent == "ajustar_criterios" or any(kw in text.lower() for kw in ["ajustar", "refinar", "mudar critério", "mudar criterio"]):
+                # Mostrar critérios atuais e pedir especificação
+                current_criteria = []
+                if state.get("purpose"):
+                    current_criteria.append(f"• Finalidade: {self._translate_purpose(state['purpose'])}")
+                if state.get("type"):
+                    current_criteria.append(f"• Tipo: {self._translate_type(state['type'])}")
+                if state.get("price_min"):
+                    current_criteria.append(f"• Valor mínimo: R$ {state['price_min']:,.2f}")
+                if state.get("price_max"):
+                    current_criteria.append(f"• Valor máximo: R$ {state['price_max']:,.2f}")
+                if state.get("bedrooms"):
+                    current_criteria.append(f"• Quartos: {state['bedrooms']}")
+                if state.get("city"):
+                    current_criteria.append(f"• Cidade: {state['city']}")
+                
+                criteria_text = "\n".join(current_criteria) if current_criteria else "Nenhum critério definido ainda."
+                
+                msg = (
+                    f"📋 *Seus critérios atuais:*\n{criteria_text}\n\n"
+                    "Seja mais específico, por favor. Exemplos:\n"
+                    "• \"ajustar o valor máximo\"\n"
+                    "• \"mudar para apartamento\"\n"
+                    "• \"buscar em outra cidade\"\n"
+                    "• \"quero 3 quartos\"\n"
+                    "• \"recomeçar do zero\""
+                )
+                state["stage"] = "awaiting_refinement"
+                return (msg, state, False)
+            
+            msg = "Digite *'agendar'* para marcar uma visita, *'próximo'* para ver outras opções ou *'ajustar critérios'* para refinar a busca."
             return (msg, state, False)
     
     def handle_collecting_name(self, text: str, state: Dict[str, Any]) -> Tuple[str, Dict[str, Any], bool]:
@@ -335,19 +449,149 @@ class ConversationHandler:
     
     def handle_refinement(self, text: str, state: Dict[str, Any]) -> Tuple[str, Dict[str, Any], bool]:
         """Estágio de decisão após ver todos os imóveis ou não gostar."""
-        if detect.detect_refine_search(text):
-            # Usuário quer ajustar critérios - manter LGPD, resetar busca
-            msg = "Perfeito! Vamos refazer a busca. Você quer *comprar* ou *alugar*?"
-            new_state = {
-                "stage": "awaiting_purpose",
-                "lgpd_consent": state.get("lgpd_consent", True)  # Manter consentimento
-            }
-            return (msg, new_state, False)
-        else:
-            # Resposta não reconhecida - voltar para início
-            msg = "Não entendi. Para começar uma nova busca, me diga: você quer *comprar* ou *alugar* um imóvel?"
+        import structlog
+        log = structlog.get_logger()
+        
+        # ===== PASSO 1: LLM INTERPRETA A INTENÇÃO =====
+        llm_entities = state.get("llm_entities", {})
+        text_lower = text.lower()
+        
+        log.info("refinement_llm_entities", entities=llm_entities, text=text)
+        
+        # ===== REFINAMENTO INTELIGENTE =====
+        # Detectar qual campo específico o usuário quer mudar
+        # ORDEM: 1) LLM entities, 2) Regex específico, 3) Fallback educado
+        
+        # 0. Mudança de QUARTOS (se já especificou número)
+        bedrooms_from_llm = llm_entities.get("dormitorios")
+        if bedrooms_from_llm and any(kw in text_lower for kw in ["quarto", "dormitório", "dormitorio"]):
+            # Usuário já disse "quero 3 quartos" - aplicar direto
+            state["bedrooms"] = bedrooms_from_llm
+            if state.get("city"):
+                state["stage"] = "searching"
+                return ("", state, True)  # Busca silenciosa
+            else:
+                msg = "Perfeito! Em qual cidade você está procurando?"
+                state["stage"] = "awaiting_city"
+                return (msg, state, False)
+        
+        # 1. Mudança de PREÇO MÁXIMO (verificar ANTES de tipo)
+        if any(kw in text_lower for kw in ["valor máximo", "preço máximo", "valor maximo", "preco maximo", "aumentar valor", "mais caro"]):
+            msg = "Entendido! Qual o *novo valor máximo* que você considera?"
+            state["stage"] = "awaiting_price_max"
+            return (msg, state, False)
+        
+        # 2. Mudança de PREÇO MÍNIMO
+        if any(kw in text_lower for kw in ["valor mínimo", "preço mínimo", "valor minimo", "preco minimo", "diminuir valor", "mais barato"]):
+            msg = "Entendido! Qual o *novo valor mínimo* que você considera?"
+            state["stage"] = "awaiting_price_min"
+            return (msg, state, False)
+        
+        # 3. Mudança de TIPO (casa/apartamento/comercial)
+        # Só aceita se usuário REALMENTE mencionou o tipo (evitar alucinações do LLM)
+        new_type = llm_entities.get("tipo")
+        invalid_types = ["ajustar", "ajustar_criterios", "ajustar_valor", "null"]
+        
+        # Mapear tipos para palavras-chave que devem estar no texto
+        type_keywords = {
+            "house": ["casa"],
+            "apartment": ["apartamento", "ap"],
+            "commercial": ["comercial", "loja", "sala"],
+            "land": ["terreno", "lote"]
+        }
+        
+        # Só aceita se: tipo válido + não é mudança de preço + usuário mencionou palavra-chave
+        if new_type and new_type not in invalid_types and not any(kw in text_lower for kw in ["valor", "preço", "preco"]):
+            # Verificar se usuário realmente mencionou o tipo
+            keywords = type_keywords.get(new_type, [])
+            if any(kw in text_lower for kw in keywords):
+                state["type"] = new_type
+                state["stage"] = "searching"
+                return ("", state, True)  # Busca silenciosa
+        
+        # Fallback para tipo por palavra-chave (se não for preço)
+        if any(kw in text_lower for kw in ["apartamento", "casa", "comercial", "terreno"]) and not any(kw in text_lower for kw in ["valor", "preço", "preco"]):
+            # Detectar qual tipo
+            if "apartamento" in text_lower or "ap" in text_lower.split():
+                new_type = "apartment"
+            elif "casa" in text_lower:
+                new_type = "house"
+            elif "comercial" in text_lower:
+                new_type = "commercial"
+            elif "terreno" in text_lower:
+                new_type = "land"
+            
+            if new_type:
+                state["type"] = new_type
+                state["stage"] = "searching"
+                return ("", state, True)  # Busca silenciosa
+        
+        # 4. Mudança de CIDADE
+        if any(kw in text_lower for kw in ["cidade", "outra cidade", "mudar cidade", "local", "região"]):
+            msg = "Entendido! Em qual *cidade* você gostaria de buscar?"
+            state["stage"] = "awaiting_city"
+            return (msg, state, False)
+        
+        # 5. Mudança de BAIRRO
+        if any(kw in text_lower for kw in ["bairro", "outro bairro", "mudar bairro"]):
+            msg = "Entendido! Qual *bairro* você prefere?"
+            state["stage"] = "awaiting_neighborhood"
+            return (msg, state, False)
+        
+        # 6. Mudança de QUARTOS
+        if any(kw in text_lower for kw in ["quartos", "dormitórios", "dormitorios", "quarto"]):
+            msg = "Entendido! Quantos *quartos* você precisa?"
+            state["stage"] = "awaiting_bedrooms"
+            return (msg, state, False)
+        
+        # 7. RESETAR TUDO (apenas se explícito)
+        if any(kw in text_lower for kw in ["tudo", "do zero", "recomeçar", "resetar", "começar de novo"]):
+            msg = "Perfeito! Vamos recomeçar. Você quer *comprar* ou *alugar*?"
             new_state = {
                 "stage": "awaiting_purpose",
                 "lgpd_consent": state.get("lgpd_consent", True)
             }
             return (msg, new_state, False)
+        
+        # 8. Fallback educado: não entendeu, pede para ser mais específico
+        current_criteria = []
+        if state.get("purpose"):
+            current_criteria.append(f"• Finalidade: {self._translate_purpose(state['purpose'])}")
+        if state.get("type"):
+            current_criteria.append(f"• Tipo: {self._translate_type(state['type'])}")
+        if state.get("price_min"):
+            current_criteria.append(f"• Valor mínimo: R$ {state['price_min']:,.2f}")
+        if state.get("price_max"):
+            current_criteria.append(f"• Valor máximo: R$ {state['price_max']:,.2f}")
+        if state.get("bedrooms_min"):
+            current_criteria.append(f"• Quartos: {state['bedrooms_min']}+")
+        if state.get("city"):
+            current_criteria.append(f"• Cidade: {state['city']}")
+        
+        criteria_text = "\n".join(current_criteria) if current_criteria else "Nenhum critério definido ainda."
+        
+        msg = (
+            f"Desculpe, não entendi exatamente o que você quer ajustar. 😅\n\n"
+            f"📋 *Seus critérios atuais:*\n{criteria_text}\n\n"
+            "Seja mais específico, por favor. Exemplos:\n"
+            "• \"ajustar o valor máximo\"\n"
+            "• \"mudar para apartamento\"\n"
+            "• \"buscar em outra cidade\"\n"
+            "• \"quero 3 quartos\"\n"
+            "• \"recomeçar do zero\""
+        )
+        return (msg, state, False)
+    
+    def _translate_purpose(self, purpose: str) -> str:
+        """Traduz finalidade para português."""
+        return "Compra" if purpose == "sale" else "Aluguel"
+    
+    def _translate_type(self, prop_type: str) -> str:
+        """Traduz tipo de imóvel para português."""
+        translations = {
+            "house": "casa",
+            "apartment": "apartamento",
+            "commercial": "comercial",
+            "land": "terreno"
+        }
+        return translations.get(prop_type, prop_type)

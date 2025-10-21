@@ -74,8 +74,8 @@ def format_property_card(prop_details: Dict[str, Any], purpose: str) -> str:
 
 def format_property_details(prop_details: Dict[str, Any]) -> str:
     """Formata detalhes completos do imóvel."""
-    descricao = prop_details.get("descricao", "Sem descrição disponível.")
-    if len(descricao) > 300:
+    descricao = prop_details.get("descricao") or "Sem descrição disponível."
+    if descricao and len(descricao) > 300:
         descricao = descricao[:297] + "..."
     
     msg_lines = [

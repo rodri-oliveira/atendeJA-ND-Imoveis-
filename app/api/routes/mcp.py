@@ -14,6 +14,7 @@ from app.domain.realestate.models import Property, PropertyImage, PropertyType, 
 from app.domain.realestate.conversation_handlers import ConversationHandler
 from app.services.lead_service import LeadService
 from app.services.llm_service import get_llm_service
+from app.domain.realestate import detection_utils as detect
 
 router = APIRouter()
 
@@ -232,7 +233,23 @@ async def execute_mcp(
     
     handler = ConversationHandler(db)
     
-    # Loop para permitir transições de estado internas
+    # ===== PRÉ-PROCESSAMENTO LLM (UMA VEZ, ANTES DO LOOP) =====
+    # Extrai intenção e entidades da mensagem do usuário
+    # Armazena no state para uso pelos handlers
+    if text_raw.strip():
+        try:
+            llm = get_llm_service()
+            llm_result = await llm.extract_intent_and_entities(text_raw)
+            if isinstance(llm_result, dict):
+                state["llm_intent"] = llm_result.get("intent")
+                state["llm_entities"] = llm_result.get("entities") or {}
+                log.info("✅ LLM extraction", intent=state.get("llm_intent"), entities=state.get("llm_entities"))
+        except Exception as e:
+            log.warning("⚠️ LLM preparse failed", error=str(e))
+            # Continua sem LLM - handlers usarão fallback regex
+    
+    # ===== LOOP DE CONVERSAÇÃO =====
+    # Permite transições de estado internas sem reprocessar LLM
     max_iterations = 10
     iteration = 0
     
@@ -241,17 +258,21 @@ async def execute_mcp(
         stage = state.get("stage", "start")
         log.debug("mcp_stage", iteration=iteration, stage=stage, state_keys=list(state.keys()))
         
-        # Pré-processamento por LLM: extrair intenção e entidades da mensagem bruta
-        if text_raw or text:
-            try:
-                llm = get_llm_service()
-                llm_result = await llm.extract_intent_and_entities(text_raw or text)
-                if isinstance(llm_result, dict):
-                    state["llm_intent"] = llm_result.get("intent")
-                    state["llm_entities"] = llm_result.get("entities") or {}
-                    state_service.set_state(body.sender_id, state)
-            except Exception as e:
-                log.warning("llm_preparse_failed", error=str(e))
+        # ===== INTERCEPTOR: COMANDOS GLOBAIS =====
+        # Processa apenas comandos que NÃO precisam de contexto
+        if text_raw.strip():
+            # Comando: AJUDA (único comando global - resto vai para LLM)
+            if detect.detect_help_command(text_raw):
+                msg = (
+                    "📋 *Comandos disponíveis:*\n\n"
+                    "• *ajuda* - Mostra esta mensagem\n"
+                    "• *próximo* - Vê o próximo imóvel\n"
+                    "• *sim* - Confirma interesse\n"
+                    "• *não* - Recusa ou pula etapa\n\n"
+                    f"📍 *Você está em:* {stage.replace('_', ' ').title()}\n\n"
+                    "Continue de onde parou!"
+                )
+                return MCPResponse(message=msg, tool_calls=tool_calls)
         
         # Roteamento para handlers específicos
         if stage == "start":
@@ -292,6 +313,13 @@ async def execute_mcp(
         
         # Atualizar state no Redis
         if state:
+            log.info("saving_state_to_redis", 
+                     sender_id=body.sender_id,
+                     stage=state.get("stage"),
+                     state_keys=list(state.keys()),
+                     has_purpose=bool(state.get("purpose")),
+                     has_type=bool(state.get("type")),
+                     has_city=bool(state.get("city")))
             state_service.set_state(body.sender_id, state)
         else:
             state_service.clear_state(body.sender_id)
