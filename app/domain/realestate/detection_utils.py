@@ -68,19 +68,8 @@ def detect_purpose(text: str) -> Optional[str]:
 
 
 def detect_property_type(text: str) -> Optional[str]:
-    """Detecta tipo de imóvel (house/apartment/commercial/land) via LLM."""
-    llm = get_llm_service()
-    try:
-        result = asyncio.run(llm.extract_intent_and_entities(text))
-        prop_type = result.get("entities", {}).get("tipo")
-        if prop_type:
-            return prop_type
-    except Exception as e:
-        import structlog
-        log = structlog.get_logger()
-        log.warning("llm_detect_property_type_failed", error=str(e), text=text)
-    
-    # Fallback para regex expandido
+    """Detecta tipo de imóvel (house/apartment/commercial/land) priorizando regex."""
+    # PRIORIDADE 1: Regex exato (mais confiável)
     text_lower = text.lower().strip()
     if text_lower in ["casa", "sobrado"]:
         return "house"
@@ -91,7 +80,7 @@ def detect_property_type(text: str) -> Optional[str]:
     if text_lower in ["terreno", "lote", "área"]:
         return "land"
     
-    # Fallback parcial (contém palavra-chave)
+    # PRIORIDADE 2: Regex parcial (contém palavra-chave)
     if "casa" in text_lower or "sobrado" in text_lower:
         return "house"
     if any(kw in text_lower for kw in ["apartamento", "apto", "ap", "flat"]):

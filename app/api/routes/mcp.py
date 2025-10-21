@@ -279,6 +279,8 @@ async def execute_mcp(
             msg, state, continue_loop = handler.handle_start(text_raw, state)
         elif stage == "awaiting_lgpd_consent":
             msg, state, continue_loop = handler.handle_lgpd_consent(text, state)
+        elif stage == "awaiting_name":
+            msg, state, continue_loop = handler.handle_name(text, state)
         elif stage == "awaiting_purpose":
             msg, state, continue_loop = handler.handle_purpose(text, state)
         elif stage == "awaiting_city":

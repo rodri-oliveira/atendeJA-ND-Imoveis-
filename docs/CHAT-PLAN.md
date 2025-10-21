@@ -124,6 +124,73 @@
 - Mensagens do bot não são mais reprocessadas como entrada do usuário
 - Registra `lastBotByChat` ANTES de enviar (evita race condition)
 
+## Melhorias implementadas (v4 - Refinamento Robusto e UX)
+
+### Personalização com nome do usuário
+- **Problema**: Bot não usava nome do usuário nas mensagens
+- **Solução**: 
+  - Extrai nome via LLM no estágio `awaiting_name`
+  - Armazena em `state["user_name"]`
+  - Usa em todas as mensagens: "Rodrigo, gostou deste imóvel?"
+- **Status**: RESOLVIDO
+
+### Detecção genérica de refinamento
+- **Problema**: Cada critério tinha lógica duplicada em múltiplos handlers
+- **Solução**: 
+  - Criada função centralizada `_detect_refinement_intent()`
+  - Detecta QUALQUER critério: quartos, preço, tipo, cidade, bairro, finalidade
+  - Lógica: se valor especificado → aplica direto, senão → pergunta
+  - Usado em `handle_property_feedback` e `handle_visit_decision`
+- **Status**: RESOLVIDO
+
+### Mudança de finalidade com reset de preços
+- **Problema**: Ao mudar de COMPRA → ALUGUEL, preços ficavam incompatíveis (R$ 400.000 para aluguel!)
+- **Solução**: 
+  - Detecta mudança de finalidade
+  - Reseta `price_min` e `price_max`
+  - Explica ao cliente: "Como você mudou de COMPRA para ALUGUEL, preciso reajustar os valores"
+  - Mantém outros critérios (tipo, cidade, bairro, quartos)
+- **Status**: RESOLVIDO
+
+### Priorização de regex sobre LLM
+- **Problema**: LLM retornava `tipo: "house"` para input "ap"
+- **Solução**: 
+  - `detect_property_type()` prioriza regex exato antes de LLM
+  - `handle_type()` prioriza detecção local sobre LLM entities
+  - Regex: "ap" → "apartment" (100% confiável)
+- **Status**: RESOLVIDO
+
+### Busca exata por número de quartos
+- **Problema**: Busca usava `bedrooms >= X` (retornava imóveis com mais quartos)
+- **Solução**: 
+  - Mudado para `bedrooms == X` (busca exata)
+  - Se não encontrar, retorna "não encontrei imóveis com 4 quartos"
+- **Status**: RESOLVIDO
+
+### Função format_no_more_properties criada
+- **Problema**: `AttributeError: format_no_more_properties` ao clicar "próximo" no último imóvel
+- **Solução**: 
+  - Criada função em `message_formatters.py`
+  - Mensagem: "Esses foram todos os imóveis disponíveis. Gostaria de ajustar os critérios?"
+- **Status**: RESOLVIDO
+
+### Textos com opção "ajustar critérios"
+- **Problema**: Mensagens não mencionavam opção de ajustar critérios
+- **Solução**: 
+  - Card do imóvel: "Digite 'sim', 'próximo' ou 'ajustar critérios'"
+  - Detalhes: "Digite 'agendar', 'próximo' ou 'ajustar critérios'"
+  - Melhora descoberta de funcionalidade
+- **Status**: RESOLVIDO
+
+### Arquitetura de refinamento escalável
+- **Princípios aplicados**:
+  - ✅ DRY: Lógica centralizada em `_detect_refinement_intent()`
+  - ✅ Escalável: Fácil adicionar novos critérios
+  - ✅ Inteligente: Detecta se valor foi especificado
+  - ✅ Conversacional: Pergunta quando necessário
+  - ✅ Silencioso: Busca sem mensagens redundantes
+  - ✅ Transparente: Explica por que está perguntando novamente
+
 ## Referências de código
 - `app/main.py` — roteamento e middleware de erro.
 - `app/api/routes/mcp.py` — endpoint `POST /execute`.

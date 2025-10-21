@@ -63,7 +63,8 @@ class LLMService:
                     "estado": str | null,
                     "preco_min": float | null,
                     "preco_max": float | null,
-                    "dormitorios": int | null
+                    "dormitorios": int | null,
+                    "nome_usuario": str | null
                 }
             }
         """
@@ -79,7 +80,8 @@ Retorne APENAS um JSON válido no formato:
     "estado": sigla UF (2 letras) ou null,
     "preco_min": número ou null,
     "preco_max": número ou null,
-    "dormitorios": número ou null
+    "dormitorios": número ou null,
+    "nome_usuario": primeiro nome do usuário se ele se apresentar (ex: "me chamo João", "sou Maria", "meu nome é Pedro") ou null
   }
 }
 
@@ -131,7 +133,13 @@ Input: "cem mil"
 Output: {"intent":"buscar_imovel","entities":{"finalidade":null,"tipo":null,"cidade":null,"estado":null,"preco_min":null,"preco_max":100000,"dormitorios":null}}
 
 Input: "locação"
-Output: {"intent":"buscar_imovel","entities":{"finalidade":"rent","tipo":null,"cidade":null,"estado":null,"preco_min":null,"preco_max":null,"dormitorios":null}}
+Output: {"intent":"buscar_imovel","entities":{"finalidade":"rent","tipo":null,"cidade":null,"estado":null,"preco_min":null,"preco_max":null,"dormitorios":null,"nome_usuario":null}}
+
+Input: "Olá, me chamo Georgia e tenho interesse nesse imóvel"
+Output: {"intent":"buscar_imovel","entities":{"finalidade":null,"tipo":null,"cidade":null,"estado":null,"preco_min":null,"preco_max":null,"dormitorios":null,"nome_usuario":"Georgia"}}
+
+Input: "Meu nome é Thiago, quero alugar casa"
+Output: {"intent":"buscar_imovel","entities":{"finalidade":"rent","tipo":"house","cidade":null,"estado":null,"preco_min":null,"preco_max":null,"dormitorios":null,"nome_usuario":"Thiago"}}
 
 Agora processe a mensagem do usuário e retorne APENAS o JSON."""
 
@@ -163,7 +171,8 @@ Agora processe a mensagem do usuário e retorne APENAS o JSON."""
                     "estado": None,
                     "preco_min": None,
                     "preco_max": None,
-                    "dormitorios": None
+                    "dormitorios": None,
+                    "nome_usuario": None
                 }
             }
 

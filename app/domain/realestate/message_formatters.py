@@ -30,7 +30,7 @@ def format_welcome_message() -> str:
     )
 
 
-def format_property_card(prop_details: Dict[str, Any], purpose: str) -> str:
+def format_property_card(prop_details: Dict[str, Any], purpose: str, user_name: str = "") -> str:
     """
     Formata card de imóvel individual.
     Formato: 🏢 #A738 - Apartamento 2 Quartos
@@ -61,55 +61,68 @@ def format_property_card(prop_details: Dict[str, Any], purpose: str) -> str:
     cidade = prop_details['cidade']
     estado = prop_details['estado']
     
+    name_prefix = f"{user_name}, " if user_name else ""
     msg_lines = [
         f"🏢 *#{codigo} - {tipo_txt} {quartos_txt}*",
         f"📍 {bairro}, {cidade}-{estado}",
         f"{purpose_symbol} {price_txt}",
         "",
-        "*Gostou deste imóvel?* Digite 'sim' para mais detalhes ou 'próximo' para ver outra opção."
+        f"{name_prefix}*gostou deste imóvel?* Digite 'sim' para mais detalhes, 'próximo' para ver outra opção ou 'ajustar critérios' para refinar a busca."
     ]
     
     return "\n".join(msg_lines)
 
 
-def format_property_details(prop_details: Dict[str, Any]) -> str:
+def format_property_details(prop_details: Dict[str, Any], user_name: str = "") -> str:
     """Formata detalhes completos do imóvel."""
     descricao = prop_details.get("descricao") or "Sem descrição disponível."
     if descricao and len(descricao) > 300:
         descricao = descricao[:297] + "..."
     
+    name_prefix = f"{user_name}, " if user_name else ""
     msg_lines = [
         "*Detalhes Completos:*\n",
         f"📋 *Descrição:*",
         descricao,
         "",
-        f"🛏️ Quartos: {prop_details.get('dormitorios', '-')}",
+        f"🛌️ Quartos: {prop_details.get('dormitorios', '-')}",
         f"🚿 Banheiros: {prop_details.get('banheiros', '-')}",
         f"🚗 Vagas: {prop_details.get('vagas', '-')}",
-        f"📐 Área: {prop_details.get('area_total', '-')} m²",
+        f"📏 Área: {prop_details.get('area_total', '-')} m²",
         "",
-        "*Gostaria de agendar uma visita?* Digite 'agendar' ou 'próximo' para ver outras opções."
+        f"{name_prefix}*gostaria de agendar uma visita?* Digite 'agendar', 'próximo' para ver outras opções ou 'ajustar critérios' para refinar a busca."
     ]
     
     return "\n".join(msg_lines)
 
 
-def format_no_results_message(city: str) -> str:
+def format_no_results_message(city: str, user_name: str = "") -> str:
     """Mensagem quando não há resultados."""
+    name_prefix = f"{user_name}, " if user_name else ""
     return (
-        f"Infelizmente não encontrei imóveis disponíveis com esses critérios em {city}. 😔\n\n"
+        f"{name_prefix}infelizmente não encontrei imóveis disponíveis com esses critérios em {city}. 😔\n\n"
         "Mas fique tranquilo! Salvei suas preferências e assim que tivermos uma opção que combine com o que você procura, "
         "entraremos em contato. 📲\n\n"
         "Gostaria de buscar em outra cidade ou ajustar os critérios?"
     )
 
 
-def format_end_of_results_message() -> str:
+def format_end_of_results_message(user_name: str = "") -> str:
     """Mensagem quando acabam os imóveis."""
+    name_prefix = f"{user_name}, " if user_name else ""
     return (
-        "Esses foram todos os imóveis que encontrei com seus critérios. 🏠\n\n"
+        f"{name_prefix}esses foram todos os imóveis que encontrei com seus critérios. 🏠\n\n"
         "Gostou de algum? Se quiser, posso buscar com outros critérios ou você pode me informar "
         "qual imóvel te interessou mais para agendarmos uma visita!"
+    )
+
+
+def format_no_more_properties(user_name: str = "") -> str:
+    """Mensagem quando não há mais imóveis para mostrar."""
+    name_prefix = f"{user_name}, " if user_name else ""
+    return (
+        f"{name_prefix}esses foram todos os imóveis disponíveis com seus critérios de busca. 🏠\n\n"
+        "Gostaria de *ajustar os critérios* para ver mais opções ou posso te ajudar com algo mais?"
     )
 
 
