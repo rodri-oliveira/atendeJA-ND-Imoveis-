@@ -225,6 +225,7 @@ async function handleMessage(msg, source) {
       console.log('[wa] ✅ Processando fromMe para:', chatId)
       const mcp = await sendToMCP(text, chatId)
       const reply = mcp?.message || 'Ok.'
+      const media = mcp?.media || []
       
       console.log('[wa] 📤 Enviando resposta (fromMe) para:', chatId)
       console.log('[wa] 📝 Resposta:', reply)
@@ -232,6 +233,22 @@ async function handleMessage(msg, source) {
       if (OUTBOUND_ENABLED) {
         // Registrar ANTES de enviar para evitar race condition
         lastBotByChat.set(chatId, { body: reply, ts: Date.now() })
+        
+        // Enviar imagens primeiro (se houver)
+        if (media && media.length > 0) {
+          const { MessageMedia } = require('whatsapp-web.js')
+          for (const url of media) {
+            try {
+              console.log('[wa] 📤 Enviando imagem:', url)
+              const mediaMsg = await MessageMedia.fromUrl(url)
+              await client.sendMessage(chatId, mediaMsg)
+            } catch (e) {
+              console.error('[wa] ❌ Erro ao enviar imagem:', e.message)
+            }
+          }
+        }
+        
+        // Enviar texto depois
         await client.sendMessage(chatId, reply)
         console.log('[wa] ✅ Resposta enviada (fromMe) com sucesso')
       } else {
@@ -276,9 +293,27 @@ async function handleMessage(msg, source) {
 
     const mcp = await sendToMCP(text, chatId)
     const reply = mcp?.message || 'Ok.'
+    const media = mcp?.media || []
+    
     if (OUTBOUND_ENABLED) {
       // Registrar ANTES de enviar para evitar race condition
       lastBotByChat.set(chatId, { body: reply, ts: Date.now() })
+      
+      // Enviar imagens primeiro (se houver)
+      if (media && media.length > 0) {
+        const { MessageMedia } = require('whatsapp-web.js')
+        for (const url of media) {
+          try {
+            console.log('[wa] 📤 Enviando imagem:', url)
+            const mediaMsg = await MessageMedia.fromUrl(url)
+            await client.sendMessage(chatId, mediaMsg)
+          } catch (e) {
+            console.error('[wa] ❌ Erro ao enviar imagem:', e.message)
+          }
+        }
+      }
+      
+      // Enviar texto depois
       await client.sendMessage(chatId, reply)
     } else {
       console.log('[wa] OUTBOUND desabilitado: não enviando resposta (inbound).')

@@ -127,6 +127,7 @@ def extract_price(text: str) -> Optional[float]:
         "oitenta mil": 80000, "80 mil": 80000, "80k": 80000,
         "noventa mil": 90000, "90 mil": 90000, "90k": 90000,
         # Milhares
+        "mil": 1000, "um mil": 1000, "1 mil": 1000, "1k": 1000,
         "dois mil": 2000, "2 mil": 2000, "2k": 2000,
         "três mil": 3000, "tres mil": 3000, "3 mil": 3000, "3k": 3000,
         "quatro mil": 4000, "4 mil": 4000, "4k": 4000,

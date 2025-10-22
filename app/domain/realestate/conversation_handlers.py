@@ -239,13 +239,24 @@ class ConversationHandler:
         log = structlog.get_logger()
         from app.domain.realestate.models import PropertyType, PropertyPurpose
         
+        # Validação: corrigir price_min > price_max (erro comum de interpretação)
+        price_min = state.get("price_min")
+        price_max = state.get("price_max")
+        if price_min is not None and price_max is not None:
+            if float(price_min) > float(price_max):
+                log.warning("price_min_greater_than_max_fixing", 
+                           price_min=price_min, price_max=price_max)
+                # Inverter valores
+                state["price_min"], state["price_max"] = price_max, price_min
+                price_min, price_max = state["price_min"], state["price_max"]
+        
         # Log dos critérios de busca
         log.info("searching_criteria", 
                  purpose=state.get("purpose"),
                  type=state.get("type"),
                  city=state.get("city"),
-                 price_min=state.get("price_min"),
-                 price_max=state.get("price_max"),
+                 price_min=price_min,
+                 price_max=price_max,
                  bedrooms=state.get("bedrooms"))
         
         # Montar query
@@ -393,6 +404,17 @@ class ConversationHandler:
             "land": ["terreno", "lote"]
         }
         
+        # Fallback: detectar tipo por regex quando LLM falhar
+        if not new_type or new_type in invalid_types or new_type == "":
+            if any(kw in text_lower for kw in ["casa"]):
+                new_type = "house"
+            elif any(kw in text_lower for kw in ["apartamento", "ap", "apto"]):
+                new_type = "apartment"
+            elif any(kw in text_lower for kw in ["comercial", "loja", "sala"]):
+                new_type = "commercial"
+            elif any(kw in text_lower for kw in ["terreno", "lote"]):
+                new_type = "land"
+        
         if new_type and new_type not in invalid_types:
             keywords = type_keywords.get(new_type, [])
             if any(kw in text_lower for kw in keywords):
@@ -429,7 +451,14 @@ class ConversationHandler:
         purpose_from_llm = llm_entities.get("finalidade")
         current_purpose = state.get("purpose")
         
-        if purpose_from_llm and purpose_from_llm != current_purpose and any(kw in text_lower for kw in ["comprar", "alugar", "vender", "locação", "aluguel", "finalidade"]):
+        # Fallback: detectar finalidade por regex quando LLM falhar
+        if not purpose_from_llm or purpose_from_llm == "":
+            if any(kw in text_lower for kw in ["comprar", "compra", "venda", "vender"]):
+                purpose_from_llm = "sale"
+            elif any(kw in text_lower for kw in ["alugar", "aluguel", "locação", "locacao", "locar"]):
+                purpose_from_llm = "rent"
+        
+        if purpose_from_llm and purpose_from_llm != current_purpose and any(kw in text_lower for kw in ["comprar", "alugar", "vender", "locação", "aluguel", "finalidade", "compra", "venda", "locar"]):
             # Mudou finalidade - resetar preços (valores incompatíveis)
             state["purpose"] = purpose_from_llm
             state["price_min"] = None
@@ -508,17 +537,29 @@ class ConversationHandler:
                 state["stage"] = "showing_property"
                 return (msg, state, True)
             
+            # Buscar as 3 primeiras imagens (ordenadas por sort_order)
+            images = self.db.execute(
+                select(PropertyImage)
+                .where(PropertyImage.property_id == prop_id)
+                .order_by(PropertyImage.sort_order.asc())
+                .limit(3)
+            ).scalars().all()
+            
+            image_urls = [img.url for img in images] if images else []
+            
             prop_details = {
                 "descricao": prop.description,
                 "dormitorios": prop.bedrooms,
                 "banheiros": prop.bathrooms,
                 "vagas": prop.parking_spots,
                 "area_total": prop.area_total,
+                "images": image_urls,  # Adicionar URLs das imagens
             }
             
             user_name = state.get("user_name", "")
             msg = fmt.format_property_details(prop_details, user_name)
             state["interested_property_id"] = prop_id
+            state["property_detail_images"] = image_urls  # Armazenar para MCP enviar
             state["stage"] = "awaiting_visit_decision"
             return (msg, state, False)
         

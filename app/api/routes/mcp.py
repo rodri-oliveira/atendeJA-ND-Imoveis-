@@ -76,6 +76,7 @@ class MCPToolCall(BaseModel):
 class MCPResponse(BaseModel):
     message: str
     tool_calls: List[MCPToolCall] = []
+    media: List[str] = []  # URLs de imagens/vídeos para enviar
 
 
 # --- Auth ---
@@ -328,7 +329,13 @@ async def execute_mcp(
         
         # Se há mensagem, retornar
         if msg:
-            return MCPResponse(message=msg, tool_calls=tool_calls)
+            # Extrair imagens do state (se houver)
+            media_urls = state.get("property_detail_images", [])
+            if media_urls:
+                # Limpar imagens do state após extrair (para não reenviar)
+                state.pop("property_detail_images", None)
+                state_service.set_state(body.sender_id, state)
+            return MCPResponse(message=msg, tool_calls=tool_calls, media=media_urls)
         
         # Se não deve continuar loop, sair
         if not continue_loop:

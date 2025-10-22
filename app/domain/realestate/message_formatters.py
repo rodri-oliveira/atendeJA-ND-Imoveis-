@@ -79,6 +79,9 @@ def format_property_details(prop_details: Dict[str, Any], user_name: str = "") -
     if descricao and len(descricao) > 300:
         descricao = descricao[:297] + "..."
     
+    images = prop_details.get("images", [])
+    has_images = len(images) > 0
+    
     name_prefix = f"{user_name}, " if user_name else ""
     msg_lines = [
         "*Detalhes Completos:*\n",
@@ -90,8 +93,17 @@ def format_property_details(prop_details: Dict[str, Any], user_name: str = "") -
         f"🚗 Vagas: {prop_details.get('vagas', '-')}",
         f"📏 Área: {prop_details.get('area_total', '-')} m²",
         "",
-        f"{name_prefix}*gostaria de agendar uma visita?* Digite 'agendar', 'próximo' para ver outras opções ou 'ajustar critérios' para refinar a busca."
     ]
+    
+    # Aviso sobre imagens
+    if not has_images:
+        msg_lines.append("📸 *Fotos:* Mais detalhes e imagens disponíveis através de agendamento com um profissional.\n")
+    elif len(images) >= 3:
+        msg_lines.append("📸 *Mais imagens disponíveis através de agendamento com um profissional.*\n")
+    
+    msg_lines.append(
+        f"{name_prefix}*gostaria de agendar uma visita?* Digite 'agendar', 'próximo' para ver outras opções ou 'ajustar critérios' para refinar a busca."
+    )
     
     return "\n".join(msg_lines)
 
