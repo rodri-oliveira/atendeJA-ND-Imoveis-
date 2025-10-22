@@ -293,15 +293,28 @@ def _has_pending_visit(db: Session, lead_id: int) -> bool:
 
 
 def _is_lead_fully_qualified(lead: re_models.Lead) -> bool:
-    has_identity = bool((lead.name or "").strip()) and bool((lead.phone or "").strip()) and bool((lead.email or "").strip())
+    """
+    Lead é QUALIFICADO quando:
+    1. Forneceu preferências mínimas (finalidade, tipo, cidade, preço)
+    2. Bot já enviou sugestões de imóveis
+    
+    NÃO exige: email, estado (redundante), nome completo
+    """
+    # Preferências mínimas necessárias
     has_prefs = (
-        bool((lead.finalidade or "").strip())
-        and bool((lead.tipo or "").strip())
-        and bool((lead.cidade or "").strip())
-        and bool((lead.estado or "").strip())
-        and (lead.preco_min is not None or lead.preco_max is not None or lead.property_interest_id is not None)
+        bool((lead.finalidade or "").strip())  # Compra ou locação
+        and bool((lead.tipo or "").strip())    # Casa, apartamento, etc
+        and bool((lead.cidade or "").strip())  # Cidade de interesse
+        and (lead.preco_min is not None or lead.preco_max is not None)  # Faixa de preço
     )
-    return has_identity and has_prefs
+    
+    # Verificar se bot já enviou imóveis (search_results no preferences)
+    bot_sent_properties = False
+    if lead.preferences and isinstance(lead.preferences, dict):
+        search_results = lead.preferences.get('search_results')
+        bot_sent_properties = bool(search_results and len(search_results) > 0)
+    
+    return has_prefs and bot_sent_properties
 
 
 def _update_lead_on_inbound(db: Session, tenant_id: int, contact_id: int, conversation_id: int) -> None:
