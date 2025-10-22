@@ -48,6 +48,22 @@ class LLMService:
                     last_err = e
                     continue
             raise Exception(f"LLM unavailable: {last_err}")
+
+    def _chat_sync(self, messages: List[Dict[str, str]]) -> str:
+        """Versão síncrona de chat: usa httpx.Client."""
+        payload = {"model": self.model, "messages": messages, "stream": False}
+        last_err: Optional[Exception] = None
+        with httpx.Client() as client:
+            for url in self.base_urls:
+                try:
+                    r = client.post(f"{url}/api/chat", json=payload, timeout=self.timeout)
+                    r.raise_for_status()
+                    js = r.json()
+                    return js.get("message", {}).get("content", "")
+                except Exception as e:
+                    last_err = e
+                    continue
+        raise Exception(f"LLM unavailable: {last_err}")
     
     async def extract_intent_and_entities(self, user_input: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
@@ -162,6 +178,56 @@ Agora processe a mensagem do usuário e retorne APENAS o JSON."""
             return result
         except json.JSONDecodeError:
             # Fallback: retornar estrutura vazia
+            return {
+                "intent": "outro",
+                "entities": {
+                    "finalidade": None,
+                    "tipo": None,
+                    "cidade": None,
+                    "estado": None,
+                    "preco_min": None,
+                    "preco_max": None,
+                    "dormitorios": None,
+                    "nome_usuario": None
+                }
+            }
+
+    def extract_intent_and_entities_sync(self, user_input: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Versão síncrona para uso em contextos não-async (ex.: handlers sync)."""
+        system_prompt = """Você é um assistente especializado em imóveis. Sua tarefa é extrair informações estruturadas de mensagens de usuários.
+
+Retorne APENAS um JSON válido no formato:
+{
+  "intent": "buscar_imovel" ou "responder_lgpd" ou "proximo_imovel" ou "ajustar_criterios" ou "outro",
+  "entities": {
+    "finalidade": "rent" (alugar/locação/aluguel) ou "sale" (comprar/venda/compra) ou null,
+    "tipo": "house" (casa) ou "apartment" (apartamento/ap/apto) ou "commercial" (comercial) ou "land" (terreno) ou null,
+    "cidade": nome da cidade ou null,
+    "estado": sigla UF (2 letras) ou null,
+    "preco_min": número ou null,
+    "preco_max": número ou null,
+    "dormitorios": número ou null,
+    "nome_usuario": primeiro nome do usuário se ele se apresentar (ex: "me chamo João", "sou Maria", "meu nome é Pedro") ou null
+  }
+}
+
+Agora processe a mensagem do usuário e retorne APENAS o JSON."""
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_input}
+        ]
+
+        response = self._chat_sync(messages)
+
+        try:
+            response_clean = response.strip()
+            if response_clean.startswith("```"):
+                lines = response_clean.split("\n")
+                response_clean = "\n".join(lines[1:-1]) if len(lines) > 2 else response_clean
+            result = json.loads(response_clean)
+            return result
+        except json.JSONDecodeError:
             return {
                 "intent": "outro",
                 "entities": {

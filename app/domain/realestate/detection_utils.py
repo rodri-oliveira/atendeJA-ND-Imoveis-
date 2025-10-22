@@ -4,7 +4,6 @@ Mantém a mesma interface para compatibilidade com conversation_handlers.py.
 VERSÃO: 2024-10-16 14:28 - Fallback robusto para valores por extenso
 """
 from typing import Optional
-import asyncio
 from app.services.llm_service import get_llm_service
 import structlog
 
@@ -107,7 +106,7 @@ def detect_consent(text: str) -> bool:
     """Detecta consentimento LGPD via LLM."""
     llm = get_llm_service()
     try:
-        result = asyncio.run(llm.extract_intent_and_entities(text))
+        result = llm.extract_intent_and_entities_sync(text)
         return result.get("intent") == "responder_lgpd"
     except:
         # Fallback para regex simples
@@ -119,7 +118,7 @@ def detect_purpose(text: str) -> Optional[str]:
     """Detecta finalidade (rent/sale) via LLM."""
     llm = get_llm_service()
     try:
-        result = asyncio.run(llm.extract_intent_and_entities(text))
+        result = llm.extract_intent_and_entities_sync(text)
         return result.get("entities", {}).get("finalidade")
     except:
         # Fallback para regex
@@ -220,7 +219,7 @@ def extract_price(text: str) -> Optional[float]:
     # PRIORIDADE 3: LLM (último recurso)
     llm = get_llm_service()
     try:
-        result = asyncio.run(llm.extract_intent_and_entities(text))
+        result = llm.extract_intent_and_entities_sync(text)
         entities = result.get("entities", {})
         price = entities.get("preco_max") or entities.get("preco_min")
         if price is not None:
@@ -237,7 +236,7 @@ def extract_bedrooms(text: str) -> Optional[int]:
     """Extrai número de dormitórios via LLM (com fallback para regex)."""
     llm = get_llm_service()
     try:
-        result = asyncio.run(llm.extract_intent_and_entities(text))
+        result = llm.extract_intent_and_entities_sync(text)
         dorm = result.get("entities", {}).get("dormitorios")
         return int(dorm) if dorm is not None else None
     except:
@@ -287,7 +286,7 @@ def detect_next_property(text: str) -> bool:
     """Detecta pedido para próximo imóvel via LLM."""
     llm = get_llm_service()
     try:
-        result = asyncio.run(llm.extract_intent_and_entities(text))
+        result = llm.extract_intent_and_entities_sync(text)
         if result.get("intent") == "proximo_imovel":
             return True
     except:
@@ -307,7 +306,7 @@ def detect_refine_search(text: str) -> bool:
     """Detecta intenção de ajustar/refazer critérios de busca via LLM."""
     llm = get_llm_service()
     try:
-        result = asyncio.run(llm.extract_intent_and_entities(text))
+        result = llm.extract_intent_and_entities_sync(text)
         if result.get("intent") == "ajustar_criterios":
             return True
     except:
