@@ -332,6 +332,8 @@ def create_lead(payload: LeadCreate, db: Session = Depends(get_db)):
 )
 def list_leads(
     db: Session = Depends(get_db),
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
     status: Optional[str] = Query(None),
     finalidade: Optional[PropertyPurpose] = Query(None),
     tipo: Optional[PropertyType] = Query(None),
@@ -376,22 +378,23 @@ def list_leads(
     if campaign_source:
         q = q.filter(Lead.campaign_source == campaign_source)
 
-    rows = q.order_by(Lead.id.desc()).all()
+    rows = q.order_by(Lead.id.desc()).limit(limit).offset(offset).all()
     return [
         LeadOut(
             id=r.id,
-            nome=r.name,
-            telefone=r.phone,
+            name=r.name,
+            phone=r.phone,
             email=r.email,
-            origem=r.source,
-            preferencias=r.preferences,
-            consentimento_lgpd=r.consent_lgpd,
+            source=r.source,
+            preferences=r.preferences,
+            consent_lgpd=r.consent_lgpd,
             status=r.status,
             last_inbound_at=r.last_inbound_at,
             last_outbound_at=r.last_outbound_at,
             status_updated_at=r.status_updated_at,
             property_interest_id=r.property_interest_id,
             contact_id=r.contact_id,
+            external_property_id=r.external_property_id,
             finalidade=r.finalidade,
             tipo=r.tipo,
             cidade=r.cidade,
@@ -405,7 +408,6 @@ def list_leads(
             campaign_name=r.campaign_name,
             campaign_content=r.campaign_content,
             landing_url=r.landing_url,
-            external_property_id=r.external_property_id,
         )
         for r in rows
     ]

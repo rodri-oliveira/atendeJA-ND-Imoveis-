@@ -241,12 +241,12 @@ class LeadCreate(BaseModel):
 
 class LeadOut(BaseModel):
     id: int
-    nome: Optional[str]
-    telefone: Optional[str]
-    email: Optional[str]
-    origem: Optional[str]
-    preferencias: Optional[dict]
-    consentimento_lgpd: Optional[bool] = None
+    name: Optional[str] = None
+    phone: Optional[str] = None
+    email: Optional[str] = None
+    source: Optional[str] = None
+    preferences: Optional[dict] = None
+    consent_lgpd: Optional[bool] = None
     # Status e timestamps
     status: Optional[str] = None
     last_inbound_at: Optional[datetime] = None
@@ -255,6 +255,7 @@ class LeadOut(BaseModel):
     # Direcionamento/integração
     property_interest_id: Optional[int] = None
     contact_id: Optional[int] = None
+    external_property_id: Optional[str] = None
     # Filtros denormalizados (segmentação)
     finalidade: Optional[PropertyPurpose] = None
     tipo: Optional[PropertyType] = None
