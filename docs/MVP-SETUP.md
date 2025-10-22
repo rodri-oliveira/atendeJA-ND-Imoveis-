@@ -5,6 +5,47 @@
 
 ---
 
+## ⚡ Início Rápido (Desenvolvimento)
+
+**Execute nesta ordem em terminais separados:**
+
+### **1. Containers Docker**
+```bash
+# Iniciar Redis e PostgreSQL
+docker start atendeja-redis atendeja-postgres
+
+# Verificar se estão rodando
+docker ps
+```
+
+### **2. Backend Python (FastAPI)**
+```bash
+cd "c:\rodrigo\prototipo ND Imoveis\atendeJa ND Imoveis"
+
+# Ativar ambiente virtual (OBRIGATÓRIO!)
+.venv\Scripts\activate
+
+# Iniciar servidor (dentro do .venv)
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+```
+
+> ⚠️ **IMPORTANTE:** Sempre ative o `.venv` ANTES de rodar `uvicorn`. Caso contrário, o servidor não encontrará as dependências!
+
+### **3. Adapter WhatsApp**
+```bash
+cd "c:\rodrigo\prototipo ND Imoveis\atendeJa ND Imoveis\adapter-wa"
+
+# Iniciar adapter
+npm start
+```
+
+### **4. Testar**
+- Escanear QR Code (primeira vez)
+- Enviar "ola" no WhatsApp para o seu próprio número
+- Bot deve responder com boas-vindas
+
+---
+
 ## 📋 Pré-requisitos
 
 Para executar o MVP do chatbot imobiliário, você precisa ter instalado:
