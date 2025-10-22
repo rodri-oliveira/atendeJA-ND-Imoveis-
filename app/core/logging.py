@@ -70,18 +70,29 @@ def configure_logging() -> None:
                 redacted[k] = _process_value(v)
         return redacted
 
+    import os
+    is_dev = os.getenv("APP_ENV", "dev").lower() in ("dev", "development", "local")
+
+    # Configurar logging padrão primeiro
+    logging.basicConfig(
+        format="%(message)s",
+        stream=sys.stdout,
+        level=logging.INFO,
+    )
+
     structlog.configure(
         processors=[
             structlog.processors.add_log_level,
             timestamper,
             redact_processor,
             structlog.processors.dict_tracebacks,
-            structlog.processors.JSONRenderer(),
+            structlog.dev.ConsoleRenderer(colors=True) if is_dev else structlog.processors.JSONRenderer(),
         ],
         wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),
         logger_factory=structlog.PrintLoggerFactory(file=sys.stdout),
-        cache_logger_on_first_use=True,
+        cache_logger_on_first_use=False,  # Não cachear para ver mudanças
     )
 
+    # Configurar loggers do uvicorn
     logging.getLogger("uvicorn.error").setLevel(logging.INFO)
-    logging.getLogger("uvicorn.access").setLevel(logging.INFO)
+    logging.getLogger("uvicorn.access").setLevel(logging.WARNING)  # Reduzir ruído

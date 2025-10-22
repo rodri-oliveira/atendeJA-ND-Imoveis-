@@ -11,6 +11,70 @@ import structlog
 log = structlog.get_logger()
 
 
+# ===== DETECÇÃO SIM/NÃO =====
+
+def detect_yes_no(text: str) -> Optional[str]:
+    """
+    Detecta sim/não usando regex + contexto.
+    Retorna: "yes", "no" ou None
+    """
+    text_lower = text.lower().strip()
+    
+    # Palavras-chave diretas para SIM
+    yes_keywords = [
+        "sim", "yes", "claro", "com certeza", "certeza", "ok", "okay",
+        "quero", "gostaria", "tenho", "vi um", "vi o", "já vi",
+        "tenho interesse", "me interessa", "achei um"
+    ]
+    
+    # Palavras-chave diretas para NÃO
+    no_keywords = [
+        "não", "nao", "no", "nunca", "negativo", "nem",
+        "ainda não", "ainda nao", "não tenho", "nao tenho",
+        "não vi", "nao vi", "quero buscar", "me ajude a buscar"
+    ]
+    
+    # Verificar SIM
+    for keyword in yes_keywords:
+        if keyword in text_lower:
+            return "yes"
+    
+    # Verificar NÃO
+    for keyword in no_keywords:
+        if keyword in text_lower:
+            return "no"
+    
+    return None
+
+
+def extract_property_code(text: str) -> Optional[str]:
+    """
+    Extrai código de imóvel do texto.
+    Formatos aceitos: A1234, ND12345, #1234, 1234
+    """
+    import re
+    text_clean = text.strip().upper()
+    
+    # Padrões de código
+    patterns = [
+        r'\b([A-Z]{1,3}\d{2,6})\b',        # A1234, ND12345
+        r'REF[:\s]+([A-Z]{0,3}\d{2,6})',    # REF: A1234 ou REF: 1234
+        r'CODIGO[:\s]+([A-Z]{0,3}\d{2,6})', # CODIGO: A1234 ou CODIGO: 1234
+        r'#?(\d{2,6})\b',                   # #1234, 1234 (somente dígitos)
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, text_clean)
+        if match:
+            return match.group(1)
+    
+    # Se for só números
+    if text_clean.isdigit() and 2 <= len(text_clean) <= 6:
+        return text_clean
+    
+    return None
+
+
 # ===== COMANDOS GLOBAIS =====
 
 def detect_restart_command(text: str) -> bool:

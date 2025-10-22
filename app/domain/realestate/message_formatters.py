@@ -157,3 +157,166 @@ def format_directed_property_intro(codigo: str) -> str:
         "Vou te mostrar todos os detalhes! Mas antes, preciso do seu consentimento para continuar.\n\n"
         "Você autoriza o uso dos seus dados conforme a LGPD? (responda 'sim')"
     )
+
+
+# ===== FLUXO DIRECIONADO =====
+
+def format_has_property_in_mind(user_name: str) -> str:
+    """Pergunta se o cliente já tem um imóvel específico em mente."""
+    return (
+        f"Prazer, {user_name}! 😊\n\n"
+        "Você já viu algum imóvel específico que te interessou ou quer que eu te ajude a encontrar?"
+    )
+
+
+def format_request_property_code() -> str:
+    """Solicita código do imóvel."""
+    return (
+        "Ótimo! 🎯\n\n"
+        "Por favor, me informe o *código do imóvel* que você viu.\n"
+        "Pode ser algo como: A1234, ND12345, ou apenas o número."
+    )
+
+
+def format_property_not_found(codigo: str) -> str:
+    """Mensagem quando imóvel não é encontrado."""
+    return (
+        f"Hmm... não encontrei o imóvel com o código *{codigo}* no nosso sistema. 😕\n\n"
+        "Você pode:\n"
+        "• Verificar se digitou o código corretamente\n"
+        "• Tentar outro código\n"
+        "• Ou dizer 'não' para eu te ajudar a buscar imóveis"
+    )
+
+
+def format_property_found_details(prop: Dict[str, Any]) -> str:
+    """Mostra detalhes do imóvel encontrado."""
+    tipo_map = {
+        "apartment": "Apartamento",
+        "house": "Casa",
+        "commercial": "Comercial",
+        "land": "Terreno"
+    }
+    tipo = tipo_map.get(prop.get("tipo"), prop.get("tipo", "Imóvel"))
+    
+    codigo = prop.get("ref_code") or prop.get("id")
+    preco = prop.get("preco", 0)
+    preco_fmt = f"R$ {preco:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    
+    quartos = prop.get("dormitorios")
+    banheiros = prop.get("banheiros")
+    vagas = prop.get("vagas")
+    area = prop.get("area_total")
+    
+    bairro = prop.get("bairro", "")
+    cidade = prop.get("cidade", "")
+    estado = prop.get("estado", "")
+    
+    descricao = prop.get("descricao", "")
+    if descricao and len(descricao) > 200:
+        descricao = descricao[:197] + "..."
+    
+    msg = [
+        f"🏠 *{tipo} - Código #{codigo}*\n",
+        f"📍 {bairro}, {cidade}-{estado}",
+        f"💰 {preco_fmt}\n",
+    ]
+    
+    if quartos:
+        msg.append(f"🛏️ {quartos} quarto(s)")
+    if banheiros:
+        msg.append(f"🚿 {banheiros} banheiro(s)")
+    if vagas:
+        msg.append(f"🚗 {vagas} vaga(s)")
+    if area:
+        msg.append(f"📏 {area} m²")
+    
+    if descricao:
+        msg.append(f"\n📋 {descricao}")
+    
+    msg.append("\n*Tem alguma dúvida sobre este imóvel?*")
+    
+    return "\n".join(msg)
+
+
+def format_ask_schedule_visit() -> str:
+    """Pergunta se quer agendar visita."""
+    return "Gostaria de agendar uma visita para conhecer o imóvel pessoalmente? 📅"
+
+
+def format_confirm_phone(phone: str) -> str:
+    """Confirma telefone para contato."""
+    return (
+        f"Perfeito! Vou usar este número para contato: *{phone}*\n\n"
+        "Está correto? Se preferir outro número, pode me informar agora."
+    )
+
+
+def format_request_alternative_phone() -> str:
+    """Solicita telefone alternativo."""
+    return "Por favor, me informe um número de telefone para contato (com DDD):"
+
+
+def format_invalid_phone() -> str:
+    """Mensagem de telefone inválido."""
+    return (
+        "Hmm... esse número não parece válido. 🤔\n\n"
+        "Por favor, informe um número com DDD, exemplo: (11) 98765-4321"
+    )
+
+
+def format_request_visit_date() -> str:
+    """Solicita data da visita."""
+    return (
+        "Ótimo! Quando você gostaria de fazer a visita? 📅\n\n"
+        "Você pode dizer:\n"
+        "• 'amanhã'\n"
+        "• 'segunda-feira'\n"
+        "• Ou uma data específica (ex: 25/10)"
+    )
+
+
+def format_invalid_date() -> str:
+    """Mensagem de data inválida."""
+    return (
+        "Desculpe, não consegui entender essa data. 😕\n\n"
+        "Tente novamente com:\n"
+        "• 'amanhã' ou 'hoje'\n"
+        "• Dia da semana (ex: 'segunda')\n"
+        "• Data no formato DD/MM (ex: '25/10')"
+    )
+
+
+def format_request_visit_time() -> str:
+    """Solicita horário da visita."""
+    return (
+        "E qual horário prefere? ⏰\n\n"
+        "Você pode dizer:\n"
+        "• 'manhã' (9h-12h)\n"
+        "• 'tarde' (14h-18h)\n"
+        "• Ou um horário específico (ex: '15h' ou '15:30')"
+    )
+
+
+def format_invalid_time() -> str:
+    """Mensagem de horário inválido."""
+    return (
+        "Não consegui entender esse horário. 😕\n\n"
+        "Tente:\n"
+        "• 'manhã' ou 'tarde'\n"
+        "• Horário específico (ex: '14h' ou '14:30')"
+    )
+
+
+def format_visit_scheduled(name: str, date_str: str, time_str: str, property_code: str) -> str:
+    """Confirma agendamento da visita."""
+    first_name = name.split()[0]
+    return (
+        f"✅ *Visita agendada com sucesso!*\n\n"
+        f"👤 Nome: {name}\n"
+        f"🏠 Imóvel: #{property_code}\n"
+        f"📅 Data: {date_str}\n"
+        f"⏰ Horário: {time_str}\n\n"
+        f"Perfeito, {first_name}! Nossa equipe entrará em contato para confirmar os detalhes.\n\n"
+        "Obrigado pelo interesse! 🎉"
+    )

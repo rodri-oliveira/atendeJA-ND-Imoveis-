@@ -282,6 +282,24 @@ async def execute_mcp(
             msg, state, continue_loop = handler.handle_lgpd_consent(text, state)
         elif stage == "awaiting_name":
             msg, state, continue_loop = handler.handle_name(text, state)
+        # FLUXO DIRECIONADO
+        elif stage == "awaiting_has_property_in_mind":
+            msg, state, continue_loop = handler.handle_has_property_in_mind(text, state)
+        elif stage == "awaiting_property_code":
+            msg, state, continue_loop = handler.handle_property_code(text, state)
+        elif stage == "awaiting_property_questions":
+            msg, state, continue_loop = handler.handle_property_questions(text, state)
+        elif stage == "awaiting_schedule_visit_question":
+            msg, state, continue_loop = handler.handle_schedule_visit_question(text, state)
+        elif stage == "awaiting_phone_confirmation":
+            msg, state, continue_loop = handler.handle_phone_confirmation(text, state)
+        elif stage == "awaiting_phone_input":
+            msg, state, continue_loop = handler.handle_phone_input(text, state)
+        elif stage == "awaiting_visit_date":
+            msg, state, continue_loop = handler.handle_visit_date(text, state)
+        elif stage == "awaiting_visit_time":
+            msg, state, continue_loop = handler.handle_visit_time(text, body.sender_id, state)
+        # FLUXO QUALIFICAÇÃO
         elif stage == "awaiting_purpose":
             msg, state, continue_loop = handler.handle_purpose(text, state)
         elif stage == "awaiting_city":

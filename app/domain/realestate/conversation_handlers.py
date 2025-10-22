@@ -3,12 +3,14 @@ Handlers de estágios da conversa do chatbot imobiliário.
 Responsabilidade: Lógica de transição entre estágios e processamento de entrada.
 """
 from typing import Dict, Any, Optional, Tuple
+import os
 from sqlalchemy.orm import Session
 from app.domain.realestate import detection_utils as detect
 from app.domain.realestate import message_formatters as fmt
 from app.domain.realestate.models import Property, PropertyImage
 from app.services.lead_service import LeadService
 from sqlalchemy import select
+from app.core.config import settings
 
 
 class ConversationHandler:
@@ -67,6 +69,9 @@ class ConversationHandler:
     
     def handle_name(self, text: str, state: Dict[str, Any]) -> Tuple[str, Dict[str, Any], bool]:
         """Estágio de captura de nome do usuário."""
+        import structlog
+        log = structlog.get_logger()
+        
         # Tentar extrair nome via LLM primeiro
         ent = state.get("llm_entities") or {}
         user_name = ent.get("nome_usuario")
@@ -76,9 +81,262 @@ class ConversationHandler:
             user_name = text.strip().split()[0].title()
         
         state["user_name"] = user_name
-        state["stage"] = "awaiting_purpose"
-        msg = f"Prazer em conhecer você, {user_name}! Agora me diga: você procura um imóvel para *comprar* ou para *alugar*?"
+        
+        # BIFURCAÇÃO: Perguntar se já tem imóvel em mente
+        state["stage"] = "awaiting_has_property_in_mind"
+        msg = fmt.format_has_property_in_mind(user_name)
+        
+        log.info("🔀 BIFURCAÇÃO", user_name=user_name, next_stage="awaiting_has_property_in_mind")
         return (msg, state, False)
+    
+    # ===== FLUXO DIRECIONADO =====
+    
+    def handle_has_property_in_mind(self, text: str, state: Dict[str, Any]) -> Tuple[str, Dict[str, Any], bool]:
+        """Pergunta se cliente já tem imóvel específico."""
+        import structlog
+        log = structlog.get_logger()
+        
+        detection_result = detect.detect_yes_no(text)
+        log.info("🔍 detect_yes_no", text=text, result=detection_result)
+        
+        if detection_result == "yes":
+            state["stage"] = "awaiting_property_code"
+            msg = fmt.format_request_property_code()
+            log.info("✅ Cliente TEM imóvel em mente", next_stage="awaiting_property_code")
+            return (msg, state, False)
+        elif detection_result == "no":
+            # Ir para fluxo de qualificação
+            state["stage"] = "awaiting_purpose"
+            user_name = state.get("user_name", "")
+            name_prefix = f"{user_name}, " if user_name else ""
+            msg = f"Perfeito, {name_prefix}para começarmos, me diga: você procura um imóvel para *comprar* ou para *alugar*?"
+            log.info("❌ Cliente NÃO tem imóvel em mente", next_stage="awaiting_purpose")
+            return (msg, state, False)
+        else:
+            msg = "Por favor, responda *sim* se já tem um imóvel em mente, ou *não* se quer que eu te ajude a buscar."
+            log.warning("⚠️ Não detectou sim/não", text=text)
+            return (msg, state, False)
+    
+    def handle_property_code(self, text: str, state: Dict[str, Any]) -> Tuple[str, Dict[str, Any], bool]:
+        """Busca imóvel por código."""
+        import structlog
+        log = structlog.get_logger()
+        codigo = detect.extract_property_code(text)
+        if not codigo:
+            msg = "Por favor, informe o código do imóvel (ex: A1234, ND12345, ou apenas o número)."
+            return (msg, state, False)
+
+        code_upper = codigo.strip().upper()
+        candidates = [code_upper]
+        if code_upper.isdigit():
+            candidates.extend([f"A{code_upper}", f"ND{code_upper}"])
+        log.info("property_code_candidates", input=text, extracted=code_upper, candidates=candidates)
+
+        # Depuração do caminho do banco (útil para SQLite)
+        try:
+            bind = self.db.get_bind()
+            db_url_actual = str(getattr(bind, "url", None) or "")
+            db_file = getattr(getattr(bind, "url", None), "database", None)
+            abs_db_file = os.path.abspath(db_file) if db_file else None
+            log.info("db_debug", db_url_actual=db_url_actual, db_file=db_file, db_file_abs=abs_db_file, cwd=os.getcwd())
+        except Exception:
+            pass
+
+        q = self.db.query(Property.id).filter(Property.ref_code.in_(candidates))
+        cnt = q.count()
+        log.info("property_code_query_count", count=cnt, db_url=settings.DATABASE_URL)
+        prop = self.db.query(Property).filter(Property.ref_code.in_(candidates)).first()
+        log.info("property_code_query_result", found_id=(prop.id if prop else None))
+
+        if not prop:
+            # Diagnóstico extra: quantos com ref_code não-nulo existem neste DB?
+            try:
+                total_with_ref = self.db.query(Property).filter(Property.ref_code.isnot(None)).count()
+                sample = (
+                    self.db.query(Property.ref_code)
+                    .filter(Property.ref_code.isnot(None))
+                    .limit(5)
+                    .all()
+                )
+                log.info("property_ref_debug", total_with_ref=total_with_ref, sample=[s[0] for s in sample])
+            except Exception:
+                pass
+
+            # Fallback: tentar por external_id (muitos imports ND salvam esse mesmo código como external_id)
+            prop = (
+                self.db.query(Property)
+                .filter(Property.external_id.in_(candidates))
+                .first()
+            )
+            log.info("property_code_fallback_external_id", found_id=(prop.id if prop else None))
+
+        if not prop:
+            msg = fmt.format_property_not_found(code_upper)
+            return (msg, state, False)
+
+        # Salvar no estado
+        state["directed_property_id"] = prop.id
+        state["directed_property_code"] = prop.ref_code or code_upper
+
+        # Montar detalhes com nomes corretos das colunas
+        prop_dict = {
+            "id": prop.id,
+            "ref_code": prop.ref_code,
+            "tipo": prop.type.value if getattr(prop, "type", None) else None,
+            "preco": float(prop.price) if getattr(prop, "price", None) is not None else 0,
+            "dormitorios": getattr(prop, "bedrooms", None),
+            "banheiros": getattr(prop, "bathrooms", None),
+            "vagas": getattr(prop, "parking_spots", None),
+            "area_total": float(prop.area_total) if getattr(prop, "area_total", None) is not None else None,
+            "bairro": getattr(prop, "address_neighborhood", None),
+            "cidade": getattr(prop, "address_city", None),
+            "estado": getattr(prop, "address_state", None),
+            "descricao": getattr(prop, "description", None),
+        }
+
+        msg = fmt.format_property_found_details(prop_dict)
+        state["stage"] = "awaiting_property_questions"
+        return (msg, state, False)
+    
+    def handle_property_questions(self, text: str, state: Dict[str, Any]) -> Tuple[str, Dict[str, Any], bool]:
+        """Responde dúvidas sobre o imóvel."""
+        if detect.detect_yes_no(text) == "no":
+            # Sem dúvidas, perguntar sobre agendamento
+            state["stage"] = "awaiting_schedule_visit_question"
+            msg = fmt.format_ask_schedule_visit()
+            return (msg, state, False)
+        else:
+            # Tem dúvidas - responder genericamente e perguntar sobre agendamento
+            msg = (
+                "Entendo! Para mais detalhes específicos, nossa equipe pode te ajudar melhor durante uma visita. 😊\n\n"
+                + fmt.format_ask_schedule_visit()
+            )
+            state["stage"] = "awaiting_schedule_visit_question"
+            return (msg, state, False)
+    
+    def handle_schedule_visit_question(self, text: str, state: Dict[str, Any]) -> Tuple[str, Dict[str, Any], bool]:
+        """Pergunta se quer agendar visita."""
+        if detect.detect_yes_no(text) == "yes":
+            # Confirmar telefone
+            sender_id = state.get("sender_id", "")
+            phone = sender_id.split("@")[0] if "@" in sender_id else sender_id
+            
+            state["visit_phone"] = phone
+            state["stage"] = "awaiting_phone_confirmation"
+            msg = fmt.format_confirm_phone(phone)
+            return (msg, state, False)
+        else:
+            msg = "Sem problemas! Se mudar de ideia, é só me chamar. 😊\n\nPosso te ajudar com algo mais?"
+            return (msg, {}, False)  # Limpar estado
+    
+    def handle_phone_confirmation(self, text: str, state: Dict[str, Any]) -> Tuple[str, Dict[str, Any], bool]:
+        """Confirma ou solicita telefone alternativo."""
+        if detect.detect_yes_no(text) == "yes":
+            # Telefone confirmado, solicitar data
+            state["stage"] = "awaiting_visit_date"
+            msg = fmt.format_request_visit_date()
+            return (msg, state, False)
+        else:
+            # Solicitar telefone alternativo
+            state["stage"] = "awaiting_phone_input"
+            msg = fmt.format_request_alternative_phone()
+            return (msg, state, False)
+    
+    def handle_phone_input(self, text: str, state: Dict[str, Any]) -> Tuple[str, Dict[str, Any], bool]:
+        """Captura e valida telefone alternativo."""
+        from app.services.visit_service import VisitService
+        
+        is_valid, formatted_phone = VisitService.validate_phone(text)
+        
+        if is_valid:
+            state["visit_phone"] = formatted_phone
+            state["stage"] = "awaiting_visit_date"
+            msg = fmt.format_request_visit_date()
+            return (msg, state, False)
+        else:
+            msg = fmt.format_invalid_phone()
+            return (msg, state, False)
+    
+    def handle_visit_date(self, text: str, state: Dict[str, Any]) -> Tuple[str, Dict[str, Any], bool]:
+        """Captura data da visita."""
+        from app.services.visit_service import VisitService
+        
+        parsed_date = VisitService.parse_date_input(text)
+        
+        if parsed_date:
+            state["visit_date"] = parsed_date.isoformat()
+            state["visit_date_display"] = parsed_date.strftime("%d/%m/%Y")
+            state["stage"] = "awaiting_visit_time"
+            msg = fmt.format_request_visit_time()
+            return (msg, state, False)
+        else:
+            msg = fmt.format_invalid_date()
+            return (msg, state, False)
+    
+    def handle_visit_time(self, text: str, sender_id: str, state: Dict[str, Any]) -> Tuple[str, Dict[str, Any], bool]:
+        """Captura horário e cria agendamento."""
+        from app.services.visit_service import VisitService
+        from app.services.notification_service import NotificationService
+        from app.services.lead_service import LeadService
+        from datetime import datetime
+        
+        # Parse da data base
+        visit_date_str = state.get("visit_date")
+        if not visit_date_str:
+            msg = "Erro: data não encontrada. Vamos recomeçar o agendamento."
+            state["stage"] = "awaiting_visit_date"
+            return (msg, state, False)
+        
+        visit_date = datetime.fromisoformat(visit_date_str)
+        parsed_time = VisitService.parse_time_input(text, visit_date)
+        
+        if not parsed_time:
+            msg = fmt.format_invalid_time()
+            return (msg, state, False)
+        
+        # Criar agendamento
+        user_name = state.get("user_name", "Cliente")
+        phone = state.get("visit_phone", sender_id)
+        property_id = state.get("directed_property_id")
+        property_code = state.get("directed_property_code", "")
+        
+        # Criar lead
+        lead_data = {
+            "nome": user_name,
+            "telefone": phone,
+            "origem": "whatsapp",
+            "status": "agendado",
+            "imovel_interesse_id": property_id,
+        }
+        
+        lead = LeadService.create_lead(self.db, lead_data)
+        
+        # Criar agendamento
+        visit_id = VisitService.create_visit(
+            db=self.db,
+            lead_id=lead.id,
+            property_id=property_id,
+            scheduled_date=parsed_time,
+            notes=f"Agendamento via WhatsApp - Imóvel #{property_code}"
+        )
+        
+        # Notificar equipe
+        NotificationService.notify_new_visit(
+            lead_name=user_name,
+            phone=phone,
+            property_code=property_code,
+            visit_date=parsed_time
+        )
+        
+        # Mensagem de confirmação
+        date_display = state.get("visit_date_display", parsed_time.strftime("%d/%m/%Y"))
+        time_display = parsed_time.strftime("%H:%M")
+        
+        msg = fmt.format_visit_scheduled(user_name, date_display, time_display, property_code)
+        
+        return (msg, {}, False)  # Limpar estado
+    
+    # ===== FLUXO QUALIFICAÇÃO =====
     
     def handle_purpose(self, text: str, state: Dict[str, Any]) -> Tuple[str, Dict[str, Any], bool]:
         """Estágio de finalidade (comprar/alugar)."""
