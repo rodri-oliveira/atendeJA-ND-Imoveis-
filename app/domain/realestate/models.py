@@ -164,7 +164,7 @@ class Lead(Base):
 
     # Direcionamento e integrações
     property_interest_id: Mapped[int | None] = mapped_column(ForeignKey("re_properties.id"), nullable=True, index=True)
-    contact_id: Mapped[int | None] = mapped_column(ForeignKey("contacts.id"), nullable=True, index=True)
+    contact_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)  # FK removida temporariamente
 
     # Preferências denormalizadas para filtros
     finalidade: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
@@ -223,8 +223,14 @@ class VisitSchedule(Base):
     property_id: Mapped[int] = mapped_column(ForeignKey("re_properties.id"), index=True)
     lead_id: Mapped[int] = mapped_column(ForeignKey("re_leads.id"), index=True)
 
-    scheduled_at: Mapped[datetime] = mapped_column(DateTime)
-    status: Mapped[VisitStatus] = mapped_column(SAEnum(VisitStatus), default=VisitStatus.requested, index=True)
-    notes: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    scheduled_datetime: Mapped[datetime] = mapped_column(DateTime)
+    scheduled_date: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    scheduled_time: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    contact_phone: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    contact_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    status: Mapped[str] = mapped_column(String(20), default="requested", index=True)
+    notes: Mapped[str | None] = mapped_column(String, nullable=True)
+    assigned_to: Mapped[str | None] = mapped_column(String(120), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

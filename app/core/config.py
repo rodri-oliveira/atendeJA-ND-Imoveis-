@@ -55,6 +55,9 @@ class Settings(BaseSettings):
     # Imóveis somente leitura (produção)
     RE_READ_ONLY: bool = False
 
+    # Leads – classificação por inatividade
+    LEAD_NEW_INACTIVITY_MINUTES: int = 120
+
     # Auth (login do sistema)
     AUTH_JWT_SECRET: str = "changeme"
     AUTH_JWT_EXPIRE_MINUTES: int = 1440  # 24 horas (1440 minutos)

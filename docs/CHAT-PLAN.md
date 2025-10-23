@@ -191,14 +191,83 @@
   - ✅ Silencioso: Busca sem mensagens redundantes
   - ✅ Transparente: Explica por que está perguntando novamente
 
+## Melhorias implementadas (v5 - Agendamento e Códigos de Imóveis)
+
+### Sistema de códigos de referência (ref_code)
+- **Problema**: Imóveis não tinham código de referência acessível para busca direta
+- **Solução**: 
+  - Backfill de 397 imóveis: `external_id` → `ref_code`
+  - Extração robusta de códigos: A1234, ND12345, URLs (/imovel/A738), links
+  - Busca direta por `ref_code` sem fallback
+  - Script `scripts/backfill_ref_codes.py` para popular códigos
+- **Status**: RESOLVIDO
+
+### Fluxo de agendamento completo
+- **Implementado**:
+  - Bifurcação: "Tem imóvel em mente?" → código direto ou busca assistida
+  - Validação de código com feedback claro
+  - Confirmação de telefone com detecção expandida ("está correto", "certo", "confirmo")
+  - Parse de data em linguagem natural: "amanhã", "segunda", "25/10"
+  - Parse de horário: "14h", "manhã", "tarde", "14:30"
+  - Criação de `VisitSchedule` e atualização de Lead para status "agendado"
+  - Notificação registrada (pronta para integração WhatsApp)
+- **Serviços criados**:
+  - `app/services/visit_service.py` — parse de data/hora, criação de agendamentos
+  - `app/services/notification_service.py` — placeholders para notificações
+- **Status**: FUNCIONAL
+
+### Detecção híbrida (hardcode + LLM)
+- **Problema**: Respostas como "fazer agendamento" ou "está correto" não eram reconhecidas
+- **Solução**: 
+  - Todas as funções de detecção usam hardcode primeiro (rápido) + LLM como reforço
+  - `detect_yes_no()`: expandido com "correto", "certo", "confirmo", "perfeito"
+  - `detect_schedule_intent()`: "agendar", "visita", "marcar", "fazer agendamento"
+  - `detect_consent()`: prioriza regex local antes de LLM
+- **Status**: RESOLVIDO
+
+### Fluxo "Não encontrei imóvel"
+- **Implementado**:
+  - Opção explícita na apresentação de imóveis
+  - Ao escolher: Lead.status = "sem_imovel_disponivel"
+  - Persiste dados: imóveis exibidos, detalhados, filtros, timestamps
+  - Encerra conversa com mensagem de suporte
+- **Status**: FUNCIONAL
+
+### Recusa de agendamento
+- **Implementado**:
+  - Detecta recusa: "não quero agendar", "depois eu vejo", "mais tarde"
+  - Classifica lead como "qualificado" via `LeadService.mark_qualified()`
+  - Encerra conversa mantendo dados do lead
+- **Status**: FUNCIONAL
+
+### Configuração de timeout para leads "novo"
+- **Implementado**:
+  - `LEAD_NEW_INACTIVITY_MINUTES=120` em `app/core/config.py`
+  - Corte no estágio A2 (antes de `awaiting_name`)
+  - Após 120min sem resposta → status "novo"
+- **Status**: CONFIGURADO
+
+### Correções de modelo e banco
+- **Ajustes**:
+  - Modelo `Lead`: FK `contact_id` removida temporariamente (tabela contacts não existe)
+  - Modelo `VisitSchedule`: ajustado para corresponder à estrutura real da tabela
+  - Campos: `scheduled_datetime`, `scheduled_date`, `scheduled_time`, `contact_phone`, `contact_name`
+- **Status**: RESOLVIDO
+
 ## Referências de código
 - `app/main.py` — roteamento e middleware de erro.
 - `app/api/routes/mcp.py` — endpoint `POST /execute`.
 - `app/api/deps.py` — injeção de `ConversationStateService` com Redis.
 - `app/services/conversation_state.py` — `get_state/set_state/clear_state` no Redis.
 - `app/services/llm_service.py` — cliente Ollama para extração de intenção/entidades via LLM.
-- `app/domain/realestate/detection_utils.py` — detecção via LLM com fallback robusto (renomeado de `detection_utils_llm.py`).
-- `app/domain/realestate/conversation_handlers.py` — handlers de estágios (usa `detection_utils_llm`).
+- `app/services/visit_service.py` — parse de data/hora natural, criação de agendamentos.
+- `app/services/notification_service.py` — notificações (placeholder para WhatsApp).
+- `app/services/lead_service.py` — criação e classificação de leads.
+- `app/domain/realestate/detection_utils.py` — detecção híbrida (hardcode + LLM).
+- `app/domain/realestate/conversation_handlers.py` — handlers de estágios com agendamento.
+- `app/domain/realestate/models.py` — modelos Lead, VisitSchedule, Property.
 - `adapter-wa/index.js` — MCP_URL, whitelist, anti-eco e tratamento de mensagens.
+- `scripts/backfill_ref_codes.py` — script para popular ref_code a partir de external_id.
 - `tests/test_mcp_leads.py` — testes do endpoint MCP (modo `tool`).
-- `tests/test_llm_detection.py` — testes de detecção via LLM (requer Ollama)
+- `tests/test_llm_detection.py` — testes de detecção via LLM (requer Ollama).
+- `test_agendamento.py` — teste completo do fluxo de agendamento (10 etapas)

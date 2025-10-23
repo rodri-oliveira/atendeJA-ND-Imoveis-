@@ -14,7 +14,7 @@ log = structlog.get_logger()
 
 def detect_yes_no(text: str) -> Optional[str]:
     """
-    Detecta sim/não usando regex + contexto.
+    Detecta sim/não usando hardcode + LLM.
     Retorna: "yes", "no" ou None
     """
     text_lower = text.lower().strip()
@@ -23,25 +23,36 @@ def detect_yes_no(text: str) -> Optional[str]:
     yes_keywords = [
         "sim", "yes", "claro", "com certeza", "certeza", "ok", "okay",
         "quero", "gostaria", "tenho", "vi um", "vi o", "já vi",
-        "tenho interesse", "me interessa", "achei um"
+        "tenho interesse", "me interessa", "achei um",
+        "correto", "está correto", "esta correto", "certo", "isso mesmo",
+        "exato", "confirmo", "confirmado", "pode ser", "perfeito"
     ]
     
     # Palavras-chave diretas para NÃO
     no_keywords = [
         "não", "nao", "no", "nunca", "negativo", "nem",
         "ainda não", "ainda nao", "não tenho", "nao tenho",
-        "não vi", "nao vi", "quero buscar", "me ajude a buscar"
+        "não vi", "nao vi", "quero buscar", "me ajude a buscar",
+        "incorreto", "errado", "não está", "nao esta"
     ]
     
-    # Verificar SIM
+    # 1) Hardcode (rápido e confiável)
     for keyword in yes_keywords:
         if keyword in text_lower:
             return "yes"
-    
-    # Verificar NÃO
     for keyword in no_keywords:
         if keyword in text_lower:
             return "no"
+    
+    # 2) LLM como fallback
+    llm = get_llm_service()
+    try:
+        result = llm.extract_intent_and_entities_sync(text)
+        intent = result.get("intent")
+        if intent == "responder_lgpd":  # LLM interpreta "sim" como responder_lgpd
+            return "yes"
+    except:
+        pass
     
     return None
 
@@ -54,18 +65,28 @@ def extract_property_code(text: str) -> Optional[str]:
     import re
     text_clean = text.strip().upper()
     
-    # Padrões de código
-    patterns = [
-        r'\b([A-Z]{1,3}\d{2,6})\b',        # A1234, ND12345
-        r'REF[:\s]+([A-Z]{0,3}\d{2,6})',    # REF: A1234 ou REF: 1234
-        r'CODIGO[:\s]+([A-Z]{0,3}\d{2,6})', # CODIGO: A1234 ou CODIGO: 1234
-        r'#?(\d{2,6})\b',                   # #1234, 1234 (somente dígitos)
+    # URL e padrões relacionados a links
+    url_patterns = [
+        r'/IMOVEL/([A-Z0-9]{2,10})',           # .../imovel/A1234
+        r'IMOVEL[-_:/ ]([A-Z0-9]{2,10})',      # imovel-A1234, imovel: A1234
+        r'REF[=:/-]([A-Z0-9]{2,10})',          # ref=A1234, ref:A1234, ref-A1234
     ]
-    
+    for pattern in url_patterns:
+        m = re.search(pattern, text_clean)
+        if m:
+            return m.group(1)
+
+    # Padrões de código (texto puro)
+    patterns = [
+        r'\b([A-Z]{1,3}\d{2,6})\b',                # A1234, ND12345
+        r'REF[:\s]+([A-Z]{0,3}\d{2,6})',            # REF: A1234 ou REF: 1234
+        r'C[ÓO]DIGO[:\s]+([A-Z]{0,3}\d{2,6})',      # CÓDIGO/CODIGO: A1234 ou 1234
+        r'#?(\d{2,6})\b',                           # #1234, 1234 (somente dígitos)
+    ]
     for pattern in patterns:
-        match = re.search(pattern, text_clean)
-        if match:
-            return match.group(1)
+        m = re.search(pattern, text_clean)
+        if m:
+            return m.group(1)
     
     # Se for só números
     if text_clean.isdigit() and 2 <= len(text_clean) <= 6:
@@ -82,6 +103,26 @@ def detect_restart_command(text: str) -> bool:
     keywords = [
         "refazer", "recomeçar", "reiniciar", "começar de novo", "nova busca",
         "limpar", "resetar", "restart", "começar novamente", "zerar"
+    ]
+    return any(kw in text_lower for kw in keywords)
+
+
+def detect_decline_schedule(text: str) -> bool:
+    text_lower = text.lower().strip()
+    keywords = [
+        "não quero agendar",
+        "nao quero agendar",
+        "depois eu vejo",
+        "sem agenda",
+        "mais tarde",
+        "não agora",
+        "nao agora",
+        "agora não",
+        "agora nao",
+        "não posso",
+        "nao posso",
+        "prefiro não",
+        "prefiro nao",
     ]
     return any(kw in text_lower for kw in keywords)
 
@@ -104,14 +145,17 @@ def detect_back_command(text: str) -> bool:
 
 def detect_consent(text: str) -> bool:
     """Detecta consentimento LGPD via LLM."""
+    # 1) Heurística local (mais confiável e imediata)
+    text_lower = text.lower().strip()
+    if any(kw in text_lower for kw in ["sim", "autorizo", "aceito", "ok", "concordo"]):
+        return True
+    # 2) LLM como confirmação adicional
     llm = get_llm_service()
     try:
         result = llm.extract_intent_and_entities_sync(text)
         return result.get("intent") == "responder_lgpd"
     except:
-        # Fallback para regex simples
-        text_lower = text.lower().strip()
-        return any(kw in text_lower for kw in ["sim", "autorizo", "aceito", "ok", "concordo"])
+        return False
 
 
 def detect_purpose(text: str) -> Optional[str]:
@@ -283,7 +327,12 @@ def detect_interest(text: str) -> bool:
 
 
 def detect_next_property(text: str) -> bool:
-    """Detecta pedido para próximo imóvel via LLM."""
+    """Detecta pedido para próximo imóvel (hardcode + LLM)."""
+    text_lower = text.lower().strip()
+    # 1) Hardcode
+    if any(kw in text_lower for kw in ["próximo", "proximo", "outro", "next", "passa", "outras opções", "mais", "outro imovel"]):
+        return True
+    # 2) LLM
     llm = get_llm_service()
     try:
         result = llm.extract_intent_and_entities_sync(text)
@@ -291,19 +340,34 @@ def detect_next_property(text: str) -> bool:
             return True
     except:
         pass
-    # Fallback para regex expandido
-    text_lower = text.lower().strip()
-    return any(kw in text_lower for kw in ["próximo", "proximo", "outro", "next", "passa", "outras opções", "mais", "outro imovel"])
+    return False
 
 
 def detect_schedule_intent(text: str) -> bool:
-    """Detecta intenção de agendar visita."""
+    """Detecta intenção de agendar visita (hardcode + LLM)."""
     text_lower = text.lower().strip()
-    return any(kw in text_lower for kw in ["agendar", "visita", "visitar", "conhecer", "ver"])
+    # 1) Hardcode
+    if any(kw in text_lower for kw in ["agendar", "visita", "visitar", "conhecer", "ver", "marcar"]):
+        return True
+    # 2) LLM
+    llm = get_llm_service()
+    try:
+        result = llm.extract_intent_and_entities_sync(text)
+        # Considerar "buscar_imovel" com palavras de agendamento como positivo
+        if "agendar" in text_lower or "marcar" in text_lower:
+            return True
+    except:
+        pass
+    return False
 
 
 def detect_refine_search(text: str) -> bool:
-    """Detecta intenção de ajustar/refazer critérios de busca via LLM."""
+    """Detecta intenção de ajustar/refazer critérios de busca (hardcode + LLM)."""
+    text_lower = text.lower().strip()
+    # 1) Hardcode
+    if any(kw in text_lower for kw in ["ajustar", "mudar", "refazer", "nova busca", "outros critérios", "vamos ajustar", "quero mudar"]):
+        return True
+    # 2) LLM
     llm = get_llm_service()
     try:
         result = llm.extract_intent_and_entities_sync(text)
@@ -311,9 +375,26 @@ def detect_refine_search(text: str) -> bool:
             return True
     except:
         pass
-    # Fallback para regex
+    return False
+
+
+def detect_no_match(text: str) -> bool:
     text_lower = text.lower().strip()
-    return any(kw in text_lower for kw in ["ajustar", "mudar", "refazer", "nova busca", "outros critérios", "vamos ajustar", "quero mudar"])
+    keywords = [
+        "não encontrei imóvel",
+        "nao encontrei imovel",
+        "não encontrei",
+        "nao encontrei",
+        "não achei imóvel",
+        "nao achei imovel",
+        "não achei",
+        "nao achei",
+        "nenhuma opção",
+        "nenhuma opcao",
+        "nenhum imóvel",
+        "nenhum imovel",
+    ]
+    return any(kw in text_lower for kw in keywords)
 
 
 def extract_email(text: str) -> Optional[str]:

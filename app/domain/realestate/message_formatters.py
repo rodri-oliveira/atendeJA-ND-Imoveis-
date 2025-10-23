@@ -67,7 +67,7 @@ def format_property_card(prop_details: Dict[str, Any], purpose: str, user_name: 
         f"📍 {bairro}, {cidade}-{estado}",
         f"{purpose_symbol} {price_txt}",
         "",
-        f"{name_prefix}*gostou deste imóvel?* Digite 'sim' para mais detalhes, 'próximo' para ver outra opção ou 'ajustar critérios' para refinar a busca."
+        f"{name_prefix}*gostou deste imóvel?* Digite 'sim' para mais detalhes, 'próximo' para ver outra opção, 'ajustar critérios' para refinar a busca ou 'não encontrei imóvel' para encerrar."
     ]
     
     return "\n".join(msg_lines)
@@ -102,7 +102,7 @@ def format_property_details(prop_details: Dict[str, Any], user_name: str = "") -
         msg_lines.append("📸 *Mais imagens disponíveis através de agendamento com um profissional.*\n")
     
     msg_lines.append(
-        f"{name_prefix}*gostaria de agendar uma visita?* Digite 'agendar', 'próximo' para ver outras opções ou 'ajustar critérios' para refinar a busca."
+        f"{name_prefix}*gostaria de agendar uma visita?* Digite 'agendar', 'próximo' para ver outras opções, 'ajustar critérios' para refinar a busca ou 'não encontrei imóvel' para encerrar."
     )
     
     return "\n".join(msg_lines)
@@ -319,4 +319,12 @@ def format_visit_scheduled(name: str, date_str: str, time_str: str, property_cod
         f"⏰ Horário: {time_str}\n\n"
         f"Perfeito, {first_name}! Nossa equipe entrará em contato para confirmar os detalhes.\n\n"
         "Obrigado pelo interesse! 🎉"
+    )
+
+
+def format_no_match_final(user_name: str = "") -> str:
+    name_prefix = f"{user_name}, " if user_name else ""
+    return (
+        f"{name_prefix}salvei suas preferências e vou avisar quando surgir algo no seu perfil. 🙌\n\n"
+        "Se quiser, podemos ajustar os critérios no futuro. Obrigado pelo seu tempo!"
     )

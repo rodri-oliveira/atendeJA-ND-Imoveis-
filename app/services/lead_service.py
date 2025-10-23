@@ -89,6 +89,64 @@ class LeadService:
             "status": "sem_imovel_disponivel",
         }
         return LeadService.create_lead(db, lead_data)
+
+    # ===== Helpers de status (upsert por telefone) =====
+    @staticmethod
+    def _extract_phone(sender_id: str) -> str:
+        return sender_id.split("@")[0] if "@" in (sender_id or "") else sender_id
+
+    @staticmethod
+    def upsert_lead_status(
+        db: Session,
+        phone: str,
+        state: Dict[str, Any],
+        status: str,
+        name: str | None = None,
+        email: str | None = None,
+        property_id: int | None = None,
+    ) -> Lead:
+        lead = db.query(Lead).filter(Lead.phone == phone).order_by(Lead.id.desc()).first()
+        if lead:
+            lead.status = status
+            try:
+                lead.preferences = state
+            except Exception:
+                pass
+            if property_id:
+                lead.property_interest_id = property_id
+            if name:
+                lead.name = name
+            if email:
+                lead.email = email
+            db.commit()
+            db.refresh(lead)
+            return lead
+        else:
+            lead_data = {
+                "nome": name,
+                "telefone": phone,
+                "email": email,
+                "origem": "whatsapp",
+                "consentimento_lgpd": state.get("lgpd_consent", False),
+                "preferencias": state,
+                "finalidade": state.get("purpose"),
+                "tipo": state.get("type"),
+                "cidade": state.get("city"),
+                "bairro": state.get("neighborhood"),
+                "dormitorios": state.get("bedrooms"),
+                "preco_min": state.get("price_min"),
+                "preco_max": state.get("price_max"),
+                "property_interest_id": property_id,
+                "status": status,
+            }
+            return LeadService.create_lead(db, lead_data)
+
+    @staticmethod
+    def mark_qualified(db: Session, sender_id: str, state: Dict[str, Any]) -> Lead:
+        phone = LeadService._extract_phone(sender_id)
+        name = state.get("user_name")
+        prop_id = state.get("interested_property_id") or state.get("directed_property_id")
+        return LeadService.upsert_lead_status(db, phone, state, "qualificado", name=name, property_id=prop_id)
     
     @staticmethod
     def create_qualified_lead(

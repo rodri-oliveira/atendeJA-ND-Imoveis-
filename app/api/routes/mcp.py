@@ -224,6 +224,8 @@ async def execute_mcp(
     text_raw = body.input or ""
     text = text_raw.lower()
     state = state_service.get_state(body.sender_id) or {}
+    # Garantir que sender_id esteja no state para uso posterior (persistência de leads)
+    state["sender_id"] = body.sender_id
     
     # DEBUG: Log do estado atual
     import structlog

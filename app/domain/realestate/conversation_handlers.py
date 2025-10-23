@@ -7,7 +7,7 @@ import os
 from sqlalchemy.orm import Session
 from app.domain.realestate import detection_utils as detect
 from app.domain.realestate import message_formatters as fmt
-from app.domain.realestate.models import Property, PropertyImage
+from app.domain.realestate.models import Property, PropertyImage, Lead
 from app.services.lead_service import LeadService
 from sqlalchemy import select
 from app.core.config import settings
@@ -216,7 +216,9 @@ class ConversationHandler:
     
     def handle_schedule_visit_question(self, text: str, state: Dict[str, Any]) -> Tuple[str, Dict[str, Any], bool]:
         """Pergunta se quer agendar visita."""
-        if detect.detect_yes_no(text) == "yes":
+        # Aceitar sim/não ou intenção explícita de agendar
+        wants_schedule = (detect.detect_yes_no(text) == "yes" or detect.detect_schedule_intent(text))
+        if wants_schedule:
             # Confirmar telefone
             sender_id = state.get("sender_id", "")
             phone = sender_id.split("@")[0] if "@" in sender_id else sender_id
@@ -226,6 +228,12 @@ class ConversationHandler:
             msg = fmt.format_confirm_phone(phone)
             return (msg, state, False)
         else:
+            # Recusou agendamento: classificar como qualificado e encerrar
+            try:
+                from app.services.lead_service import LeadService as _LS
+                _LS.mark_qualified(self.db, state.get("sender_id", ""), state)
+            except Exception:
+                pass
             msg = "Sem problemas! Se mudar de ideia, é só me chamar. 😊\n\nPosso te ajudar com algo mais?"
             return (msg, {}, False)  # Limpar estado
     
@@ -300,32 +308,40 @@ class ConversationHandler:
         property_id = state.get("directed_property_id")
         property_code = state.get("directed_property_code", "")
         
-        # Criar lead
-        lead_data = {
-            "nome": user_name,
-            "telefone": phone,
-            "origem": "whatsapp",
-            "status": "agendado",
-            "imovel_interesse_id": property_id,
-        }
-        
-        lead = LeadService.create_lead(self.db, lead_data)
+        # Buscar ou criar lead por telefone
+        lead = self.db.query(Lead).filter(Lead.phone == phone).first()
+        if not lead:
+            lead_data = {
+                "nome": user_name,
+                "telefone": phone,
+                "origem": "whatsapp",
+                "status": "agendado",
+                "property_interest_id": property_id,
+            }
+            lead = LeadService.create_lead(self.db, lead_data)
+        else:
+            lead.status = "agendado"
+            lead.name = user_name
+            lead.property_interest_id = property_id
+            self.db.commit()
         
         # Criar agendamento
         visit_id = VisitService.create_visit(
             db=self.db,
             lead_id=lead.id,
             property_id=property_id,
-            scheduled_date=parsed_time,
+            phone=phone,
+            visit_datetime=parsed_time,
             notes=f"Agendamento via WhatsApp - Imóvel #{property_code}"
         )
         
-        # Notificar equipe
-        NotificationService.notify_new_visit(
+        # Notificar equipe via WhatsApp (log por enquanto)
+        NotificationService.notify_visit_scheduled(
+            visit_id=visit_id,
+            property_id=property_id,
             lead_name=user_name,
             phone=phone,
-            property_code=property_code,
-            visit_date=parsed_time
+            visit_datetime=parsed_time.isoformat()
         )
         
         # Mensagem de confirmação
@@ -591,6 +607,15 @@ class ConversationHandler:
             "bairro": prop.address_neighborhood,
             "dormitorios": prop.bedrooms,
         }
+
+        # Registrar imóvel mostrado
+        shown_list = state.get("shown_properties") or []
+        shown_list.append({
+            "id": prop.id,
+            "ref_code": prop.ref_code,
+            "external_id": prop.external_id,
+        })
+        state["shown_properties"] = shown_list
         
         # Adicionar contador: "Imóvel 1 de 3"
         total = len(results)
@@ -780,6 +805,21 @@ class ConversationHandler:
         refinement_result = self._detect_refinement_intent(text, state)
         if refinement_result:
             return refinement_result
+
+        # PRIORIDADE 1.5: Encerrar por "Não encontrei imóvel"
+        if detect.detect_no_match(text):
+            sender_id = state.get("sender_id", "")
+            # Persistir lead como sem_imovel_disponivel com preferências e histórico
+            prefs = dict(state)
+            LeadService.create_unqualified_lead(
+                self.db,
+                sender_id,
+                prefs,
+                state.get("lgpd_consent", False)
+            )
+            user_name = state.get("user_name", "")
+            msg = fmt.format_no_match_final(user_name)
+            return (msg, {}, False)
         
         # PRIORIDADE 2: Interesse no imóvel
         if detect.detect_interest(text):
@@ -818,6 +858,14 @@ class ConversationHandler:
             msg = fmt.format_property_details(prop_details, user_name)
             state["interested_property_id"] = prop_id
             state["property_detail_images"] = image_urls  # Armazenar para MCP enviar
+            # Registrar imóvel detalhado
+            detailed_list = state.get("detailed_properties") or []
+            detailed_list.append({
+                "id": prop.id,
+                "ref_code": getattr(prop, "ref_code", None),
+                "external_id": getattr(prop, "external_id", None),
+            })
+            state["detailed_properties"] = detailed_list
             state["stage"] = "awaiting_visit_decision"
             return (msg, state, False)
         
@@ -828,7 +876,7 @@ class ConversationHandler:
             return ("", state, True)
         else:
             # Fallback
-            msg = "Gostou deste imóvel? Digite *'sim'* para mais detalhes, *'próximo'* para ver outra opção ou *'ajustar critérios'* para refinar a busca."
+            msg = "Gostou deste imóvel? Digite *'sim'* para mais detalhes, *'próximo'* para ver outra opção, *'ajustar critérios'* para refinar a busca ou *'não encontrei imóvel'* para encerrar."
             return (msg, state, False)
     
     def handle_visit_decision(self, text: str, state: Dict[str, Any]) -> Tuple[str, Dict[str, Any], bool]:
@@ -837,12 +885,35 @@ class ConversationHandler:
         refinement_result = self._detect_refinement_intent(text, state)
         if refinement_result:
             return refinement_result
+
+        # PRIORIDADE 1.5: Encerrar por "Não encontrei imóvel"
+        if detect.detect_no_match(text):
+            sender_id = state.get("sender_id", "")
+            prefs = dict(state)
+            LeadService.create_unqualified_lead(
+                self.db,
+                sender_id,
+                prefs,
+                state.get("lgpd_consent", False)
+            )
+            user_name = state.get("user_name", "")
+            msg = fmt.format_no_match_final(user_name)
+            return (msg, {}, False)
         
         # PRIORIDADE 2: Agendamento
         if detect.detect_schedule_intent(text):
             state["stage"] = "collecting_name"
             msg = "Perfeito! Para agendar a visita, preciso de alguns dados. Qual é o seu *nome completo*?"
             return (msg, state, False)
+        # PRIORIDADE 2.1: Recusa de agendamento -> classificar como qualificado e encerrar
+        elif detect.detect_decline_schedule(text):
+            try:
+                from app.services.lead_service import LeadService as _LS
+                _LS.mark_qualified(self.db, state.get("sender_id", ""), state)
+            except Exception:
+                pass
+            msg = "Sem problemas! Se mudar de ideia, é só me chamar. 😊\n\nPosso te ajudar com algo mais?"
+            return (msg, {}, False)
         elif detect.detect_next_property(text):
             # Próximo imóvel
             state["current_property_index"] = state.get("current_property_index", 0) + 1
@@ -850,7 +921,7 @@ class ConversationHandler:
             return ("", state, True)
         else:
             # Fallback
-            msg = "Digite *'agendar'* para marcar uma visita, *'próximo'* para ver outras opções ou *'ajustar critérios'* para refinar a busca."
+            msg = "Digite *'agendar'* para marcar uma visita, *'próximo'* para ver outras opções, *'ajustar critérios'* para refinar a busca ou *'não encontrei imóvel'* para encerrar."
             return (msg, state, False)
     
     def handle_collecting_name(self, text: str, state: Dict[str, Any]) -> Tuple[str, Dict[str, Any], bool]:
