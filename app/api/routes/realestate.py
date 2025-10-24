@@ -378,7 +378,8 @@ def list_leads(
     if campaign_source:
         q = q.filter(Lead.campaign_source == campaign_source)
 
-    rows = q.order_by(Lead.id.desc()).limit(limit).offset(offset).all()
+    # Ordenar por atividade recente para refletir atualizações (ex.: agendamento) no topo da lista
+    rows = q.order_by(Lead.last_inbound_at.desc(), Lead.id.desc()).limit(limit).offset(offset).all()
     return [
         LeadOut(
             id=r.id,

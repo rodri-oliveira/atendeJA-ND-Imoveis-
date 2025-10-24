@@ -252,6 +252,18 @@ class LeadOut(BaseModel):
     last_inbound_at: Optional[datetime] = None
     last_outbound_at: Optional[datetime] = None
     status_updated_at: Optional[datetime] = None
+
+    @field_validator('last_inbound_at', 'last_outbound_at', 'status_updated_at', mode='before')
+    @classmethod
+    def _ensure_utc_timezone(cls, v):
+        """Garante que datetime seja serializado com timezone UTC (sufixo Z)"""
+        if v and isinstance(v, datetime):
+            # Se não tem timezone, assume UTC
+            if v.tzinfo is None:
+                from datetime import timezone
+                return v.replace(tzinfo=timezone.utc)
+        return v
+
     # Direcionamento/integração
     property_interest_id: Optional[int] = None
     contact_id: Optional[int] = None

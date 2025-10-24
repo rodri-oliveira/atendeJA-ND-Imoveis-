@@ -3,6 +3,7 @@ Serviço de gerenciamento de leads.
 Responsabilidade: Lógica de negócio relacionada a leads.
 """
 from typing import Dict, Any
+from datetime import datetime
 from sqlalchemy.orm import Session
 from app.domain.realestate.models import Lead
 
@@ -22,6 +23,7 @@ class LeadService:
         Returns:
             Lead criado
         """
+        now = datetime.utcnow()
         lead = Lead(
             tenant_id=1,
             name=lead_data.get("nome"),
@@ -47,6 +49,7 @@ class LeadService:
             campaign_content=lead_data.get("campaign_content"),
             landing_url=lead_data.get("landing_url"),
             status=lead_data.get("status", "qualificado"),
+            last_inbound_at=now,
         )
         db.add(lead)
         db.commit()
@@ -108,6 +111,7 @@ class LeadService:
         lead = db.query(Lead).filter(Lead.phone == phone).order_by(Lead.id.desc()).first()
         if lead:
             lead.status = status
+            lead.last_inbound_at = datetime.utcnow()
             try:
                 lead.preferences = state
             except Exception:

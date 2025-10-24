@@ -323,11 +323,7 @@ async def execute_mcp(
         elif stage == "awaiting_property_feedback":
             msg, state, continue_loop = handler.handle_property_feedback(text, state)
         elif stage == "awaiting_visit_decision":
-            msg, state, continue_loop = handler.handle_visit_decision(text, state)
-        elif stage == "collecting_name":
-            msg, state, continue_loop = handler.handle_collecting_name(text_raw, state)
-        elif stage == "collecting_email":
-            msg, state, continue_loop = handler.handle_collecting_email(text_raw, body.sender_id, state)
+            msg, state, continue_loop = handler.handle_visit_decision(text, body.sender_id, state)
         elif stage == "awaiting_refinement":
             msg, state, continue_loop = handler.handle_refinement(text, state)
         else:

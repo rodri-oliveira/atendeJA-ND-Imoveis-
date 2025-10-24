@@ -282,29 +282,33 @@ def extract_bedrooms(text: str) -> Optional[int]:
     try:
         result = llm.extract_intent_and_entities_sync(text)
         dorm = result.get("entities", {}).get("dormitorios")
-        return int(dorm) if dorm is not None else None
+        if dorm is not None:
+            return int(dorm)
     except:
-        # Fallback para regex
-        import re
-        text_lower = text.lower()
-        if "tanto faz" in text_lower or "qualquer" in text_lower:
-            return None
-        match = re.search(r'(\d+)\s*(?:quarto|dorm|quartos|dormitório)', text_lower)
-        if match:
-            try:
-                return int(match.group(1))
-            except:
-                pass
-        # Tentar extrair número isolado
-        match = re.search(r'\b(\d+)\b', text)
-        if match:
-            try:
-                num = int(match.group(1))
-                if 0 <= num <= 10:
-                    return num
-            except:
-                pass
+        # Ignorar erro e seguir para regex
+        pass
+
+    # Fallback para regex quando LLM não retorna valor
+    import re
+    text_lower = text.lower()
+    if "tanto faz" in text_lower or "qualquer" in text_lower:
         return None
+    match = re.search(r'(\d+)\s*(?:quarto|dorm|quartos|dormitório)', text_lower)
+    if match:
+        try:
+            return int(match.group(1))
+        except:
+            pass
+    # Tentar extrair número isolado
+    match = re.search(r'\b(\d+)\b', text)
+    if match:
+        try:
+            num = int(match.group(1))
+            if 0 <= num <= 10:
+                return num
+        except:
+            pass
+    return None
 
 
 def is_greeting(text: str) -> bool:

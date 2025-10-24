@@ -17,11 +17,9 @@ interface Lead {
 interface Filters {
   search: string
   status: string
-  source: string
   dateFrom: string
   dateTo: string
-  propertyId: string
-  externalPropertyId: string
+  codigoImovel: string
   finalidade: string
   tipo: string
   cidade: string
@@ -37,11 +35,9 @@ export default function LeadsList() {
   const [filters, setFilters] = useState<Filters>({
     search: '',
     status: '',
-    source: '',
     dateFrom: '',
     dateTo: '',
-    propertyId: '',
-    externalPropertyId: '',
+    codigoImovel: '',
     finalidade: '',
     tipo: '',
     cidade: '',
@@ -97,25 +93,34 @@ export default function LeadsList() {
     // Filtro de status
     if (filters.status && lead.status !== filters.status) return false
 
-    // Filtro de origem
-    if (filters.source && lead.source !== filters.source) return false
-
-    // Filtro de ID do imóvel
-    if (filters.propertyId && lead.property_interest_id?.toString() !== filters.propertyId) return false
-
-    // Filtro de código externo
-    if (filters.externalPropertyId && !lead.external_property_id?.includes(filters.externalPropertyId)) return false
-
-    // Filtros de preferências
-    if (filters.finalidade && lead.preferences?.finalidade !== filters.finalidade) return false
-    if (filters.tipo && lead.preferences?.tipo !== filters.tipo) return false
-    if (filters.cidade && !lead.preferences?.cidade?.toLowerCase().includes(filters.cidade.toLowerCase())) return false
-    
-    if (filters.valorMin && lead.preferences?.preco_max) {
-      if (lead.preferences.preco_max < parseFloat(filters.valorMin)) return false
+    // Filtro de código do imóvel (ex: A738)
+    if (filters.codigoImovel) {
+      const codigo = filters.codigoImovel.toUpperCase()
+      const leadCodigo = (lead.external_property_id || '').toUpperCase()
+      if (!leadCodigo.includes(codigo)) return false
     }
-    if (filters.valorMax && lead.preferences?.preco_min) {
-      if (lead.preferences.preco_min > parseFloat(filters.valorMax)) return false
+
+    // Filtros de preferências (buscar nos campos diretos do lead, não em preferences)
+    if (filters.finalidade) {
+      const leadFinalidade = (lead as any).finalidade
+      if (leadFinalidade !== filters.finalidade) return false
+    }
+    if (filters.tipo) {
+      const leadTipo = (lead as any).tipo
+      if (leadTipo !== filters.tipo) return false
+    }
+    if (filters.cidade) {
+      const leadCidade = (lead as any).cidade
+      if (!leadCidade?.toLowerCase().includes(filters.cidade.toLowerCase())) return false
+    }
+    
+    if (filters.valorMin) {
+      const leadPrecoMax = (lead as any).preco_max
+      if (leadPrecoMax && leadPrecoMax < parseFloat(filters.valorMin)) return false
+    }
+    if (filters.valorMax) {
+      const leadPrecoMin = (lead as any).preco_min
+      if (leadPrecoMin && leadPrecoMin > parseFloat(filters.valorMax)) return false
     }
 
     // Filtro de data
@@ -129,15 +134,31 @@ export default function LeadsList() {
     return true
   })
 
+  // Ordenação client-side (não quebra API): status prioritário > última atividade > id desc
+  const statusOrder: Record<string, number> = {
+    agendado: 1,
+    qualificado: 2,
+    novo: 3,
+    sem_imovel_disponivel: 4,
+    direcionado: 5,
+  }
+  const sortedData = [...(filteredData || [])].sort((a, b) => {
+    const ra = statusOrder[(a.status || '').toLowerCase()] ?? 99
+    const rb = statusOrder[(b.status || '').toLowerCase()] ?? 99
+    if (ra !== rb) return ra - rb
+    const da = a.last_inbound_at ? new Date(a.last_inbound_at).getTime() : 0
+    const db = b.last_inbound_at ? new Date(b.last_inbound_at).getTime() : 0
+    if (db !== da) return db - da
+    return (b.id || 0) - (a.id || 0)
+  })
+
   function clearFilters() {
     setFilters({
       search: '',
       status: '',
-      source: '',
       dateFrom: '',
       dateTo: '',
-      propertyId: '',
-      externalPropertyId: '',
+      codigoImovel: '',
       finalidade: '',
       tipo: '',
       cidade: '',
@@ -151,10 +172,10 @@ export default function LeadsList() {
   function getStatusBadge(status?: string | null) {
     const statusMap: Record<string, { label: string; color: string }> = {
       novo: { label: 'Novo', color: 'bg-blue-100 text-blue-800' },
-      contatado: { label: 'Contatado', color: 'bg-yellow-100 text-yellow-800' },
       qualificado: { label: 'Qualificado', color: 'bg-green-100 text-green-800' },
-      negociacao: { label: 'Negociação', color: 'bg-purple-100 text-purple-800' },
-      perdido: { label: 'Perdido', color: 'bg-red-100 text-red-800' }
+      agendado: { label: 'Agendado', color: 'bg-purple-100 text-purple-800' },
+      sem_imovel_disponivel: { label: 'Sem Imóvel', color: 'bg-orange-100 text-orange-800' },
+      direcionado: { label: 'Direcionado', color: 'bg-yellow-100 text-yellow-800' }
     }
     const s = statusMap[status || 'novo'] || { label: status || 'Novo', color: 'bg-slate-100 text-slate-800' }
     return <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${s.color}`}>{s.label}</span>
@@ -169,6 +190,33 @@ export default function LeadsList() {
   function formatPrice(price?: number) {
     if (!price) return '-'
     return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(price)
+  }
+
+  // Formata telefone removendo @c.us e aplicando máscara brasileira
+  function formatPhone(phone?: string | null) {
+    if (!phone) return '-'
+    const cleaned = String(phone).replace(/@c\.us$/i, '')
+    const digits = cleaned.replace(/\D/g, '')
+    if (!digits) return cleaned
+    let country = '', area = '', local = digits
+    if (digits.startsWith('55') && digits.length >= 12) {
+      country = '+55 '
+      area = `(${digits.slice(2, 4)}) `
+      local = digits.slice(4)
+    } else if (digits.length === 11) {
+      area = `(${digits.slice(0, 2)}) `
+      local = digits.slice(2)
+    } else if (digits.length === 10) {
+      area = `(${digits.slice(0, 2)}) `
+      local = digits.slice(2)
+    }
+    let formatted = local
+    if (local.length >= 9) {
+      formatted = `${local.slice(0, 5)}-${local.slice(5, 9)}`
+    } else if (local.length === 8) {
+      formatted = `${local.slice(0, 4)}-${local.slice(4, 8)}`
+    }
+    return `${country}${area}${formatted}`.trim()
   }
 
   return (
@@ -292,25 +340,9 @@ export default function LeadsList() {
               >
                 <option value="">Todos</option>
                 <option value="novo">Novo</option>
-                <option value="contatado">Contatado</option>
                 <option value="qualificado">Qualificado</option>
-                <option value="negociacao">Negociação</option>
-                <option value="perdido">Perdido</option>
-              </select>
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-slate-700 mb-1">Origem</label>
-              <select
-                value={filters.source}
-                onChange={(e) => setFilters({ ...filters, source: e.target.value })}
-                className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500"
-              >
-                <option value="">Todas</option>
-                <option value="whatsapp">WhatsApp</option>
-                <option value="site">Site</option>
-                <option value="instagram">Instagram</option>
-                <option value="facebook">Facebook</option>
+                <option value="agendado">Agendado</option>
+                <option value="sem_imovel_disponivel">Sem Imóvel Disponível</option>
               </select>
             </div>
 
@@ -376,23 +408,12 @@ export default function LeadsList() {
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-slate-700 mb-1">ID do Imóvel</label>
+              <label className="block text-sm font-medium text-slate-700 mb-1">Código do Imóvel</label>
               <input
                 type="text"
-                placeholder="Ex: 123"
-                value={filters.propertyId}
-                onChange={(e) => setFilters({ ...filters, propertyId: e.target.value })}
-                className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500"
-              />
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-slate-700 mb-1">Código ND Imóveis</label>
-              <input
-                type="text"
-                placeholder="Ex: A767"
-                value={filters.externalPropertyId}
-                onChange={(e) => setFilters({ ...filters, externalPropertyId: e.target.value })}
+                placeholder="Ex: A738"
+                value={filters.codigoImovel}
+                onChange={(e) => setFilters({ ...filters, codigoImovel: e.target.value })}
                 className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500"
               />
             </div>
@@ -458,13 +479,12 @@ export default function LeadsList() {
                   <th className="px-6 py-3 text-left text-xs font-medium text-slate-700 uppercase tracking-wider">Telefone</th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-slate-700 uppercase tracking-wider">Email</th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-slate-700 uppercase tracking-wider">Status</th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-slate-700 uppercase tracking-wider">Origem</th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-slate-700 uppercase tracking-wider">Preferências</th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-slate-700 uppercase tracking-wider">Última Conversa</th>
                 </tr>
               </thead>
               <tbody className="bg-white divide-y divide-slate-200">
-                {(filteredData || []).map((lead) => (
+                {sortedData.map((lead) => (
                   <tr key={lead.id} className="hover:bg-slate-50 transition-colors">
                     <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-slate-900">#{lead.id}</td>
                     <td className="px-6 py-4 whitespace-nowrap">
@@ -473,44 +493,43 @@ export default function LeadsList() {
                       </div>
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap">
-                      <span className="text-sm text-slate-600">{lead.phone || <span className="text-slate-400 italic">-</span>}</span>
+                      <span className="text-sm text-slate-600">{formatPhone(lead.phone)}</span>
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap">
                       <span className="text-sm text-slate-600">{lead.email || <span className="text-slate-400 italic">-</span>}</span>
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap">{getStatusBadge(lead.status)}</td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-slate-100 text-slate-800">
-                        {lead.source || 'whatsapp'}
-                      </span>
-                    </td>
                     <td className="px-6 py-4">
-                      {lead.preferences ? (
-                        <div className="flex flex-wrap gap-2 max-w-xs">
-                          {lead.preferences.finalidade && (
-                            <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-emerald-100 text-emerald-800">
-                              {lead.preferences.finalidade === 'sale' ? '🏠 Compra' : '🔑 Locação'}
-                            </span>
-                          )}
-                          {lead.preferences.tipo && (
-                            <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
-                              {lead.preferences.tipo === 'apartment' ? '🏢 Apto' : lead.preferences.tipo === 'house' ? '🏡 Casa' : lead.preferences.tipo}
-                            </span>
-                          )}
-                          {lead.preferences.cidade && (
-                            <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-purple-100 text-purple-800">
-                              📍 {lead.preferences.cidade}
-                            </span>
-                          )}
-                          {(lead.preferences.preco_min || lead.preferences.preco_max) && (
-                            <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-green-100 text-green-800">
-                              💰 {formatPrice(lead.preferences.preco_min)} - {formatPrice(lead.preferences.preco_max)}
-                            </span>
-                          )}
-                        </div>
-                      ) : (
-                        <span className="text-slate-400 text-sm">-</span>
-                      )}
+                      {(() => {
+                        const l = lead as any
+                        const hasData = l.finalidade || l.tipo || l.cidade || l.preco_min || l.preco_max
+                        return hasData ? (
+                          <div className="flex flex-wrap gap-2 max-w-xs">
+                            {l.finalidade && (
+                              <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-emerald-100 text-emerald-800">
+                                {l.finalidade === 'sale' ? '🏠 Compra' : '🔑 Locação'}
+                              </span>
+                            )}
+                            {l.tipo && (
+                              <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
+                                {l.tipo === 'apartment' ? '🏢 Apto' : l.tipo === 'house' ? '🏡 Casa' : l.tipo}
+                              </span>
+                            )}
+                            {l.cidade && (
+                              <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-purple-100 text-purple-800">
+                                📍 {l.cidade}
+                              </span>
+                            )}
+                            {(l.preco_min || l.preco_max) && (
+                              <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-green-100 text-green-800">
+                                💰 {formatPrice(l.preco_min)} - {formatPrice(l.preco_max)}
+                              </span>
+                            )}
+                          </div>
+                        ) : (
+                          <span className="text-slate-400 text-sm">-</span>
+                        )
+                      })()}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-slate-600">
                       {formatDate(lead.last_inbound_at)}
