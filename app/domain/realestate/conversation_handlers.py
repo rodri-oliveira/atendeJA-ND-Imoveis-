@@ -11,6 +11,11 @@ from app.domain.realestate.models import Property, PropertyImage, Lead
 from app.services.lead_service import LeadService
 from sqlalchemy import select
 from app.core.config import settings
+from app.domain.realestate.validation_utils import (
+    validate_bedrooms, validate_price, validate_city, validate_property_type,
+    is_response_in_context, get_retry_limit_message, get_context_validation_message,
+    apply_fallback_values
+)
 
 
 class ConversationHandler:
@@ -18,6 +23,19 @@ class ConversationHandler:
     
     def __init__(self, db: Session):
         self.db = db
+    
+    def _increment_retry_count(self, state: Dict[str, Any], stage: str) -> int:
+        """Incrementa contador de tentativas para um estágio específico."""
+        retry_key = f"{stage}_retry_count"
+        current_count = state.get(retry_key, 0)
+        new_count = current_count + 1
+        state[retry_key] = new_count
+        return new_count
+    
+    def _check_retry_limit(self, state: Dict[str, Any], stage: str, max_retries: int = 3) -> bool:
+        """Verifica se atingiu limite de tentativas."""
+        retry_key = f"{stage}_retry_count"
+        return state.get(retry_key, 0) >= max_retries
     
     def handle_start(self, text: str, state: Dict[str, Any]) -> Tuple[str, Dict[str, Any], bool]:
         """
@@ -96,8 +114,29 @@ class ConversationHandler:
         import structlog
         log = structlog.get_logger()
         
-        detection_result = detect.detect_yes_no(text)
-        log.info("🔍 detect_yes_no", text=text, result=detection_result)
+        text_lower = text.lower().strip()
+        user_name = state.get("user_name", "")
+        
+        # Detectar números 1 ou 2 PRIMEIRO
+        if text_lower in ['1', '1️⃣', 'um', 'primeiro']:
+            detection_result = "yes"
+        elif text_lower in ['2', '2️⃣', 'dois', 'segundo']:
+            detection_result = "no"
+        else:
+            # Detecção inteligente de variações
+            # "me ajuda", "quero buscar", "não sei" = NÃO tem imóvel
+            help_keywords = ["ajuda", "ajudar", "buscar", "procurar", "encontrar", "não sei", "nao sei"]
+            has_help_intent = any(kw in text_lower for kw in help_keywords)
+            
+            # Detecção de sim/não tradicional
+            detection_result = detect.detect_yes_no(text)
+            log.info("🔍 detect_yes_no", text=text, result=detection_result, has_help_intent=has_help_intent)
+            
+            # Se detectou "me ajuda", forçar "no"
+            if has_help_intent:
+                detection_result = "no"
+        
+        log.info("🔍 Final detection", text=text, result=detection_result)
         
         if detection_result == "yes":
             state["stage"] = "awaiting_property_code"
@@ -107,15 +146,24 @@ class ConversationHandler:
         elif detection_result == "no":
             # Ir para fluxo de qualificação
             state["stage"] = "awaiting_purpose"
-            user_name = state.get("user_name", "")
             name_prefix = f"{user_name}, " if user_name else ""
-            msg = f"Perfeito, {name_prefix}para começarmos, me diga: você procura um imóvel para *comprar* ou para *alugar*?"
+            msg = f"Perfeito, {name_prefix}vou te ajudar a encontrar o imóvel ideal!\n\nPara começar, você quer:\n\n1️⃣ *Comprar* um imóvel\n2️⃣ *Alugar* um imóvel\n\nDigite 1 ou 2, ou escreva 'comprar' ou 'alugar'."
             log.info("❌ Cliente NÃO tem imóvel em mente", next_stage="awaiting_purpose")
             return (msg, state, False)
         else:
-            msg = "Por favor, responda *sim* se já tem um imóvel em mente, ou *não* se quer que eu te ajude a buscar."
-            log.warning("⚠️ Não detectou sim/não", text=text)
-            return (msg, state, False)
+            # Incrementar contador de tentativas
+            retry_count = self._increment_retry_count(state, "awaiting_has_property_in_mind")
+            
+            if self._check_retry_limit(state, "awaiting_has_property_in_mind", max_retries=2):
+                # Após 2 tentativas, assume "não" e continua
+                state["stage"] = "awaiting_purpose"
+                msg = f"Tudo bem, {user_name}! Vou considerar que você quer que eu te ajude a buscar.\n\nVocê quer:\n\n1️⃣ *Comprar* um imóvel\n2️⃣ *Alugar* um imóvel"
+                log.info("⚠️ Limite de tentativas - assumindo fluxo de busca", retry_count=retry_count)
+                return (msg, state, False)
+            else:
+                msg = f"Desculpe, {user_name}, não entendi. Vou ser mais claro:\n\n*Você já viu algum imóvel específico que te interessou?*\n\n1️⃣ *Sim* - Já tenho um código/referência\n2️⃣ *Não* - Quero que você me ajude a buscar\n\nDigite 1 ou 2, ou escreva 'sim' ou 'não'."
+                log.warning("⚠️ Não detectou sim/não", text=text, retry_count=retry_count)
+                return (msg, state, False)
     
     def handle_property_code(self, text: str, state: Dict[str, Any]) -> Tuple[str, Dict[str, Any], bool]:
         """Busca imóvel por código."""
@@ -447,76 +495,191 @@ class ConversationHandler:
         import structlog
         log = structlog.get_logger()
         
-        # Priorizar LLM
-        ent = (state.get("llm_entities") or {})
-        purpose = ent.get("finalidade") or detect.detect_purpose(text)
-        log.info("detect_purpose_result", text=text, detected_purpose=purpose)
-        
+        text_lower = text.lower().strip()
         user_name = state.get("user_name", "")
-        name_prefix = f"{user_name}, " if user_name else ""
+        
+        # Detectar números 1 ou 2
+        if text_lower in ['1', '1️⃣', 'um', 'primeiro']:
+            purpose = 'sale'
+        elif text_lower in ['2', '2️⃣', 'dois', 'segundo']:
+            purpose = 'rent'
+        else:
+            # Verificar contexto da resposta
+            if not is_response_in_context(text, "purpose"):
+                msg = get_context_validation_message("purpose")
+                return (msg, state, False)
+            
+            # Priorizar LLM
+            ent = (state.get("llm_entities") or {})
+            purpose = ent.get("finalidade") or detect.detect_purpose(text)
+        
+        log.info("detect_purpose_result", text=text, detected_purpose=purpose)
         
         if purpose:
             state["purpose"] = purpose
             state["stage"] = "awaiting_type"
-            msg = f"Perfeito{', ' + user_name if user_name else ''}! Agora me diga, você prefere *casa*, *apartamento* ou *comercial*?"
+            purpose_txt = "comprar" if purpose == "sale" else "alugar"
+            msg = f"Perfeito{', ' + user_name if user_name else ''}! Você quer {purpose_txt}.\n\nAgora me diga, que tipo de imóvel você prefere:\n\n1️⃣ *Casa*\n2️⃣ *Apartamento*\n3️⃣ *Comercial*\n4️⃣ *Terreno*\n\nDigite o número ou o nome do tipo."
             log.info("purpose_detected", purpose=purpose, next_stage="awaiting_type")
             return (msg, state, False)
         else:
-            msg = f"{name_prefix}não entendi. Você gostaria de *comprar* ou *alugar* um imóvel?"
-            log.warning("purpose_not_detected", text=text)
-            return (msg, state, False)
+            # Incrementar contador de tentativas
+            retry_count = self._increment_retry_count(state, "awaiting_purpose")
+            
+            if self._check_retry_limit(state, "awaiting_purpose"):
+                # Atingiu limite - usar valor padrão e continuar
+                state["purpose"] = "sale"  # Padrão: venda
+                state["stage"] = "awaiting_type"
+                msg = get_retry_limit_message("awaiting_purpose", retry_count)
+                msg += f"\n\nQue tipo de imóvel você prefere:\n\n1️⃣ *Casa*\n2️⃣ *Apartamento*\n3️⃣ *Comercial*\n4️⃣ *Terreno*"
+                return (msg, state, False)
+            else:
+                name_prefix = f"{user_name}, " if user_name else ""
+                msg = f"{name_prefix}não entendi. Por favor, escolha uma opção:\n\n1️⃣ *Comprar* um imóvel\n2️⃣ *Alugar* um imóvel\n\nDigite 1 ou 2, ou escreva 'comprar' ou 'alugar'."
+                log.warning("purpose_not_detected", text=text, retry_count=retry_count)
+                return (msg, state, False)
     
     def handle_city(self, text: str, state: Dict[str, Any]) -> Tuple[str, Dict[str, Any], bool]:
         """Estágio de cidade."""
         import structlog
         log = structlog.get_logger()
         
-        ent = (state.get("llm_entities") or {})
-        cidade = (ent.get("cidade") or text).strip().title()
-        state["city"] = cidade
+        # Verificar contexto da resposta
+        if not is_response_in_context(text, "city"):
+            msg = get_context_validation_message("city")
+            return (msg, state, False)
         
-        # Log para debug: verificar se type está preservado
-        log.info("handle_city_state", 
-                 city=cidade,
-                 type=state.get("type"),
-                 purpose=state.get("purpose"),
-                 price_max=state.get("price_max"))
+        ent = (state.get("llm_entities") or {})
+        cidade_raw = ent.get("cidade") or text
+        cidade = validate_city(cidade_raw)
+        
+        if cidade:
+            state["city"] = cidade
             
-        # Se já tem tipo e preço (refinamento), buscar direto após bairro
-        if state.get("type") and state.get("price_max"):
-            state["stage"] = "awaiting_neighborhood"
+            # Log para debug: verificar se type está preservado
+            log.info("handle_city_state", 
+                     city=cidade,
+                     type=state.get("type"),
+                     purpose=state.get("purpose"),
+                     price_max=state.get("price_max"))
+                
+            # Se já tem tipo e preço (refinamento), buscar direto após bairro
+            if state.get("type") and state.get("price_max"):
+                state["stage"] = "awaiting_neighborhood"
+            else:
+                state["stage"] = "awaiting_neighborhood"
+            user_name = state.get("user_name", "")
+            msg = f"Ótimo{', ' + user_name if user_name else ''}! Você tem preferência por algum *bairro* em {cidade}? (ou 'não')"
+            return (msg, state, False)
         else:
-            state["stage"] = "awaiting_neighborhood"
-        user_name = state.get("user_name", "")
-        name_prefix = f"{user_name}, " if user_name else ""
-        msg = f"Ótimo{', ' + user_name if user_name else ''}! Você tem preferência por algum *bairro* em {cidade}? (ou 'não')"
-        return (msg, state, False)
+            # Incrementar contador de tentativas
+            retry_count = self._increment_retry_count(state, "awaiting_city")
+            
+            if self._check_retry_limit(state, "awaiting_city"):
+                # Atingiu limite - usar valor padrão
+                state = apply_fallback_values(state, "awaiting_city")
+                state["stage"] = "awaiting_neighborhood"
+                msg = get_retry_limit_message("awaiting_city", retry_count)
+                msg += f"\n\nVocê tem preferência por algum *bairro* em {state['city']}? (ou 'não')"
+                return (msg, state, False)
+            else:
+                user_name = state.get("user_name", "")
+                name_prefix = f"{user_name}, " if user_name else ""
+                msg = f"{name_prefix}não consegui identificar a cidade. Por favor, informe uma cidade válida.\n\n💡 Exemplos: 'São Paulo', 'Mogi das Cruzes', 'Santos'"
+                return (msg, state, False)
     
     def handle_type(self, text: str, state: Dict[str, Any]) -> Tuple[str, Dict[str, Any], bool]:
         """Estágio de tipo de imóvel."""
-        # PRIORIDADE: detecção local (mais confiável que LLM para "ap")
-        prop_type = detect.detect_property_type(text)
-        if not prop_type:
-            ent = (state.get("llm_entities") or {})
-            prop_type = ent.get("tipo")
+        import structlog
+        log = structlog.get_logger()
         
+        text_lower = text.lower().strip()
         user_name = state.get("user_name", "")
+        
+        log.info("handle_type_start", 
+                 input_text=text, 
+                 current_stage=state.get("stage"),
+                 has_purpose=bool(state.get("purpose")),
+                 purpose_value=state.get("purpose"))
+        
+        # Detectar números 1-4
+        if text_lower in ['1', '1️⃣', 'um', 'primeiro']:
+            prop_type = 'house'
+        elif text_lower in ['2', '2️⃣', 'dois', 'segundo']:
+            prop_type = 'apartment'
+        elif text_lower in ['3', '3️⃣', 'três', 'tres', 'terceiro']:
+            prop_type = 'commercial'
+        elif text_lower in ['4', '4️⃣', 'quatro', 'quarto']:
+            prop_type = 'land'
+        else:
+            # Verificar contexto da resposta
+            if not is_response_in_context(text, "type"):
+                msg = get_context_validation_message("type")
+                log.info("handle_type_context_failed", input_text=text, message=msg)
+                return (msg, state, False)
+            
+            # PRIORIDADE: detecção local (mais confiável que LLM para "ap")
+            prop_type = detect.detect_property_type(text)
+            if not prop_type:
+                ent = (state.get("llm_entities") or {})
+                prop_type_raw = ent.get("tipo")
+                prop_type = validate_property_type(prop_type_raw)
+        
+        log.info("handle_type_detection", 
+                 input_text=text, 
+                 detected_type=prop_type, 
+                 llm_entities=state.get("llm_entities"))
         
         if prop_type:
             state["type"] = prop_type
             state["stage"] = "awaiting_price_min"
             purpose_txt = "aluguel" if state.get("purpose") == "rent" else "compra"
-            msg = f"Entendido{', ' + user_name if user_name else ''}! Qual o valor *mínimo* que você considera para {purpose_txt}? (Ex: 200000 ou 2000)"
+            type_names = {'house': 'casa', 'apartment': 'apartamento', 'commercial': 'comercial', 'land': 'terreno'}
+            type_display = type_names.get(prop_type, prop_type)
+            msg = f"Entendido{', ' + user_name if user_name else ''}! Você quer {type_display}.\n\nQual o valor *mínimo* que você considera para {purpose_txt}?\n\n💡 Exemplos: '200000', '200 mil', '200k'"
+            
+            log.info("handle_type_success", 
+                     validated_type=prop_type,
+                     new_stage=state["stage"],
+                     purpose=state.get("purpose"),
+                     message_preview=msg[:50] + "...")
+            
             return (msg, state, False)
         else:
-            name_prefix = f"{user_name}, " if user_name else ""
-            msg = f"{name_prefix}não entendi o tipo. Por favor, escolha: *casa*, *apartamento*, *comercial* ou *terreno*."
-            return (msg, state, False)
+            # Incrementar contador de tentativas
+            retry_count = self._increment_retry_count(state, "awaiting_type")
+            
+            if self._check_retry_limit(state, "awaiting_type"):
+                # Atingiu limite - usar valor padrão
+                state = apply_fallback_values(state, "awaiting_type")
+                state["stage"] = "awaiting_price_min"
+                purpose_txt = "aluguel" if state.get("purpose") == "rent" else "compra"
+                msg = get_retry_limit_message("awaiting_type", retry_count)
+                msg += f"\n\nQual o valor *mínimo* que você considera para {purpose_txt}?\n\n💡 Exemplos: '200000', '200 mil', '200k'"
+                return (msg, state, False)
+            else:
+                name_prefix = f"{user_name}, " if user_name else ""
+                msg = f"{name_prefix}não entendi o tipo. Por favor, escolha uma opção:\n\n1️⃣ *Casa*\n2️⃣ *Apartamento*\n3️⃣ *Comercial*\n4️⃣ *Terreno*\n\nDigite o número ou o nome."
+                return (msg, state, False)
     
     def handle_price_min(self, text: str, state: Dict[str, Any]) -> Tuple[str, Dict[str, Any], bool]:
         """Estágio de preço mínimo."""
         import structlog
         log = structlog.get_logger()
+        
+        log.info("handle_price_min_start", 
+                 input_text=text, 
+                 current_stage=state.get("stage"),
+                 has_type=bool(state.get("type")),
+                 type_value=state.get("type"),
+                 has_purpose=bool(state.get("purpose")),
+                 purpose_value=state.get("purpose"))
+        
+        # Verificar contexto da resposta
+        if not is_response_in_context(text, "price"):
+            msg = get_context_validation_message("price")
+            log.info("handle_price_min_context_failed", input_text=text, message=msg)
+            return (msg, state, False)
         
         # PRIORIDADE: extract_price (regex/extenso) sobre LLM
         price_min = detect.extract_price(text)
@@ -524,79 +687,212 @@ class ConversationHandler:
             ent = (state.get("llm_entities") or {})
             price_min = ent.get("preco_min")
         
-        log.info("handle_price_min", input_text=text, extracted_price=price_min)
+        # Validar preço
+        purpose = state.get("purpose", "sale")
+        validated_price = validate_price(price_min, purpose)
         
-        if price_min is not None:
-            state["price_min"] = price_min
+        log.info("handle_price_min_detection", 
+                 input_text=text, 
+                 extracted_price=price_min, 
+                 validated_price=validated_price,
+                 purpose=purpose,
+                 llm_entities=state.get("llm_entities"))
+        
+        if validated_price is not None:
+            state["price_min"] = validated_price
             
             # Se já tem cidade (refinamento), buscar direto SEM mensagem
             if state.get("city"):
                 state["stage"] = "searching"
+                log.info("handle_price_min_refinement_search", 
+                         price_min=validated_price,
+                         has_city=True,
+                         new_stage="searching")
                 return ("", state, True)  # Busca silenciosa
             else:
                 # Primeira vez, continuar fluxo normal
                 state["stage"] = "awaiting_price_max"
                 purpose_txt = "aluguel" if state.get("purpose") == "rent" else "compra"
                 msg = f"Perfeito! E qual o valor *máximo* para {purpose_txt}?"
+                
+                log.info("handle_price_min_success", 
+                         price_min=validated_price,
+                         new_stage=state["stage"],
+                         purpose=purpose,
+                         message_preview=msg[:30] + "...")
+                
                 return (msg, state, False)
         else:
-            msg = "Não consegui identificar o valor. Por favor, informe o valor mínimo em números (ex: 200000)."
-            return (msg, state, False)
+            # Incrementar contador de tentativas
+            retry_count = self._increment_retry_count(state, "awaiting_price_min")
+            
+            if self._check_retry_limit(state, "awaiting_price_min"):
+                # Atingiu limite - usar valor padrão
+                state = apply_fallback_values(state, "awaiting_price_min")
+                
+                if state.get("city"):
+                    state["stage"] = "searching"
+                    msg = get_retry_limit_message("awaiting_price_min", retry_count)
+                    return (msg, state, False)
+                else:
+                    state["stage"] = "awaiting_price_max"
+                    purpose_txt = "aluguel" if state.get("purpose") == "rent" else "compra"
+                    msg = get_retry_limit_message("awaiting_price_min", retry_count)
+                    msg += f"\n\nE qual o valor *máximo* para {purpose_txt}?"
+                    return (msg, state, False)
+            else:
+                purpose_txt = "aluguel" if state.get("purpose") == "rent" else "compra"
+                range_txt = "R$ 300 a R$ 50.000" if purpose == "rent" else "R$ 50.000 a R$ 10.000.000"
+                msg = f"Não consegui identificar o valor. Por favor, informe o valor mínimo para {purpose_txt}.\n\n💡 Faixa válida: {range_txt}\n💡 Exemplos: '200000', '200 mil', '200k'"
+                return (msg, state, False)
     
     def handle_price_max(self, text: str, state: Dict[str, Any]) -> Tuple[str, Dict[str, Any], bool]:
         """Estágio de preço máximo."""
+        import structlog
+        log = structlog.get_logger()
+        
+        log.info("handle_price_max_START", 
+                 input_text=text, 
+                 current_stage=state.get("stage"),
+                 has_price_min=bool(state.get("price_min")),
+                 price_min_value=state.get("price_min"),
+                 has_type=bool(state.get("type")),
+                 type_value=state.get("type"),
+                 has_purpose=bool(state.get("purpose")),
+                 purpose_value=state.get("purpose"))
+        
+        # Verificar contexto da resposta
+        if not is_response_in_context(text, "price"):
+            msg = get_context_validation_message("price")
+            log.warning("handle_price_max_CONTEXT_FAIL", input_text=text, message=msg)
+            return (msg, state, False)
+        
+        log.info("handle_price_max_CONTEXT_OK", input_text=text)
+        
         # PRIORIDADE: extract_price (regex/extenso) sobre LLM
         price_max = detect.extract_price(text)
+        log.info("handle_price_max_EXTRACT_PRICE", input_text=text, extracted_price=price_max)
+        
         if price_max is None:
             ent = (state.get("llm_entities") or {})
             price_max = ent.get("preco_max")
+            log.info("handle_price_max_LLM_FALLBACK", llm_entities=ent, llm_price_max=price_max)
         
-        if price_max is not None:
-            state["price_max"] = price_max
+        # Validar preço
+        purpose = state.get("purpose", "sale")
+        validated_price = validate_price(price_max, purpose)
+        log.info("handle_price_max_VALIDATE_PRICE", 
+                 raw_price=price_max, 
+                 purpose=purpose, 
+                 validated_price=validated_price)
+        
+        if validated_price is not None:
+            state["price_max"] = validated_price
+            log.info("handle_price_max_PRICE_SET", price_max=validated_price)
             
             # Se já tem cidade (refinamento), buscar direto SEM mensagem
             if state.get("city"):
                 state["stage"] = "searching"
+                log.info("handle_price_max_REFINEMENT_SEARCH", 
+                         price_max=validated_price,
+                         has_city=True,
+                         new_stage="searching")
                 return ("", state, True)  # Busca silenciosa
             else:
                 # Primeira vez, continuar fluxo normal
                 state["stage"] = "awaiting_bedrooms"
-                msg = "Ótimo! Quantos quartos você precisa? (Ex: 2, 3 ou 'tanto faz')"
+                msg = "Ótimo! Quantos quartos você precisa?\n\n💡 Exemplos: '2', '3 quartos', 'tanto faz'"
+                log.info("handle_price_max_SUCCESS", 
+                         price_max=validated_price,
+                         new_stage=state["stage"],
+                         message=msg)
                 return (msg, state, False)
         else:
-            msg = "Não consegui identificar o valor. Por favor, informe o valor máximo em números (ex: 500000)."
-            return (msg, state, False)
+            log.warning("handle_price_max_VALIDATION_FAILED", 
+                       raw_price=price_max, 
+                       purpose=purpose)
+            
+            # Incrementar contador de tentativas
+            retry_count = self._increment_retry_count(state, "awaiting_price_max")
+            log.info("handle_price_max_RETRY_COUNT", retry_count=retry_count)
+            
+            if self._check_retry_limit(state, "awaiting_price_max"):
+                log.warning("handle_price_max_RETRY_LIMIT_REACHED", retry_count=retry_count)
+                # Atingiu limite - usar valor padrão
+                state = apply_fallback_values(state, "awaiting_price_max")
+                
+                if state.get("city"):
+                    state["stage"] = "searching"
+                    msg = get_retry_limit_message("awaiting_price_max", retry_count)
+                    log.info("handle_price_max_FALLBACK_SEARCH", message=msg)
+                    return (msg, state, False)
+                else:
+                    state["stage"] = "awaiting_bedrooms"
+                    msg = get_retry_limit_message("awaiting_price_max", retry_count)
+                    msg += "\n\nQuantos quartos você precisa?\n\n💡 Exemplos: '2', '3 quartos', 'tanto faz'"
+                    log.info("handle_price_max_FALLBACK_BEDROOMS", message=msg)
+                    return (msg, state, False)
+            else:
+                purpose_txt = "aluguel" if state.get("purpose") == "rent" else "compra"
+                range_txt = "R$ 300 a R$ 50.000" if purpose == "rent" else "R$ 50.000 a R$ 10.000.000"
+                msg = f"Não consegui identificar o valor. Por favor, informe o valor máximo para {purpose_txt}.\n\n💡 Faixa válida: {range_txt}\n💡 Exemplos: '500000', '500 mil', '500k'"
+                log.info("handle_price_max_RETRY_MESSAGE", retry_count=retry_count, message=msg)
+                return (msg, state, False)
     
     def handle_bedrooms(self, text: str, state: Dict[str, Any]) -> Tuple[str, Dict[str, Any], bool]:
         """Estágio de quartos."""
         import structlog
         log = structlog.get_logger()
         
+        # Verificar contexto da resposta
+        if not is_response_in_context(text, "bedrooms"):
+            msg = get_context_validation_message("bedrooms")
+            return (msg, state, False)
+        
         ent = (state.get("llm_entities") or {})
-        bedrooms = ent.get("dormitorios")
-        log.info("🛏️ handle_bedrooms START", text=text, llm_dormitorios=bedrooms)
+        bedrooms_raw = ent.get("dormitorios")
+        log.info("🛏️ handle_bedrooms START", text=text, llm_dormitorios=bedrooms_raw)
         
-        if bedrooms is None:
-            bedrooms = detect.extract_bedrooms(text)
-            log.info("🛏️ extract_bedrooms fallback", extracted=bedrooms)
+        if bedrooms_raw is None:
+            bedrooms_raw = detect.extract_bedrooms(text)
+            log.info("🛏️ extract_bedrooms fallback", extracted=bedrooms_raw)
         
-        try:
-            bedrooms = int(bedrooms) if bedrooms is not None else None
-        except Exception as e:
-            log.warning("🛏️ bedrooms parse error", error=str(e))
-            bedrooms = None
+        # Validar quartos
+        bedrooms = validate_bedrooms(bedrooms_raw)
+        log.info("🛏️ validated_bedrooms", validated=bedrooms)
         
-        state["bedrooms"] = bedrooms
-        log.info("🛏️ handle_bedrooms END", saved_bedrooms=bedrooms, state_keys=list(state.keys()))
-        
-        # Se já tem cidade (refinamento), buscar direto SEM mensagem
-        if state.get("city"):
-            state["stage"] = "searching"
-            return ("", state, True)  # Busca silenciosa
-        
-        state["stage"] = "awaiting_city"
-        msg = "Perfeito! Em qual cidade você está procurando?"
-        return (msg, state, False)
+        if bedrooms is not None or text.lower().strip() in ['tanto faz', 'qualquer', 'qualquer um', 'não importa']:
+            state["bedrooms"] = bedrooms  # None é válido para "tanto faz"
+            log.info("🛏️ handle_bedrooms END", saved_bedrooms=bedrooms, state_keys=list(state.keys()))
+            
+            # Se já tem cidade (refinamento), buscar direto SEM mensagem
+            if state.get("city"):
+                state["stage"] = "searching"
+                return ("", state, True)  # Busca silenciosa
+            
+            state["stage"] = "awaiting_city"
+            msg = "Perfeito! Em qual cidade você está procurando?"
+            return (msg, state, False)
+        else:
+            # Incrementar contador de tentativas
+            retry_count = self._increment_retry_count(state, "awaiting_bedrooms")
+            
+            if self._check_retry_limit(state, "awaiting_bedrooms"):
+                # Atingiu limite - usar valor padrão
+                state = apply_fallback_values(state, "awaiting_bedrooms")
+                
+                if state.get("city"):
+                    state["stage"] = "searching"
+                    msg = get_retry_limit_message("awaiting_bedrooms", retry_count)
+                    return (msg, state, False)
+                else:
+                    state["stage"] = "awaiting_city"
+                    msg = get_retry_limit_message("awaiting_bedrooms", retry_count)
+                    msg += "\n\nEm qual cidade você está procurando?"
+                    return (msg, state, False)
+            else:
+                msg = "Não consegui identificar a quantidade de quartos. Por favor, responda:\n\n1️⃣ *1 quarto*\n2️⃣ *2 quartos*\n3️⃣ *3 quartos*\n4️⃣ *4 quartos*\n5️⃣ *Tanto faz*"
+                return (msg, state, False)
     
     def handle_neighborhood(self, text: str, state: Dict[str, Any]) -> Tuple[str, Dict[str, Any], bool]:
         """Estágio de bairro."""
@@ -655,7 +951,13 @@ class ConversationHandler:
             stmt = stmt.where(Property.bedrooms == int(state["bedrooms"]))
         
         stmt = stmt.limit(20)
+        
+        # DEBUG: Log da query SQL gerada
+        log.info("🔍 SQL Query Debug", 
+                 query_str=str(stmt.compile(compile_kwargs={"literal_binds": True})))
+        
         results = self.db.execute(stmt).scalars().all()
+        log.info("🔍 Query Results", count=len(results))
         
         if not results:
             # Sem resultados - salvar lead
@@ -762,7 +1064,7 @@ class ConversationHandler:
             return ("", state, True)
         
         # 4. PREÇO MÁXIMO - mencionou mas não especificou
-        if any(kw in text_lower for kw in ["valor máximo", "preço máximo", "valor maximo", "preco maximo", "aumentar valor", "mais caro"]) and not price_max_from_llm:
+        if any(kw in text_lower for kw in ["valor máximo", "preço máximo", "valor maximo", "preco maximo", "aumentar valor", "mais caro"]):
             msg = "Entendido! Qual o *novo valor máximo* que você considera?"
             state["stage"] = "awaiting_price_max"
             return (msg, state, False)
@@ -775,7 +1077,7 @@ class ConversationHandler:
             return ("", state, True)
         
         # 6. PREÇO MÍNIMO - mencionou mas não especificou
-        if any(kw in text_lower for kw in ["valor mínimo", "preço mínimo", "valor minimo", "preco minimo", "diminuir valor", "mais barato"]) and not price_min_from_llm:
+        if any(kw in text_lower for kw in ["valor mínimo", "preço mínimo", "valor minimo", "preco minimo", "diminuir valor", "mais barato"]):
             msg = "Entendido! Qual o *novo valor mínimo* que você considera?"
             state["stage"] = "awaiting_price_min"
             return (msg, state, False)

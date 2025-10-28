@@ -54,4 +54,83 @@ def client(db_session):
     # Sobrescreve a dependência de DB definida em app.main e na rota de imóveis
     app.dependency_overrides[deps_get_db] = override_get_db
     yield TestClient(app)
-    del app.dependency_overrides[deps_get_db]
+    app.dependency_overrides.clear()
+
+
+# Fixtures específicas para testes das melhorias do LLM
+@pytest.fixture
+def sample_llm_entities():
+    """Fixture com entidades de exemplo para testes."""
+    return {
+        "finalidade": "rent",
+        "tipo": "apartment",
+        "cidade": "São Paulo",
+        "dormitorios": 2,
+        "preco_max": 3000,
+        "preco_min": 1500
+    }
+
+@pytest.fixture
+def sample_conversation_state():
+    """Fixture com estado de conversa de exemplo."""
+    return {
+        "stage": "awaiting_purpose",
+        "tenant_id": "test_tenant",
+        "contact_id": "test_contact",
+        "conversation_id": "test_conversation",
+        "filters": {},
+        "retry_count": 0,
+        "user_name": None,
+        "lgpd_consent": None
+    }
+
+@pytest.fixture
+def simple_responses():
+    """Fixture com respostas simples que não devem ter entidades."""
+    return ["sim", "não", "ok", "ola", "oi", "obrigado", "tchau"]
+
+@pytest.fixture
+def valid_search_inputs():
+    """Fixture com entradas válidas de busca de imóvel."""
+    return [
+        "quero alugar apartamento 2 quartos em São Paulo",
+        "busco casa para comprar em Campinas",
+        "apartamento 3 dormitórios para alugar",
+        "casa até 500 mil reais"
+    ]
+
+@pytest.fixture
+def hallucination_scenarios():
+    """Fixture com cenários de alucinação do LLM."""
+    return [
+        {
+            "input": "sim",
+            "llm_output": {
+                "intent": "responder_lgpd",
+                "entities": {
+                    "finalidade": "rent",
+                    "tipo": "apartment",
+                    "cidade": "São Paulo"
+                }
+            },
+            "expected_entities": {
+                "finalidade": None,
+                "tipo": None,
+                "cidade": None
+            }
+        },
+        {
+            "input": "ola",
+            "llm_output": {
+                "intent": "outro",
+                "entities": {
+                    "dormitorios": 3,
+                    "preco_max": 400000
+                }
+            },
+            "expected_entities": {
+                "dormitorios": None,
+                "preco_max": None
+            }
+        }
+    ]

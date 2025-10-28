@@ -15,6 +15,8 @@ from app.domain.realestate.conversation_handlers import ConversationHandler
 from app.services.lead_service import LeadService
 from app.services.llm_service import get_llm_service
 from app.domain.realestate import detection_utils as detect
+import json
+from fastapi import WebSocket
 
 router = APIRouter()
 
@@ -241,14 +243,50 @@ async def execute_mcp(
     # Armazena no state para uso pelos handlers
     if text_raw.strip():
         try:
+            log.info("llm_extraction_start", 
+                    sender_id=body.sender_id, 
+                    user_input=text_raw, 
+                    input_length=len(text_raw),
+                    current_stage=state.get("stage", "start"))
+            
             llm = get_llm_service()
             llm_result = await llm.extract_intent_and_entities(text_raw)
+            
+            log.info("llm_extraction_raw", 
+                    sender_id=body.sender_id, 
+                    raw_intent=llm_result.get("intent"), 
+                    raw_entities=llm_result.get("entities", {}))
+            
             if isinstance(llm_result, dict):
-                state["llm_intent"] = llm_result.get("intent")
-                state["llm_entities"] = llm_result.get("entities") or {}
-                log.info("✅ LLM extraction", intent=state.get("llm_intent"), entities=state.get("llm_entities"))
+                # Sanitizar resultado do LLM para evitar alucinações
+                from app.domain.realestate.validation_utils import sanitize_llm_result
+                current_stage = state.get("stage", "start")
+                sanitized_result = sanitize_llm_result(llm_result, text_raw, current_stage)
+                
+                # Log da sanitização se houve mudanças
+                if llm_result != sanitized_result:
+                    log.warning("llm_result_changed_by_sanitization",
+                               sender_id=body.sender_id,
+                               original_intent=llm_result.get("intent"),
+                               sanitized_intent=sanitized_result.get("intent"),
+                               original_entities=llm_result.get("entities", {}),
+                               sanitized_entities=sanitized_result.get("entities", {}))
+                else:
+                    log.debug("llm_result_unchanged_by_sanitization", sender_id=body.sender_id)
+                
+                state["llm_intent"] = sanitized_result.get("intent")
+                state["llm_entities"] = sanitized_result.get("entities") or {}
+                state["llm_original"] = llm_result  # Para debug/análise
+                
+                log.info("llm_extraction_final", 
+                        sender_id=body.sender_id,
+                        final_intent=state.get("llm_intent"), 
+                        final_entities=state.get("llm_entities"))
         except Exception as e:
-            log.warning("⚠️ LLM preparse failed", error=str(e))
+            log.error("llm_extraction_failed", 
+                     sender_id=body.sender_id, 
+                     error=str(e), 
+                     user_input=text_raw)
             # Continua sem LLM - handlers usarão fallback regex
     
     # ===== LOOP DE CONVERSAÇÃO =====
@@ -278,57 +316,94 @@ async def execute_mcp(
                 return MCPResponse(message=msg, tool_calls=tool_calls)
         
         # Roteamento para handlers específicos
+        log.info("mcp_routing_handler", 
+                 stage=stage, 
+                 text_preview=text[:50] + "..." if len(text) > 50 else text,
+                 text_raw_preview=text_raw[:50] + "..." if len(text_raw) > 50 else text_raw,
+                 state_keys=list(state.keys()))
+        
         if stage == "start":
+            log.info("mcp_calling_handler", handler="handle_start")
             msg, state, continue_loop = handler.handle_start(text_raw, state)
         elif stage == "awaiting_lgpd_consent":
+            log.info("mcp_calling_handler", handler="handle_lgpd_consent")
             msg, state, continue_loop = handler.handle_lgpd_consent(text, state)
         elif stage == "awaiting_name":
+            log.info("mcp_calling_handler", handler="handle_name")
             msg, state, continue_loop = handler.handle_name(text, state)
         # FLUXO DIRECIONADO
         elif stage == "awaiting_has_property_in_mind":
+            log.info("mcp_calling_handler", handler="handle_has_property_in_mind")
             msg, state, continue_loop = handler.handle_has_property_in_mind(text, state)
         elif stage == "awaiting_property_code":
+            log.info("mcp_calling_handler", handler="handle_property_code")
             msg, state, continue_loop = handler.handle_property_code(text, state)
         elif stage == "awaiting_property_questions":
+            log.info("mcp_calling_handler", handler="handle_property_questions")
             msg, state, continue_loop = handler.handle_property_questions(text, state)
         elif stage == "awaiting_schedule_visit_question":
+            log.info("mcp_calling_handler", handler="handle_schedule_visit_question")
             msg, state, continue_loop = handler.handle_schedule_visit_question(text, state)
         elif stage == "awaiting_phone_confirmation":
+            log.info("mcp_calling_handler", handler="handle_phone_confirmation")
             msg, state, continue_loop = handler.handle_phone_confirmation(text, state)
         elif stage == "awaiting_phone_input":
+            log.info("mcp_calling_handler", handler="handle_phone_input")
             msg, state, continue_loop = handler.handle_phone_input(text, state)
         elif stage == "awaiting_visit_date":
+            log.info("mcp_calling_handler", handler="handle_visit_date")
             msg, state, continue_loop = handler.handle_visit_date(text, state)
         elif stage == "awaiting_visit_time":
+            log.info("mcp_calling_handler", handler="handle_visit_time")
             msg, state, continue_loop = handler.handle_visit_time(text, body.sender_id, state)
         # FLUXO QUALIFICAÇÃO
         elif stage == "awaiting_purpose":
+            log.info("mcp_calling_handler", handler="handle_purpose")
             msg, state, continue_loop = handler.handle_purpose(text, state)
         elif stage == "awaiting_city":
+            log.info("mcp_calling_handler", handler="handle_city")
             msg, state, continue_loop = handler.handle_city(text_raw, state)
         elif stage == "awaiting_type":
+            log.info("mcp_calling_handler", handler="handle_type")
             msg, state, continue_loop = handler.handle_type(text, state)
         elif stage == "awaiting_price_min":
+            log.info("mcp_calling_handler", handler="handle_price_min")
             msg, state, continue_loop = handler.handle_price_min(text, state)
         elif stage == "awaiting_price_max":
+            log.info("mcp_calling_handler", handler="handle_price_max")
             msg, state, continue_loop = handler.handle_price_max(text, state)
         elif stage == "awaiting_bedrooms":
+            log.info("mcp_calling_handler", handler="handle_bedrooms")
             msg, state, continue_loop = handler.handle_bedrooms(text, state)
         elif stage == "awaiting_neighborhood":
+            log.info("mcp_calling_handler", handler="handle_neighborhood")
             msg, state, continue_loop = handler.handle_neighborhood(text_raw, state)
         elif stage == "searching":
+            log.info("mcp_calling_handler", handler="handle_searching")
             msg, state, continue_loop = handler.handle_searching(body.sender_id, state)
         elif stage == "showing_property":
+            log.info("mcp_calling_handler", handler="handle_showing_property")
             msg, state, continue_loop = handler.handle_showing_property(state)
         elif stage == "awaiting_property_feedback":
+            log.info("mcp_calling_handler", handler="handle_property_feedback")
             msg, state, continue_loop = handler.handle_property_feedback(text, state)
         elif stage == "awaiting_visit_decision":
+            log.info("mcp_calling_handler", handler="handle_visit_decision")
             msg, state, continue_loop = handler.handle_visit_decision(text, body.sender_id, state)
         elif stage == "awaiting_refinement":
+            log.info("mcp_calling_handler", handler="handle_refinement")
             msg, state, continue_loop = handler.handle_refinement(text, state)
         else:
             # Estágio desconhecido - fallback
+            log.warning("mcp_unknown_stage", stage=stage)
             break
+        
+        log.info("mcp_handler_result", 
+                 handler=f"handle_{stage.replace('awaiting_', '')}", 
+                 has_message=bool(msg),
+                 message_preview=msg[:100] + "..." if msg and len(msg) > 100 else msg,
+                 continue_loop=continue_loop,
+                 new_stage=state.get("stage") if state else None)
         
         # Atualizar state no Redis
         if state:

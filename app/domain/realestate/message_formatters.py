@@ -165,7 +165,10 @@ def format_has_property_in_mind(user_name: str) -> str:
     """Pergunta se o cliente já tem um imóvel específico em mente."""
     return (
         f"Prazer, {user_name}! 😊\n\n"
-        "Você já viu algum imóvel específico que te interessou ou quer que eu te ajude a encontrar?"
+        "*Você já viu algum imóvel específico que te interessou?*\n\n"
+        "1️⃣ *Sim* - Já tenho um código/referência\n"
+        "2️⃣ *Não* - Quero que você me ajude a buscar\n\n"
+        "Digite 1 ou 2, ou escreva 'sim' ou 'não'."
     )
 
 

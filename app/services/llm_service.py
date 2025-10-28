@@ -6,6 +6,9 @@ from typing import Any, Dict, List, Optional
 import json
 import httpx
 from app.core.config import settings
+import structlog
+
+log = structlog.get_logger()
 
 
 class LLMService:
@@ -32,39 +35,65 @@ class LLMService:
                 seen.add(u)
                 out.append(u)
         return out
-    
+
     async def _chat(self, messages: List[Dict[str, str]]) -> str:
-        """Chama Ollama /api/chat e retorna o conteúdo da resposta."""
-        payload = {"model": self.model, "messages": messages, "stream": False}
-        async with httpx.AsyncClient() as client:
-            last_err: Optional[Exception] = None
-            for url in self.base_urls:
-                try:
-                    r = await client.post(f"{url}/api/chat", json=payload, timeout=self.timeout)
-                    r.raise_for_status()
-                    js = r.json()
-                    return js.get("message", {}).get("content", "")
-                except Exception as e:
-                    last_err = e
-                    continue
-            raise Exception(f"LLM unavailable: {last_err}")
+        """Faz chamada async para Ollama."""
+        log.debug("llm_chat_start", model=self.model, message_count=len(messages))
+        
+        for i, url in enumerate(self.base_urls):
+            try:
+                log.debug("llm_trying_url", url=url, attempt=i+1, total_urls=len(self.base_urls))
+                
+                async with httpx.AsyncClient(timeout=self.timeout) as client:
+                    response = await client.post(
+                        f"{url}/api/chat",
+                        json={"model": self.model, "messages": messages, "stream": False}
+                    )
+                    response.raise_for_status()
+                    result = response.json()["message"]["content"]
+                    
+                    log.info("llm_chat_success", 
+                            url=url, 
+                            response_length=len(result),
+                            response_preview=result[:100] + "..." if len(result) > 100 else result)
+                    return result
+                    
+            except Exception as e:
+                log.warning("llm_url_failed", url=url, error=str(e), attempt=i+1)
+                continue
+                
+        log.error("llm_all_urls_failed", urls=self.base_urls)
+        raise Exception("Nenhuma URL do Ollama disponível")
 
     def _chat_sync(self, messages: List[Dict[str, str]]) -> str:
-        """Versão síncrona de chat: usa httpx.Client."""
-        payload = {"model": self.model, "messages": messages, "stream": False}
-        last_err: Optional[Exception] = None
-        with httpx.Client() as client:
-            for url in self.base_urls:
-                try:
-                    r = client.post(f"{url}/api/chat", json=payload, timeout=self.timeout)
-                    r.raise_for_status()
-                    js = r.json()
-                    return js.get("message", {}).get("content", "")
-                except Exception as e:
-                    last_err = e
-                    continue
-        raise Exception(f"LLM unavailable: {last_err}")
-    
+        """Faz chamada síncrona para Ollama."""
+        log.debug("llm_chat_sync_start", model=self.model, message_count=len(messages))
+        
+        for i, url in enumerate(self.base_urls):
+            try:
+                log.debug("llm_sync_trying_url", url=url, attempt=i+1, total_urls=len(self.base_urls))
+                
+                with httpx.Client(timeout=self.timeout) as client:
+                    response = client.post(
+                        f"{url}/api/chat",
+                        json={"model": self.model, "messages": messages, "stream": False}
+                    )
+                    response.raise_for_status()
+                    result = response.json()["message"]["content"]
+                    
+                    log.info("llm_chat_sync_success", 
+                            url=url, 
+                            response_length=len(result),
+                            response_preview=result[:100] + "..." if len(result) > 100 else result)
+                    return result
+                    
+            except Exception as e:
+                log.warning("llm_sync_url_failed", url=url, error=str(e), attempt=i+1)
+                continue
+                
+        log.error("llm_sync_all_urls_failed", urls=self.base_urls)
+        raise Exception("Nenhuma URL do Ollama disponível")
+
     async def extract_intent_and_entities(self, user_input: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         Extrai intenção e entidades estruturadas do input do usuário.
@@ -84,7 +113,16 @@ class LLMService:
                 }
             }
         """
+        log.info("llm_extract_start", user_input=user_input, input_length=len(user_input))
+        
         system_prompt = """Você é um assistente especializado em imóveis. Sua tarefa é extrair informações estruturadas de mensagens de usuários.
+
+REGRAS CRÍTICAS PARA EVITAR ALUCINAÇÕES:
+1. Se o usuário disse apenas "sim", "não", "ok", "oi" ou palavras muito simples (≤3 caracteres), retorne TODAS as entidades como null
+2. NUNCA invente informações que não estão EXPLICITAMENTE na mensagem do usuário
+3. Se não tem CERTEZA ABSOLUTA sobre uma informação, use null
+4. Não faça suposições ou inferências - seja literal
+5. Use null (não "null" como string) para valores ausentes
 
 Retorne APENAS um JSON válido no formato:
 {
@@ -97,59 +135,29 @@ Retorne APENAS um JSON válido no formato:
     "preco_min": número ou null,
     "preco_max": número ou null,
     "dormitorios": número ou null,
-    "nome_usuario": primeiro nome do usuário se ele se apresentar (ex: "me chamo João", "sou Maria", "meu nome é Pedro") ou null
+    "nome_usuario": primeiro nome do usuário se ele se apresentar ou null
   }
 }
 
-Regras:
-- Se o usuário responder "sim", "autorizo", "aceito", "ok", "concordo" → intent: "responder_lgpd"
-- Se mencionar "próximo", "outro", "mais", "outras opções", "próximo imóvel" → intent: "proximo_imovel"
-- Se mencionar "ajustar", "mudar", "refazer", "nova busca", "outros critérios" → intent: "ajustar_criterios"
-- Se mencionar busca de imóvel → intent: "buscar_imovel"
-- Caso contrário → intent: "outro"
+EXEMPLOS CORRETOS:
 
-Normalização de finalidade:
-- "locação", "alugar", "aluguel", "locar", "alugo" → "rent"
-- "comprar", "venda", "compra", "vender", "compro" → "sale"
+Input: "quero alugar casa em São Paulo"
+Output: {"intent":"buscar_imovel","entities":{"finalidade":"rent","tipo":"house","cidade":"São Paulo","estado":null,"preco_min":null,"preco_max":null,"dormitorios":null,"nome_usuario":null}}
 
-Normalização de tipo:
-- "casa", "sobrado" → "house"
-- "apartamento", "ap", "apto", "flat" → "apartment"
-- "comercial", "loja", "sala comercial", "ponto comercial" → "commercial"
-- "terreno", "lote", "área" → "land"
+Input: "apartamento para comprar até 500 mil"
+Output: {"intent":"buscar_imovel","entities":{"finalidade":"sale","tipo":"apartment","cidade":null,"estado":null,"preco_min":null,"preco_max":500000,"dormitorios":null,"nome_usuario":null}}
 
-Conversão de valores por extenso:
-- "cem mil", "100 mil", "100k" → 100000
-- "duzentos mil", "200 mil", "200k" → 200000
-- "quinhentos mil", "500 mil", "500k" → 500000
-- "um milhão", "1 milhão", "1mi" → 1000000
-- "dois mil", "2 mil", "2k" → 2000
-- "três mil", "3 mil", "3k" → 3000
-
-Exemplos:
-Input: "quero alugar casa em Mogi das Cruzes 3 quartos até 2000"
-Output: {"intent":"buscar_imovel","entities":{"finalidade":"rent","tipo":"house","cidade":"Mogi Das Cruzes","estado":null,"preco_min":null,"preco_max":2000,"dormitorios":3}}
+Input: "casa para alugar em Mogi das Cruzes com 3 quartos até 2000"
+Output: {"intent":"buscar_imovel","entities":{"finalidade":"rent","tipo":"house","cidade":"Mogi Das Cruzes","estado":null,"preco_min":null,"preco_max":2000,"dormitorios":3,"nome_usuario":null}}
 
 Input: "sim"
-Output: {"intent":"responder_lgpd","entities":{"finalidade":null,"tipo":null,"cidade":null,"estado":null,"preco_min":null,"preco_max":null,"dormitorios":null}}
+Output: {"intent":"responder_lgpd","entities":{"finalidade":null,"tipo":null,"cidade":null,"estado":null,"preco_min":null,"preco_max":null,"dormitorios":null,"nome_usuario":null}}
 
 Input: "próximo"
-Output: {"intent":"proximo_imovel","entities":{"finalidade":null,"tipo":null,"cidade":null,"estado":null,"preco_min":null,"preco_max":null,"dormitorios":null}}
+Output: {"intent":"proximo_imovel","entities":{"finalidade":null,"tipo":null,"cidade":null,"estado":null,"preco_min":null,"preco_max":null,"dormitorios":null,"nome_usuario":null}}
 
-Input: "outras opções"
-Output: {"intent":"proximo_imovel","entities":{"finalidade":null,"tipo":null,"cidade":null,"estado":null,"preco_min":null,"preco_max":null,"dormitorios":null}}
-
-Input: "vamos ajustar os critérios"
-Output: {"intent":"ajustar_criterios","entities":{"finalidade":null,"tipo":null,"cidade":null,"estado":null,"preco_min":null,"preco_max":null,"dormitorios":null}}
-
-Input: "ap"
-Output: {"intent":"buscar_imovel","entities":{"finalidade":null,"tipo":"apartment","cidade":null,"estado":null,"preco_min":null,"preco_max":null,"dormitorios":null}}
-
-Input: "cem mil"
-Output: {"intent":"buscar_imovel","entities":{"finalidade":null,"tipo":null,"cidade":null,"estado":null,"preco_min":null,"preco_max":100000,"dormitorios":null}}
-
-Input: "locação"
-Output: {"intent":"buscar_imovel","entities":{"finalidade":"rent","tipo":null,"cidade":null,"estado":null,"preco_min":null,"preco_max":null,"dormitorios":null,"nome_usuario":null}}
+Input: "ok"
+Output: {"intent":"responder_lgpd","entities":{"finalidade":null,"tipo":null,"cidade":null,"estado":null,"preco_min":null,"preco_max":null,"dormitorios":null,"nome_usuario":null}}
 
 Input: "Olá, me chamo Georgia e tenho interesse nesse imóvel"
 Output: {"intent":"buscar_imovel","entities":{"finalidade":null,"tipo":null,"cidade":null,"estado":null,"preco_min":null,"preco_max":null,"dormitorios":null,"nome_usuario":"Georgia"}}
@@ -166,19 +174,37 @@ Agora processe a mensagem do usuário e retorne APENAS o JSON."""
         
         response = await self._chat(messages)
         
-        # Parse JSON da resposta
+        # Parse e sanitiza JSON da resposta
         try:
             # Remove markdown code blocks se presentes
             response_clean = response.strip()
             if response_clean.startswith("```"):
                 lines = response_clean.split("\n")
                 response_clean = "\n".join(lines[1:-1]) if len(lines) > 2 else response_clean
+                log.debug("llm_removed_markdown", original_length=len(response), cleaned_length=len(response_clean))
             
             result = json.loads(response_clean)
-            return result
-        except json.JSONDecodeError:
+            log.info("llm_json_parse_success", result=result)
+            
+            # Sanitizar resultado para evitar alucinações
+            sanitized_result = self._sanitize_result(result, user_input)
+            
+            if result != sanitized_result:
+                log.warning("llm_result_sanitized", 
+                           original=result, 
+                           sanitized=sanitized_result,
+                           user_input=user_input)
+            
+            return sanitized_result
+            
+        except json.JSONDecodeError as e:
+            log.error("llm_json_parse_failed", 
+                     error=str(e), 
+                     response=response, 
+                     response_clean=response_clean if 'response_clean' in locals() else None)
+            
             # Fallback: retornar estrutura vazia
-            return {
+            fallback_result = {
                 "intent": "outro",
                 "entities": {
                     "finalidade": None,
@@ -191,10 +217,21 @@ Agora processe a mensagem do usuário e retorne APENAS o JSON."""
                     "nome_usuario": None
                 }
             }
+            log.info("llm_using_fallback", fallback=fallback_result)
+            return fallback_result
 
     def extract_intent_and_entities_sync(self, user_input: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Versão síncrona para uso em contextos não-async (ex.: handlers sync)."""
+        log.info("llm_extract_sync_start", user_input=user_input, input_length=len(user_input), context=context)
+        
         system_prompt = """Você é um assistente especializado em imóveis. Sua tarefa é extrair informações estruturadas de mensagens de usuários.
+
+REGRAS CRÍTICAS PARA EVITAR ALUCINAÇÕES:
+1. Se o usuário disse apenas "sim", "não", "ok", "oi" ou palavras muito simples (≤3 caracteres), retorne TODAS as entidades como null
+2. NUNCA invente informações que não estão EXPLICITAMENTE na mensagem do usuário
+3. Se não tem CERTEZA ABSOLUTA sobre uma informação, use null
+4. Não faça suposições ou inferências - seja literal
+5. Use null (não "null" como string) para valores ausentes
 
 Retorne APENAS um JSON válido no formato:
 {
@@ -218,17 +255,47 @@ Agora processe a mensagem do usuário e retorne APENAS o JSON."""
             {"role": "user", "content": user_input}
         ]
 
+        log.info("llm_sync_sending_request", messages=messages, user_input=user_input)
+
         response = self._chat_sync(messages)
+        
+        log.info("llm_sync_raw_response", response=response, user_input=user_input, response_length=len(response))
 
         try:
             response_clean = response.strip()
             if response_clean.startswith("```"):
                 lines = response_clean.split("\n")
                 response_clean = "\n".join(lines[1:-1]) if len(lines) > 2 else response_clean
+                log.debug("llm_sync_removed_markdown", original_length=len(response), cleaned_length=len(response_clean))
+            
+            log.info("llm_sync_parsing_json", response_clean=response_clean, user_input=user_input)
+            
             result = json.loads(response_clean)
-            return result
-        except json.JSONDecodeError:
-            return {
+            log.info("llm_sync_json_parse_success", result=result, user_input=user_input)
+            
+            # Sanitizar resultado para evitar alucinações
+            log.info("llm_sync_sanitizing_result", original_result=result, user_input=user_input)
+            sanitized_result = self._sanitize_result(result, user_input)
+            
+            if result != sanitized_result:
+                log.warning("llm_sync_result_sanitized", 
+                           original=result, 
+                           sanitized=sanitized_result,
+                           user_input=user_input)
+            else:
+                log.info("llm_sync_no_sanitization_needed", result=result, user_input=user_input)
+            
+            log.info("llm_sync_final_result", final_result=sanitized_result, user_input=user_input)
+            return sanitized_result
+            
+        except json.JSONDecodeError as e:
+            log.error("llm_sync_json_parse_failed", 
+                     error=str(e), 
+                     response=response, 
+                     response_clean=response_clean if 'response_clean' in locals() else None,
+                     user_input=user_input)
+            
+            fallback_result = {
                 "intent": "outro",
                 "entities": {
                     "finalidade": None,
@@ -241,6 +308,14 @@ Agora processe a mensagem do usuário e retorne APENAS o JSON."""
                     "nome_usuario": None
                 }
             }
+            log.info("llm_sync_using_fallback", fallback=fallback_result, user_input=user_input)
+            return fallback_result
+
+    def _sanitize_result(self, result: Dict[str, Any], user_input: str) -> Dict[str, Any]:
+        """Sanitiza resultado do LLM para evitar alucinações."""
+        # Importar aqui para evitar dependência circular
+        from app.domain.realestate.validation_utils import sanitize_llm_result
+        return sanitize_llm_result(result, user_input)
 
 
 # Singleton global
