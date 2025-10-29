@@ -108,23 +108,49 @@ def detect_restart_command(text: str) -> bool:
 
 
 def detect_decline_schedule(text: str) -> bool:
+    """Detecta recusa de agendamento (hardcode + LLM)."""
     text_lower = text.lower().strip()
-    keywords = [
-        "não quero agendar",
-        "nao quero agendar",
-        "depois eu vejo",
-        "sem agenda",
-        "mais tarde",
-        "não agora",
-        "nao agora",
-        "agora não",
-        "agora nao",
-        "não posso",
-        "nao posso",
-        "prefiro não",
-        "prefiro nao",
+    
+    # 1) Hardcode (rápido e confiável)
+    decline_keywords = [
+        "não quero agendar", "nao quero agendar",
+        "depois eu vejo", "sem agenda", "mais tarde",
+        "não agora", "nao agora", "agora não", "agora nao",
+        "não posso", "nao posso", "prefiro não", "prefiro nao",
+        "talvez depois", "vou pensar", "deixa pra depois",
+        "não é o momento", "nao e o momento", "não tenho tempo",
+        "nao tenho tempo", "sem pressa", "com calma",
+        "outro dia", "outra hora", "depois vejo", "vou ver depois",
+        "não precisa", "nao precisa", "dispenso", "passo",
+        "não quero visita", "nao quero visita"
     ]
-    return any(kw in text_lower for kw in keywords)
+    
+    if any(kw in text_lower for kw in decline_keywords):
+        return True
+    
+    # 2) LLM como fallback para capturar recusas educadas
+    llm = get_llm_service()
+    try:
+        result = llm.extract_intent_and_entities_sync(text)
+        intent = result.get("intent", "")
+        
+        # Considerar intenções que indicam recusa ou adiamento
+        if intent in ["recusar_agendamento", "adiar_visita", "nao_agendar"]:
+            log.info("llm_detected_decline_schedule", text=text, intent=intent)
+            return True
+            
+        # Verificar se há palavras de negação + contexto de agendamento
+        has_negation = any(neg in text_lower for neg in ["não", "nao", "sem", "dispenso", "passo"])
+        has_schedule_context = any(ctx in text_lower for ctx in ["agendar", "visita", "marcar", "agenda"])
+        
+        if has_negation and has_schedule_context:
+            log.info("llm_detected_decline_by_context", text=text, negation=True, schedule_context=True)
+            return True
+            
+    except Exception as e:
+        log.warning("llm_decline_detection_failed", error=str(e), text=text)
+    
+    return False
 
 
 def detect_help_command(text: str) -> bool:
@@ -325,9 +351,38 @@ def is_skip_neighborhood(text: str) -> bool:
 
 
 def detect_interest(text: str) -> bool:
-    """Detecta interesse no imóvel apresentado."""
+    """Detecta interesse no imóvel apresentado (hardcode + LLM)."""
     text_lower = text.lower().strip()
-    return any(kw in text_lower for kw in ["sim", "gostei", "quero", "interessado", "me interessa"])
+    
+    # 1) Hardcode (rápido e confiável)
+    interest_keywords = [
+        "sim", "gostei", "quero", "interessado", "me interessa",
+        "adorei", "amei", "é isso mesmo", "é isso", "perfeito pra mim", 
+        "perfeito para mim", "é perfeito", "ideal", "é ideal",
+        "exatamente isso", "é exatamente", "combina comigo", "combina", 
+        "é o que procuro", "é o que eu procuro", "é isso que procuro",
+        "legal", "bacana", "show", "top", "massa", "maneiro"
+    ]
+    
+    if any(kw in text_lower for kw in interest_keywords):
+        return True
+    
+    # 2) LLM como fallback para capturar expressões mais naturais
+    llm = get_llm_service()
+    try:
+        result = llm.extract_intent_and_entities_sync(text)
+        intent = result.get("intent", "")
+        
+        # Considerar intenções que indicam interesse
+        if intent in ["interesse_imovel", "agendar_visita", "buscar_imovel"]:
+            # Verificar se não é uma negação ou pedido de próximo
+            if not any(neg in text_lower for neg in ["não", "nao", "próximo", "proximo", "outro"]):
+                log.info("llm_detected_interest", text=text, intent=intent)
+                return True
+    except Exception as e:
+        log.warning("llm_interest_detection_failed", error=str(e), text=text)
+    
+    return False
 
 
 def detect_next_property(text: str) -> bool:
@@ -383,22 +438,56 @@ def detect_refine_search(text: str) -> bool:
 
 
 def detect_no_match(text: str) -> bool:
+    """Detecta insatisfação com resultados da busca (hardcode + LLM)."""
     text_lower = text.lower().strip()
-    keywords = [
-        "não encontrei imóvel",
-        "nao encontrei imovel",
-        "não encontrei",
-        "nao encontrei",
-        "não achei imóvel",
-        "nao achei imovel",
-        "não achei",
-        "nao achei",
-        "nenhuma opção",
-        "nenhuma opcao",
-        "nenhum imóvel",
-        "nenhum imovel",
+    
+    # 1) Hardcode (rápido e confiável)
+    no_match_keywords = [
+        "não encontrei imóvel", "nao encontrei imovel",
+        "não encontrei", "nao encontrei",
+        "não achei imóvel", "nao achei imovel", 
+        "não achei", "nao achei",
+        "nenhuma opção", "nenhuma opcao",
+        "nenhum imóvel", "nenhum imovel",
+        "não serviu", "nao serviu", "não serve", "nao serve",
+        "não é o que procuro", "nao e o que procuro",
+        "não é o que eu procuro", "nao e o que eu procuro",
+        "não gostei", "nao gostei", "não curti", "nao curti",
+        "não me agradou", "nao me agradou", "não agradou", "nao agradou",
+        "não combina", "nao combina", "não é pra mim", "nao e pra mim",
+        "não atende", "nao atende", "não satisfaz", "nao satisfaz",
+        "fora do perfil", "não bate", "nao bate", "longe do ideal",
+        "não é isso", "nao e isso", "não era isso", "nao era isso"
     ]
-    return any(kw in text_lower for kw in keywords)
+    
+    if any(kw in text_lower for kw in no_match_keywords):
+        return True
+    
+    # 2) LLM como fallback para capturar insatisfação mais sutil
+    llm = get_llm_service()
+    try:
+        result = llm.extract_intent_and_entities_sync(text)
+        intent = result.get("intent", "")
+        
+        # Considerar intenções que indicam insatisfação
+        if intent in ["insatisfacao_resultados", "nao_encontrou_imovel", "rejeitar_opcoes"]:
+            log.info("llm_detected_no_match", text=text, intent=intent)
+            return True
+            
+        # Verificar padrões de negação + contexto de busca/imóvel
+        has_negation = any(neg in text_lower for neg in ["não", "nao", "nenhum", "nenhuma"])
+        has_property_context = any(ctx in text_lower for ctx in ["imóvel", "imovel", "casa", "apartamento", "opção", "opcao", "resultado"])
+        
+        if has_negation and has_property_context:
+            # Verificar se não é apenas um "não" isolado (que seria detect_yes_no)
+            if len(text_lower.split()) > 1:
+                log.info("llm_detected_no_match_by_context", text=text, negation=True, property_context=True)
+                return True
+                
+    except Exception as e:
+        log.warning("llm_no_match_detection_failed", error=str(e), text=text)
+    
+    return False
 
 
 def extract_email(text: str) -> Optional[str]:

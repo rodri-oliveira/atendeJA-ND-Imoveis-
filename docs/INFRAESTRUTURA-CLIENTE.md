@@ -151,23 +151,21 @@ O cliente precisa fornecer:
 **Limites do Starter:**
 - 512MB RAM (suficiente para 50 req/s)
 - 100GB bandwidth/mês (suficiente para ~10k conversas)
-- Celery worker roda no mesmo processo (OK para MVP)
+- Se usar Celery, crie um serviço Background Worker no Render com o comando:
+  `celery -A app.workers.celery_app.celery worker --loglevel=INFO`. No MVP ele é opcional.
 
 #### 2.2 Configurar Variáveis de Ambiente
 
 ```bash
 # Ambiente
-APP_ENV=production
+APP_ENV=prod
 DEFAULT_TENANT_ID=default
 
 # Banco de Dados (Neon)
-DATABASE_URL_OVERRIDE=postgresql://user:pass@host/db
+DATABASE_URL_OVERRIDE=postgresql+psycopg2://user:pass@host/db?sslmode=require
 
-# Redis (Upstash)
-REDIS_HOST=host.upstash.io
-REDIS_PORT=6379
-REDIS_PASSWORD=sua-senha
-REDIS_DB=0
+# Redis (Upstash - usar URL com TLS)
+REDIS_URL=rediss://default:sua-senha@host.upstash.io:6379/0
 
 # Autenticação
 AUTH_JWT_SECRET=gerar-string-aleatoria-segura-aqui
@@ -246,7 +244,7 @@ app.add_middleware(
 3. Seção "Webhook"
 
 #### 4.2 Configurar Webhook
-- **URL de callback**: `https://atendeja-api.onrender.com/webhook/whatsapp`
+- **URL de callback**: `https://atendeja-api.onrender.com/webhook`
 - **Token de verificação**: `meutoken123seguro` (mesmo do `WA_VERIFY_TOKEN`)
 - **Eventos para assinar**:
   - ✅ `messages`

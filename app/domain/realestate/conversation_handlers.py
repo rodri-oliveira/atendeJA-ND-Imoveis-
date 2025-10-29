@@ -248,6 +248,45 @@ class ConversationHandler:
     
     def handle_property_questions(self, text: str, state: Dict[str, Any]) -> Tuple[str, Dict[str, Any], bool]:
         """Responde dúvidas sobre o imóvel."""
+        import structlog
+        log = structlog.get_logger()
+        
+        # Detectar se quer ver outras opções (HARDCODE + LLM para robustez)
+        text_lower = text.lower().strip()
+        
+        # 1) HARDCODE: Detecção rápida e determinística
+        wants_other_options = any(kw in text_lower for kw in [
+            "outro", "outra", "outras", "mais opções", "mais opcoes", 
+            "ver outros", "ver outras", "outras opções", "outras opcoes",
+            "outro imóvel", "outro imovel", "outros imóveis", "outros imoveis",
+            "mais imóveis", "mais imoveis", "próximo", "proximo", "próxima",
+            "ver mais", "mostrar mais", "outras sugestões", "outras sugestoes"
+        ])
+        
+        # 2) LLM FALLBACK: Se não detectou por hardcode, consulta LLM
+        if not wants_other_options:
+            try:
+                # Usar a função existente que já tem hardcode + LLM
+                wants_other_options = detect.detect_next_property(text)
+                if wants_other_options:
+                    log.info("llm_detected_other_properties_intent", text=text)
+            except Exception as e:
+                log.warning("llm_detection_failed", error=str(e), text=text)
+                # Mantém o valor do hardcode se LLM falhar
+        
+        if wants_other_options:
+            log.info("user_wants_other_properties", text=text)
+            # Perguntar se quer buscar com critérios ou ver outro código
+            msg = (
+                "Entendi que você quer ver outras opções! 🏠\n\n"
+                "Você prefere:\n"
+                "1️⃣ Informar outro código de imóvel específico\n"
+                "2️⃣ Fazer uma busca personalizada (por tipo, cidade, preço)\n\n"
+                "Digite *1* para código ou *2* para busca personalizada."
+            )
+            state["stage"] = "awaiting_search_choice"
+            return (msg, state, False)
+        
         if detect.detect_yes_no(text) == "no":
             # Sem dúvidas, perguntar sobre agendamento
             state["stage"] = "awaiting_schedule_visit_question"
@@ -260,6 +299,43 @@ class ConversationHandler:
                 + fmt.format_ask_schedule_visit()
             )
             state["stage"] = "awaiting_schedule_visit_question"
+            return (msg, state, False)
+    
+    def handle_search_choice(self, text: str, state: Dict[str, Any]) -> Tuple[str, Dict[str, Any], bool]:
+        """Processa escolha entre informar código ou fazer busca personalizada."""
+        import structlog
+        log = structlog.get_logger()
+        
+        text_clean = text.strip()
+        
+        # Opção 1: Informar outro código
+        if text_clean in ["1", "código", "codigo"]:
+            log.info("user_chose_code_search")
+            state["stage"] = "awaiting_property_code"
+            msg = "Por favor, informe o código do imóvel que deseja ver (ex: A1234, ND12345)."
+            return (msg, state, False)
+        
+        # Opção 2: Busca personalizada
+        elif text_clean in ["2", "busca", "personalizada", "buscar"]:
+            log.info("user_chose_custom_search")
+            # Limpar dados do imóvel anterior mas manter nome e LGPD
+            user_name = state.get("user_name")
+            lgpd_consent = state.get("lgpd_consent")
+            sender_id = state.get("sender_id")
+            
+            # Resetar estado para busca
+            state = {
+                "sender_id": sender_id,
+                "user_name": user_name,
+                "lgpd_consent": lgpd_consent,
+                "stage": "awaiting_purpose"
+            }
+            msg = "Perfeito! Vamos fazer uma busca personalizada.\n\nVocê procura imóvel para *comprar* ou *alugar*?"
+            return (msg, state, False)
+        
+        # Entrada inválida
+        else:
+            msg = "Por favor, digite:\n*1* para informar um código de imóvel\n*2* para fazer uma busca personalizada"
             return (msg, state, False)
     
     def handle_schedule_visit_question(self, text: str, state: Dict[str, Any]) -> Tuple[str, Dict[str, Any], bool]:

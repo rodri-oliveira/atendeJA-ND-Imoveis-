@@ -341,6 +341,9 @@ async def execute_mcp(
         elif stage == "awaiting_property_questions":
             log.info("mcp_calling_handler", handler="handle_property_questions")
             msg, state, continue_loop = handler.handle_property_questions(text, state)
+        elif stage == "awaiting_search_choice":
+            log.info("mcp_calling_handler", handler="handle_search_choice")
+            msg, state, continue_loop = handler.handle_search_choice(text, state)
         elif stage == "awaiting_schedule_visit_question":
             log.info("mcp_calling_handler", handler="handle_schedule_visit_question")
             msg, state, continue_loop = handler.handle_schedule_visit_question(text, state)
