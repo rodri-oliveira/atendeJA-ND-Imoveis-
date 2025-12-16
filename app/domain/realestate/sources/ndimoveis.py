@@ -78,7 +78,7 @@ def _normalize_money_text(raw: str | None) -> float | None:
 def list_url_candidates(finalidade: str, page: int) -> list[str]:
     # Padrões observados no site (pager usa 'pag' e mantém 'pagina=1')
     if finalidade == "venda":
-        return [
+        candidates = [
             f"{ND_BASE}/imovel/venda/?pagina=1&pag={page}",
             f"{ND_BASE}/imovel/venda/?pag={page}",
             # Fallbacks
@@ -86,11 +86,17 @@ def list_url_candidates(finalidade: str, page: int) -> list[str]:
             f"{ND_BASE}/imovel/?finalidade=venda&pag={page}",
             f"{ND_BASE}/imovel/?finalidade=venda&pagina={page}",
             f"{ND_BASE}/imovel/?finalidade=venda&page={page}",
-            f"{ND_BASE}/imovel/venda",
-            f"{ND_BASE}/imovel/?finalidade=venda",
         ]
+        if page == 1:
+            candidates.extend(
+                [
+                    f"{ND_BASE}/imovel/venda",
+                    f"{ND_BASE}/imovel/?finalidade=venda",
+                ]
+            )
+        return candidates
     if finalidade == "locacao":
-        return [
+        candidates = [
             f"{ND_BASE}/imovel/locacao/?pagina=1&pag={page}",
             f"{ND_BASE}/imovel/locacao/?pag={page}",
             # Fallbacks
@@ -98,15 +104,24 @@ def list_url_candidates(finalidade: str, page: int) -> list[str]:
             f"{ND_BASE}/imovel/?finalidade=locacao&pag={page}",
             f"{ND_BASE}/imovel/?finalidade=locacao&pagina={page}",
             f"{ND_BASE}/imovel/?finalidade=locacao&page={page}",
-            f"{ND_BASE}/imovel/locacao",
-            f"{ND_BASE}/imovel/?finalidade=locacao",
         ]
-    return [
+        if page == 1:
+            candidates.extend(
+                [
+                    f"{ND_BASE}/imovel/locacao",
+                    f"{ND_BASE}/imovel/?finalidade=locacao",
+                ]
+            )
+        return candidates
+
+    candidates = [
         f"{ND_BASE}/imovel/?pagina={page}",
         f"{ND_BASE}/imovel/?page={page}",
         f"{ND_BASE}/imovel/?pag={page}",
-        f"{ND_BASE}/imovel/",
     ]
+    if page == 1:
+        candidates.append(f"{ND_BASE}/imovel/")
+    return candidates
 
 
 def discover_list_links(html: str) -> list[str]:

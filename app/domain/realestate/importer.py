@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Tuple
 from sqlalchemy import select, delete
 from sqlalchemy.orm import Session
@@ -11,8 +12,28 @@ def upsert_property(db: Session, tenant_id: int, dto) -> Tuple[str, int]:
     Faz UPSERT de um imóvel e substitui as imagens.
     Retorna (status, images_created) onde status in {"created", "updated"}.
     """
+
+    def _truncate(value: str | None, max_len: int) -> str | None:
+        if value is None:
+            return None
+        s = str(value)
+        return s[:max_len]
+
+    def _normalize_state(value: str | None) -> str:
+        raw = (value or "").strip().upper()
+        if len(raw) == 2:
+            return raw
+        m = re.search(r"\b([A-Z]{2})\b", raw)
+        if m:
+            return m.group(1)
+        return raw[:2]
+
     # Garantir external_id para chave única com tenant
-    external_id = dto.external_id or dto.url
+    external_id = _truncate((dto.external_id or dto.url), 120)
+    title = _truncate((dto.title or "Sem título"), 180) or "Sem título"
+    city = _truncate((dto.city or ""), 120) or ""
+    state = _normalize_state(dto.state)
+    neighborhood = _truncate((dto.neighborhood or None), 120)
 
     # Buscar existente
     stmt = select(re_models.Property).where(
@@ -41,7 +62,7 @@ def upsert_property(db: Session, tenant_id: int, dto) -> Tuple[str, int]:
     if prop is None:
         prop = re_models.Property(
             tenant_id=tenant_id,
-            title=(dto.title or "Sem título"),
+            title=title,
             description=(getattr(dto, 'description', None) or None),
             type=tipo_enum,
             purpose=purpose_enum,
@@ -51,9 +72,9 @@ def upsert_property(db: Session, tenant_id: int, dto) -> Tuple[str, int]:
             external_id=external_id,
             source="ndimoveis",
             updated_at_source=None,
-            address_city=(dto.city or ""),
-            address_state=(dto.state or ""),
-            address_neighborhood=(dto.neighborhood or None),
+            address_city=city,
+            address_state=state,
+            address_neighborhood=neighborhood,
             bedrooms=dto.bedrooms,
             bathrooms=dto.bathrooms,
             suites=dto.suites,
@@ -66,15 +87,16 @@ def upsert_property(db: Session, tenant_id: int, dto) -> Tuple[str, int]:
         db.flush()
         status = "created"
     else:
-        prop.title = dto.title or prop.title
+        if title:
+            prop.title = title
         prop.type = tipo_enum
         prop.purpose = purpose_enum
         prop.price = float(dto.price or prop.price)
         prop.condo_fee = dto.condo_fee
         prop.iptu = dto.iptu
-        prop.address_city = (dto.city or prop.address_city)
-        prop.address_state = (dto.state or prop.address_state)
-        prop.address_neighborhood = (dto.neighborhood or prop.address_neighborhood)
+        prop.address_city = (city or prop.address_city)
+        prop.address_state = (state or prop.address_state)
+        prop.address_neighborhood = (neighborhood or prop.address_neighborhood)
         prop.bedrooms = dto.bedrooms
         prop.bathrooms = dto.bathrooms
         prop.suites = dto.suites
@@ -93,6 +115,10 @@ def upsert_property(db: Session, tenant_id: int, dto) -> Tuple[str, int]:
         db.execute(delete(re_models.PropertyImage).where(re_models.PropertyImage.property_id == prop.id))
         order = 0
         for idx, url in enumerate(imgs):
+            if not url:
+                continue
+            if len(url) > 500:
+                continue
             db.add(
                 re_models.PropertyImage(
                     property_id=prop.id,

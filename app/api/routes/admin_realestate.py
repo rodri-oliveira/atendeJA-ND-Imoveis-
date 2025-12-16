@@ -281,10 +281,16 @@ def re_nd_check(payload: NDCheckIn, db: Session = Depends(get_db)):
     try:
         fins = ["venda", "locacao"] if payload.finalidade == "both" else [payload.finalidade]
         discovered_urls: list[str] = []
+
         # Nota: em alguns ambientes Windows, a cadeia de certificados pode não estar instalada
         # corretamente, causando CERTIFICATE_VERIFY_FAILED. Para fins de desenvolvimento,
         # desativamos a verificação SSL aqui. Em produção, habilite verify=True.
-        with httpx.Client(timeout=20.0, headers={"User-Agent": "AtendeJA-Bot/1.0"}, verify=False) as client:
+        with httpx.Client(
+            timeout=20.0,
+            headers={"User-Agent": "AtendeJA-Bot/1.0"},
+            verify=False,
+            follow_redirects=True,
+        ) as client:
             for fin in fins:
                 for page in range(payload.page_start, payload.page_start + payload.max_pages):
                     candidates = _nd_list_url_candidates(fin, page)
@@ -303,7 +309,7 @@ def re_nd_check(payload: NDCheckIn, db: Session = Depends(get_db)):
                             continue
                         finally:
                             time.sleep(payload.throttle_ms / 1000.0)
-                    if not page_links and page == payload.page_start:
+                    if not page_links and page == payload.page_start and payload.page_start == 1:
                         # Fallback: tentar homepage capturar destaques
                         try:
                             hr = client.get(f"{ND_BASE}/")
@@ -371,6 +377,7 @@ class NDRunIn(BaseModel):
 
 class NDRunOut(BaseModel):
     created: int
+    updated: int
     images_created: int
     processed: int
     sampled_external_ids: list[str]
@@ -381,7 +388,12 @@ def re_nd_run(payload: NDRunIn, db: Session = Depends(get_db)):
     try:
         fins = ["venda", "locacao"] if payload.finalidade == "both" else [payload.finalidade]
         discovered_urls: list[str] = []
-        with httpx.Client(timeout=25.0, headers={"User-Agent": "AtendeJA-Bot/1.0"}, verify=False) as client:
+        with httpx.Client(
+            timeout=25.0,
+            headers={"User-Agent": "AtendeJA-Bot/1.0"},
+            verify=False,
+            follow_redirects=True,
+        ) as client:
             for fin in fins:
                 for page in range(payload.page_start, payload.page_start + payload.max_pages):
                     candidates = _nd_list_url_candidates(fin, page)
@@ -399,7 +411,8 @@ def re_nd_run(payload: NDRunIn, db: Session = Depends(get_db)):
                             continue
                         finally:
                             time.sleep(payload.throttle_ms / 1000.0)
-                    if not page_links and page == payload.page_start:
+
+                    if not page_links and page == payload.page_start and payload.page_start == 1:
                         try:
                             hr = client.get(f"{ND_BASE}/")
                             if hr.status_code == 200:

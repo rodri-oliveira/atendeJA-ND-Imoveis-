@@ -28,6 +28,16 @@ class PropertyPurpose(str, Enum):
     rent = "rent"
 
 
+class LeadStatus(str, Enum):
+    iniciado = "iniciado"
+    novo = "novo"
+    qualificado = "qualificado"
+    sem_imovel_disponivel = "sem_imovel_disponivel"
+    agendamento_pendente = "agendamento_pendente"
+    agendado = "agendado"
+    sem_resposta_24h = "sem_resposta_24h"
+
+
 class Property(Base):
     __tablename__ = "re_properties"
 
