@@ -106,6 +106,12 @@ class VisitService:
         
         visit.status = "confirmed"
         visit.updated_at = datetime.utcnow()
+
+        # Ao confirmar a visita, marcar lead como agendado (confirmado pela equipe)
+        lead = db.query(Lead).filter(Lead.id == visit.lead_id).first()
+        if lead:
+            lead.status = "agendado"
+            lead.status_updated_at = datetime.utcnow()
         db.commit()
         db.refresh(visit)
         
@@ -119,7 +125,7 @@ class VisitService:
         if not visit:
             raise ValueError(f"Visit {visit_id} not found")
         
-        visit.status = "cancelled"
+        visit.status = "canceled"
         if reason:
             visit.notes = f"{visit.notes or ''}\nMotivo cancelamento: {reason}".strip()
         visit.updated_at = datetime.utcnow()
@@ -273,7 +279,7 @@ class VisitService:
         
         # Atualizar status do lead
         if lead:
-            lead.status = "agendado"
+            lead.status = "agendamento_pendente"
             db.commit()
         
         log.info(

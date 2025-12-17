@@ -320,6 +320,26 @@ def _is_lead_fully_qualified(lead: re_models.Lead) -> bool:
 def _update_lead_on_inbound(db: Session, tenant_id: int, contact_id: int, conversation_id: int) -> None:
     lead = _get_latest_lead_for_contact(db, tenant_id, contact_id)
     if not lead:
+        # Primeiro contato: criar lead iniciado para permitir triagem no painel
+        contact = db.query(core_models.Contact).filter(core_models.Contact.id == contact_id).first()
+        if not contact:
+            return
+        lead = re_models.Lead(
+            tenant_id=tenant_id,
+            name=None,
+            phone=str(contact.wa_id),
+            email=None,
+            source="whatsapp",
+            preferences={},
+            consent_lgpd=False,
+            contact_id=contact_id,
+            status="iniciado",
+            last_inbound_at=datetime.utcnow(),
+        )
+        db.add(lead)
+        db.commit()
+        db.refresh(lead)
+        _record_event(db, conversation_id, "lead.created", {"status": lead.status})
         return
     lead.last_inbound_at = datetime.utcnow()
     if lead.status == "sem_resposta_24h":
@@ -554,33 +574,42 @@ def _process_realestate_funnel(db: Session, tenant_name: str, wa_id: str, user_t
         if max_p is not None:
             criteria["max_price"] = max_p
 
-        # Criar lead e inquiry
-        lead = re_models.Lead(
-            tenant_id=tenant.id,
-            name=None,
-            phone=None,
-            email=None,
-            source="whatsapp",
-            preferences=criteria,
-            consent_lgpd=False,
-            contact_id=contact.id,
-            # denormalizados para filtros/campanhas
-            finalidade=criteria.get("purpose"),
-            tipo=criteria.get("type"),
-            cidade=criteria.get("city"),
-            estado=criteria.get("state"),
-            dormitorios=int(criteria.get("bedrooms")) if criteria.get("bedrooms") is not None else None,
-            preco_min=float(criteria.get("min_price")) if criteria.get("min_price") is not None else None,
-            preco_max=float(criteria.get("max_price")) if criteria.get("max_price") is not None else None,
-            # campanha e direcionamento (se detectados)
-            campaign_source=campaign_data.get("campaign_source"),
-            campaign_medium=campaign_data.get("campaign_medium"),
-            campaign_name=campaign_data.get("campaign_name"),
-            campaign_content=campaign_data.get("campaign_content"),
-            landing_url=campaign_data.get("landing_url"),
-            external_property_id=campaign_data.get("external_property_id"),
-            property_interest_id=campaign_data.get("property_id"),
-        )
+        # Atualizar ou criar lead do contato (evita lead com phone=None)
+        lead = _get_latest_lead_for_contact(db, tenant.id, contact.id)
+        if not lead:
+            lead = re_models.Lead(
+                tenant_id=tenant.id,
+                name=None,
+                phone=wa_id,
+                email=None,
+                source="whatsapp",
+                preferences={},
+                consent_lgpd=False,
+                contact_id=contact.id,
+                status="novo",
+                last_inbound_at=datetime.utcnow(),
+            )
+            db.add(lead)
+            db.commit()
+            db.refresh(lead)
+
+        lead.status = "novo"
+        lead.status_updated_at = datetime.utcnow()
+        lead.preferences = criteria
+        lead.finalidade = criteria.get("purpose")
+        lead.tipo = criteria.get("type")
+        lead.cidade = criteria.get("city")
+        lead.estado = criteria.get("state")
+        lead.dormitorios = int(criteria.get("bedrooms")) if criteria.get("bedrooms") is not None else None
+        lead.preco_min = float(criteria.get("min_price")) if criteria.get("min_price") is not None else None
+        lead.preco_max = float(criteria.get("max_price")) if criteria.get("max_price") is not None else None
+        lead.campaign_source = campaign_data.get("campaign_source")
+        lead.campaign_medium = campaign_data.get("campaign_medium")
+        lead.campaign_name = campaign_data.get("campaign_name")
+        lead.campaign_content = campaign_data.get("campaign_content")
+        lead.landing_url = campaign_data.get("landing_url")
+        lead.external_property_id = campaign_data.get("external_property_id")
+        lead.property_interest_id = campaign_data.get("property_id")
         db.add(lead)
         db.commit()
         db.refresh(lead)

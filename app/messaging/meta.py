@@ -110,23 +110,39 @@ class MetaCloudProvider:
             except Exception:
                 provider_id = None
             with SessionLocal() as db:
-                db.query(MessageLog).filter(
-                    MessageLog.tenant_id == int(tenant), MessageLog.to == to, MessageLog.kind == "text"
-                ).order_by(MessageLog.id.desc()).limit(1).update({
-                    MessageLog.status: "sent",
-                    MessageLog.provider_message_id: provider_id,
-                })
-                db.commit()
+                last = (
+                    db.query(MessageLog)
+                    .filter(
+                        MessageLog.tenant_id == int(tenant),
+                        MessageLog.to == to,
+                        MessageLog.kind == "text",
+                    )
+                    .order_by(MessageLog.id.desc())
+                    .first()
+                )
+                if last:
+                    last.status = "sent"
+                    last.provider_message_id = provider_id
+                    db.add(last)
+                    db.commit()
             return data
         except Exception as exc:
             with SessionLocal() as db:
-                db.query(MessageLog).filter(
-                    MessageLog.tenant_id == int(tenant), MessageLog.to == to, MessageLog.kind == "text"
-                ).order_by(MessageLog.id.desc()).limit(1).update({
-                    MessageLog.status: "error",
-                    MessageLog.error_code: str(exc),
-                })
-                db.commit()
+                last = (
+                    db.query(MessageLog)
+                    .filter(
+                        MessageLog.tenant_id == int(tenant),
+                        MessageLog.to == to,
+                        MessageLog.kind == "text",
+                    )
+                    .order_by(MessageLog.id.desc())
+                    .first()
+                )
+                if last:
+                    last.status = "error"
+                    last.error_code = str(exc)
+                    db.add(last)
+                    db.commit()
             raise
 
     def send_template(
@@ -183,23 +199,39 @@ class MetaCloudProvider:
             except Exception:
                 provider_id = None
             with SessionLocal() as db:
-                db.query(MessageLog).filter(
-                    MessageLog.tenant_id == int(tenant), MessageLog.to == to, MessageLog.kind == "template"
-                ).order_by(MessageLog.id.desc()).limit(1).update({
-                    MessageLog.status: "sent",
-                    MessageLog.provider_message_id: provider_id,
-                })
-                db.commit()
+                last = (
+                    db.query(MessageLog)
+                    .filter(
+                        MessageLog.tenant_id == int(tenant),
+                        MessageLog.to == to,
+                        MessageLog.kind == "template",
+                    )
+                    .order_by(MessageLog.id.desc())
+                    .first()
+                )
+                if last:
+                    last.status = "sent"
+                    last.provider_message_id = provider_id
+                    db.add(last)
+                    db.commit()
             return data
         except Exception as exc:
             with SessionLocal() as db:
-                db.query(MessageLog).filter(
-                    MessageLog.tenant_id == int(tenant), MessageLog.to == to, MessageLog.kind == "template"
-                ).order_by(MessageLog.id.desc()).limit(1).update({
-                    MessageLog.status: "error",
-                    MessageLog.error_code: str(exc),
-                })
-                db.commit()
+                last = (
+                    db.query(MessageLog)
+                    .filter(
+                        MessageLog.tenant_id == int(tenant),
+                        MessageLog.to == to,
+                        MessageLog.kind == "template",
+                    )
+                    .order_by(MessageLog.id.desc())
+                    .first()
+                )
+                if last:
+                    last.status = "error"
+                    last.error_code = str(exc)
+                    db.add(last)
+                    db.commit()
             raise
 
     def mark_read(self, message_id: str) -> Dict[str, Any]:

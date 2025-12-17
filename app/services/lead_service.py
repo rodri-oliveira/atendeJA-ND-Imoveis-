@@ -48,7 +48,7 @@ class LeadService:
             campaign_name=lead_data.get("campaign_name"),
             campaign_content=lead_data.get("campaign_content"),
             landing_url=lead_data.get("landing_url"),
-            status=lead_data.get("status", "qualificado"),
+            status=lead_data.get("status", "iniciado"),
             last_inbound_at=now,
         )
         db.add(lead)

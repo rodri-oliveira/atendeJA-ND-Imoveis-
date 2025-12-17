@@ -437,8 +437,8 @@ class ConversationHandler:
     def handle_visit_time(self, text: str, sender_id: str, state: Dict[str, Any]) -> Tuple[str, Dict[str, Any], bool]:
         """Captura horário e cria agendamento."""
         from app.services.visit_service import VisitService
-        from app.services.notification_service import NotificationService
         from app.services.lead_service import LeadService
+        from app.services.notification_service import NotificationService
         from datetime import datetime
         
         # Parse da data base
@@ -463,6 +463,11 @@ class ConversationHandler:
         # Buscar property_id de ambos os fluxos (direcionado ou busca assistida)
         property_id = state.get("directed_property_id") or state.get("interested_property_id")
         property_code = state.get("directed_property_code", "")
+
+        if not property_id:
+            msg = "Erro: não consegui identificar o imóvel. Vamos recomeçar o agendamento."
+            state["stage"] = "awaiting_visit_date"
+            return (msg, state, False)
         
         # Buscar ou criar lead por telefone (buscar com e sem @c.us para compatibilidade)
         lead = self.db.query(Lead).filter(
@@ -505,7 +510,7 @@ class ConversationHandler:
 
         lead_updates = {
             "name": user_name,
-            "status": "agendado",
+            "status": "agendamento_pendente",
             "property_interest_id": property_id,
             "external_property_id": property_data.get("ref_code"),  # Código ND Imóveis (A738)
             # Priorizar dados do state (busca), fallback para dados do imóvel (código direto)
@@ -525,7 +530,7 @@ class ConversationHandler:
                 "nome": user_name,
                 "telefone": phone_full,  # Salvar com @c.us
                 "origem": "whatsapp",
-                "status": "agendado",
+                "status": "agendamento_pendente",
                 "property_interest_id": property_id,
             }
             lead = LeadService.create_lead(self.db, lead_data)
@@ -546,23 +551,18 @@ class ConversationHandler:
             visit_datetime=parsed_time,
             notes=f"Agendamento via WhatsApp - Imóvel #{property_code}"
         )
+
+        # Notificar gestor/equipe imediatamente (status agendamento_pendente)
+        try:
+            NotificationService.notify_visit_requested(self.db, int(visit_id))
+        except Exception:
+            pass
         
-        # Notificar equipe via WhatsApp (log por enquanto)
-        NotificationService.notify_visit_scheduled(
-            visit_id=visit_id,
-            property_id=property_id,
-            lead_name=user_name,
-            phone=phone_display,  # Mostrar sem @c.us na notificação
-            visit_datetime=parsed_time.isoformat()
-        )
-        
-        # Mensagem de confirmação
-        date_display = state.get("visit_date_display", parsed_time.strftime("%d/%m/%Y"))
-        time_display = parsed_time.strftime("%H:%M")
-        
-        msg = fmt.format_visit_scheduled(user_name, date_display, time_display, property_code)
-        
-        return (msg, {}, False)  # Limpar estado
+        # Mensagem final (reset)
+        date_str = state.get("visit_date_display") or parsed_time.strftime("%d/%m/%Y")
+        time_str = parsed_time.strftime("%H:%M")
+        msg = fmt.format_visit_scheduled(user_name, date_str, time_str, str(property_code or ""))
+        return (msg, {}, False)
     
     # ===== FLUXO QUALIFICAÇÃO =====
     

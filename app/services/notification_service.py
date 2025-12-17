@@ -4,11 +4,113 @@ Serviço para envio de notificações (email, WhatsApp, etc).
 from typing import Optional
 import structlog
 
+from sqlalchemy.orm import Session
+
+from app.core.config import settings
+from app.domain.realestate import models as re_models
+from app.messaging.provider import get_provider
+from app.repositories.models import Tenant
+
 log = structlog.get_logger()
 
 
 class NotificationService:
     """Serviço para enviar notificações sobre agendamentos."""
+
+    @staticmethod
+    def _get_or_create_default_tenant(db: Session) -> Tenant:
+        tenant_name = settings.DEFAULT_TENANT_ID
+        tenant = db.query(Tenant).filter(Tenant.name == tenant_name).first()
+        if not tenant:
+            tenant = Tenant(name=tenant_name)
+            db.add(tenant)
+            db.commit()
+            db.refresh(tenant)
+        return tenant
+
+    @staticmethod
+    def _normalize_wa_id(raw: str) -> str:
+        s = (raw or "").strip()
+        if not s:
+            return s
+        if "@" in s:
+            s = s.split("@", 1)[0]
+        if s.startswith("+"):
+            s = s[1:]
+        s = "".join(ch for ch in s if ch.isdigit())
+        return s
+
+    @staticmethod
+    def _get_recipients(settings_json: dict) -> list[str]:
+        raw = settings_json.get("booking_notification_recipients")
+        if not raw:
+            return []
+        if isinstance(raw, list):
+            return [str(x) for x in raw if str(x).strip()]
+        return []
+
+    @staticmethod
+    def _get_template_name(settings_json: dict) -> str | None:
+        name = (settings_json.get("booking_notification_template") or "").strip()
+        return name or None
+
+    @staticmethod
+    def _format_visit_requested_message(visit: re_models.VisitSchedule, lead: re_models.Lead | None, prop: re_models.Property | None) -> str:
+        lead_name = (getattr(lead, "name", None) or "-")
+        lead_phone = (getattr(lead, "phone", None) or getattr(visit, "contact_phone", None) or "-")
+        ref = ""
+        if prop is not None:
+            ref = getattr(prop, "ref_code", None) or getattr(prop, "external_id", None) or str(getattr(prop, "id", ""))
+        dt = getattr(visit, "scheduled_datetime", None)
+        dt_txt = dt.strftime("%d/%m/%Y %H:%M") if dt else "-"
+        return (
+            "📅 *Solicitação de visita (pendente de confirmação)*\n"
+            f"• Lead: {lead_name}\n"
+            f"• Contato: {lead_phone}\n"
+            f"• Imóvel: #{ref}\n"
+            f"• Sugestão: {dt_txt}"
+        )
+
+    @staticmethod
+    def notify_visit_requested(db: Session, visit_id: int) -> dict:
+        tenant = NotificationService._get_or_create_default_tenant(db)
+        settings_json = dict(getattr(tenant, "settings_json", {}) or {})
+        recipients = NotificationService._get_recipients(settings_json)
+        template_name = NotificationService._get_template_name(settings_json)
+
+        visit = db.get(re_models.VisitSchedule, int(visit_id))
+        if not visit:
+            return {"notified": 0, "errors": [{"error": "visit_not_found"}]}
+
+        lead = db.get(re_models.Lead, int(getattr(visit, "lead_id"))) if getattr(visit, "lead_id", None) else None
+        prop = db.get(re_models.Property, int(getattr(visit, "property_id"))) if getattr(visit, "property_id", None) else None
+        text = NotificationService._format_visit_requested_message(visit, lead, prop)
+
+        provider = get_provider()
+        notified = 0
+        errors: list[dict] = []
+
+        for raw in recipients:
+            to = NotificationService._normalize_wa_id(raw)
+            if not to:
+                continue
+            try:
+                if template_name:
+                    provider.send_template(to, template_name, tenant_id=str(tenant.id))
+                else:
+                    provider.send_text(to, text, tenant_id=str(tenant.id))
+                notified += 1
+            except Exception as e:
+                errors.append({"to": raw, "error": str(e)})
+
+        log.info(
+            "visit_requested_notification",
+            visit_id=int(getattr(visit, "id", 0) or 0),
+            recipients=len(recipients),
+            notified=notified,
+            errors=errors[:3],
+        )
+        return {"notified": notified, "errors": errors}
     
     @staticmethod
     def notify_visit_scheduled(

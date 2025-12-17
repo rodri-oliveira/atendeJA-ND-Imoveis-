@@ -14,6 +14,14 @@ interface Lead {
   created_at?: string | null
 }
 
+interface Visit {
+  id: number
+  lead_id: number
+  property_id: number
+  status: string
+  scheduled_datetime?: string | null
+}
+
 interface Filters {
   search: string
   status: string
@@ -47,13 +55,23 @@ export default function LeadsList() {
 
   const [stats, setStats] = useState({
     total: 0,
+    iniciados: 0,
     novos: 0,
     qualificados: 0,
-    hoje: 0
+    pendentes: 0,
+    agendados: 0,
+    sem_imovel: 0
   })
+
+  const [visits, setVisits] = useState<Visit[]>([])
+  const [showConfigModal, setShowConfigModal] = useState(false)
+  const [recipients, setRecipients] = useState<string[]>([])
+  const [template, setTemplate] = useState<string>('')
+  const [confirmingVisitId, setConfirmingVisitId] = useState<number | null>(null)
 
   useEffect(() => {
     loadLeads()
+    loadConfig()
   }, [])
 
   async function loadLeads() {
@@ -69,14 +87,49 @@ export default function LeadsList() {
       const hoje = new Date().toISOString().split('T')[0] || ''
       setStats({
         total: leads.length,
+        iniciados: leads.filter((l: Lead) => l.status === 'iniciado').length,
         novos: leads.filter((l: Lead) => l.status === 'novo').length,
         qualificados: leads.filter((l: Lead) => l.status === 'qualificado').length,
-        hoje: leads.filter((l: Lead) => l.last_inbound_at?.startsWith(hoje) ?? false).length
+        pendentes: leads.filter((l: Lead) => l.status === 'agendamento_pendente').length,
+        agendados: leads.filter((l: Lead) => l.status === 'agendado').length,
+        sem_imovel: leads.filter((l: Lead) => l.status === 'sem_imovel_disponivel').length
       })
+
+      // Carregar visitas pendentes
+      try {
+        const visRes = await fetch('/api/admin/re/visits?status=requested&limit=50', { cache: 'no-store' })
+        if (visRes.ok) {
+          const visData = await visRes.json()
+          setVisits(visData)
+        }
+      } catch (e) {
+        // Silenciar erro de visitas
+      }
     } catch (e: any) {
       setError(e?.message || 'erro')
     } finally {
       setLoading(false)
+    }
+  }
+
+  async function loadConfig() {
+    try {
+      const token = localStorage.getItem('auth_token')
+      const headers: Record<string, string> = {}
+      if (token) headers['Authorization'] = `Bearer ${token}`
+
+      const recRes = await fetch('/api/admin/re/booking/recipients', { headers, cache: 'no-store' })
+      if (recRes.ok) {
+        const rec = await recRes.json()
+        if (rec?.recipients) setRecipients(rec.recipients)
+      }
+      const tplRes = await fetch('/api/admin/re/booking/template', { headers, cache: 'no-store' })
+      if (tplRes.ok) {
+        const tpl = await tplRes.json()
+        if (typeof tpl?.template_name === 'string') setTemplate(tpl.template_name)
+      }
+    } catch (e) {
+      // silencioso
     }
   }
 
@@ -136,11 +189,13 @@ export default function LeadsList() {
 
   // Ordenação client-side (não quebra API): status prioritário > última atividade > id desc
   const statusOrder: Record<string, number> = {
-    agendado: 1,
-    qualificado: 2,
-    novo: 3,
-    sem_imovel_disponivel: 4,
-    direcionado: 5,
+    agendamento_pendente: 1,
+    agendado: 2,
+    qualificado: 3,
+    novo: 4,
+    iniciado: 5,
+    sem_imovel_disponivel: 6,
+    direcionado: 7,
   }
   const sortedData = [...(filteredData || [])].sort((a, b) => {
     const ra = statusOrder[(a.status || '').toLowerCase()] ?? 99
@@ -174,8 +229,10 @@ export default function LeadsList() {
       novo: { label: 'Novo', color: 'bg-blue-100 text-blue-800' },
       qualificado: { label: 'Qualificado', color: 'bg-green-100 text-green-800' },
       agendado: { label: 'Agendado', color: 'bg-purple-100 text-purple-800' },
+      agendamento_pendente: { label: 'Pendente', color: 'bg-red-100 text-red-800' },
       sem_imovel_disponivel: { label: 'Sem Imóvel', color: 'bg-orange-100 text-orange-800' },
-      direcionado: { label: 'Direcionado', color: 'bg-yellow-100 text-yellow-800' }
+      direcionado: { label: 'Direcionado', color: 'bg-yellow-100 text-yellow-800' },
+      iniciado: { label: 'Iniciado', color: 'bg-slate-100 text-slate-800' }
     }
     const s = statusMap[status || 'novo'] || { label: status || 'Novo', color: 'bg-slate-100 text-slate-800' }
     return <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${s.color}`}>{s.label}</span>
@@ -227,60 +284,106 @@ export default function LeadsList() {
           <h1 className="text-3xl font-bold text-slate-900">Gestão de Leads</h1>
           <p className="text-sm text-slate-600 mt-1">Gerencie e acompanhe todos os seus leads</p>
         </div>
-        <button
-          onClick={loadLeads}
-          className="px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 transition-colors text-sm font-medium"
-        >
-          🔄 Atualizar
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setShowConfigModal(true)}
+            className="px-4 py-2 border border-slate-300 text-slate-700 rounded-lg hover:bg-slate-50 transition-colors text-sm font-medium"
+          >
+            ⚙️ Configurar notificações
+          </button>
+          <button
+            onClick={loadLeads}
+            className="px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 transition-colors text-sm font-medium"
+          >
+            🔄 Atualizar
+          </button>
+        </div>
       </header>
 
       {/* Stats Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-        <div className="bg-white rounded-xl border border-slate-200 p-6 shadow-sm">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-sm font-medium text-slate-600">Total de Leads</p>
-              <p className="text-3xl font-bold text-slate-900 mt-2">{stats.total}</p>
-            </div>
-            <div className="w-12 h-12 bg-blue-100 rounded-lg flex items-center justify-center text-2xl">
-              👥
-            </div>
-          </div>
-        </div>
-
-        <div className="bg-white rounded-xl border border-slate-200 p-6 shadow-sm">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-sm font-medium text-slate-600">Novos</p>
-              <p className="text-3xl font-bold text-blue-600 mt-2">{stats.novos}</p>
-            </div>
-            <div className="w-12 h-12 bg-blue-50 rounded-lg flex items-center justify-center text-2xl">
-              🆕
+      <div className="overflow-x-auto pb-2">
+        <div className="grid grid-cols-[repeat(7,minmax(0,1fr))] gap-4 min-w-[1120px]">
+          <div className="bg-white rounded-xl border border-slate-200 p-6 shadow-sm">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-sm font-medium text-slate-600">Total de Leads</p>
+                <p className="text-3xl font-bold text-slate-900 mt-2">{stats.total}</p>
+              </div>
+              <div className="w-12 h-12 bg-blue-100 rounded-lg flex items-center justify-center text-2xl">
+                👥
+              </div>
             </div>
           </div>
-        </div>
 
-        <div className="bg-white rounded-xl border border-slate-200 p-6 shadow-sm">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-sm font-medium text-slate-600">Qualificados</p>
-              <p className="text-3xl font-bold text-green-600 mt-2">{stats.qualificados}</p>
-            </div>
-            <div className="w-12 h-12 bg-green-50 rounded-lg flex items-center justify-center text-2xl">
-              ✅
+          <div className="bg-white rounded-xl border border-slate-200 p-6 shadow-sm">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-sm font-medium text-slate-600">Iniciados</p>
+                <p className="text-3xl font-bold text-slate-900 mt-2">{stats.iniciados}</p>
+              </div>
+              <div className="w-12 h-12 bg-slate-100 rounded-lg flex items-center justify-center text-2xl">
+                🟦
+              </div>
             </div>
           </div>
-        </div>
 
-        <div className="bg-white rounded-xl border border-slate-200 p-6 shadow-sm">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-sm font-medium text-slate-600">Hoje</p>
-              <p className="text-3xl font-bold text-purple-600 mt-2">{stats.hoje}</p>
+          <div className="bg-white rounded-xl border border-slate-200 p-6 shadow-sm">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-sm font-medium text-slate-600">Novos</p>
+                <p className="text-3xl font-bold text-blue-600 mt-2">{stats.novos}</p>
+              </div>
+              <div className="w-12 h-12 bg-blue-50 rounded-lg flex items-center justify-center text-2xl">
+                🆕
+              </div>
             </div>
-            <div className="w-12 h-12 bg-purple-50 rounded-lg flex items-center justify-center text-2xl">
-              📅
+          </div>
+
+          <div className="bg-white rounded-xl border border-slate-200 p-6 shadow-sm">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-sm font-medium text-green-600">Qualificados</p>
+                <p className="text-3xl font-bold text-green-600 mt-2">{stats.qualificados}</p>
+              </div>
+              <div className="w-12 h-12 bg-green-50 rounded-lg flex items-center justify-center text-2xl">
+                ✅
+              </div>
+            </div>
+          </div>
+
+          <div className="bg-white rounded-xl border border-slate-200 p-6 shadow-sm">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-sm font-medium text-red-600">⚠️ Pendentes</p>
+                <p className="text-3xl font-bold text-red-600 mt-2">{stats.pendentes}</p>
+              </div>
+              <div className="w-12 h-12 bg-red-50 rounded-lg flex items-center justify-center text-2xl">
+                ⏳
+              </div>
+            </div>
+          </div>
+
+          <div className="bg-white rounded-xl border border-slate-200 p-6 shadow-sm">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-sm font-medium text-purple-600">Agendados</p>
+                <p className="text-3xl font-bold text-purple-600 mt-2">{stats.agendados}</p>
+              </div>
+              <div className="w-12 h-12 bg-purple-50 rounded-lg flex items-center justify-center text-2xl">
+                📅
+              </div>
+            </div>
+          </div>
+
+          <div className="bg-white rounded-xl border border-slate-200 p-6 shadow-sm">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-sm font-medium text-orange-600">Sem Imóvel</p>
+                <p className="text-3xl font-bold text-orange-600 mt-2">{stats.sem_imovel}</p>
+              </div>
+              <div className="w-12 h-12 bg-orange-50 rounded-lg flex items-center justify-center text-2xl">
+                🏷️
+              </div>
             </div>
           </div>
         </div>
@@ -339,10 +442,12 @@ export default function LeadsList() {
                 className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500"
               >
                 <option value="">Todos</option>
+                <option value="agendamento_pendente">⚠️ Pendente de Confirmação</option>
                 <option value="novo">Novo</option>
                 <option value="qualificado">Qualificado</option>
                 <option value="agendado">Agendado</option>
                 <option value="sem_imovel_disponivel">Sem Imóvel Disponível</option>
+                <option value="iniciado">Iniciado</option>
               </select>
             </div>
 
@@ -481,6 +586,7 @@ export default function LeadsList() {
                   <th className="px-6 py-3 text-left text-xs font-medium text-slate-700 uppercase tracking-wider">Status</th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-slate-700 uppercase tracking-wider">Preferências</th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-slate-700 uppercase tracking-wider">Última Conversa</th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-slate-700 uppercase tracking-wider">Ações</th>
                 </tr>
               </thead>
               <tbody className="bg-white divide-y divide-slate-200">
@@ -534,6 +640,17 @@ export default function LeadsList() {
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-slate-600">
                       {formatDate(lead.last_inbound_at)}
                     </td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm">
+                      {lead.status === 'agendamento_pendente' && (
+                        <button
+                          onClick={() => handleConfirmVisit(lead.id)}
+                          disabled={confirmingVisitId === lead.id}
+                          className="px-3 py-1 bg-red-600 text-white rounded text-xs hover:bg-red-700 disabled:opacity-50 transition-colors"
+                        >
+                          {confirmingVisitId === lead.id ? '⏳' : '✓ Confirmar'}
+                        </button>
+                      )}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -541,6 +658,117 @@ export default function LeadsList() {
           </div>
         </div>
       )}
+
+      {/* Config Modal */}
+      {showConfigModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-xl p-6 max-w-md w-full mx-4 shadow-lg">
+            <h2 className="text-xl font-bold text-slate-900 mb-4">Configuração de Notificações</h2>
+            
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-2">Destinatários WhatsApp</label>
+                <textarea
+                  value={recipients.join('\n')}
+                  onChange={(e) => setRecipients(e.target.value.split('\n').filter(r => r.trim()))}
+                  placeholder="Um número por linha (ex: 5511999990000)"
+                  className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500 text-sm"
+                  rows={4}
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-2">Template WhatsApp (opcional)</label>
+                <input
+                  type="text"
+                  value={template}
+                  onChange={(e) => setTemplate(e.target.value)}
+                  placeholder="Ex: visit_confirmed_internal"
+                  className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500 text-sm"
+                />
+              </div>
+            </div>
+
+            <div className="flex gap-3 mt-6">
+              <button
+                onClick={() => setShowConfigModal(false)}
+                className="flex-1 px-4 py-2 border border-slate-300 text-slate-700 rounded-lg hover:bg-slate-50 transition-colors"
+              >
+                Cancelar
+              </button>
+              <button
+                onClick={() => handleSaveConfig()}
+                className="flex-1 px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 transition-colors"
+              >
+                Salvar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </section>
   )
+
+  async function handleConfirmVisit(leadId: number) {
+    const visit = visits.find(v => v.lead_id === leadId)
+    if (!visit) {
+      alert('Nenhuma visita pendente encontrada para este lead')
+      return
+    }
+
+    setConfirmingVisitId(visit.id)
+    try {
+      const token = localStorage.getItem('auth_token')
+      const res = await fetch(`/api/admin/re/visits/${visit.id}/confirm`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        }
+      })
+      if (res.ok) {
+        alert('Visita confirmada com sucesso!')
+        loadLeads()
+      } else {
+        alert('Erro ao confirmar visita')
+      }
+    } catch (e) {
+      alert('Erro: ' + (e as any).message)
+    } finally {
+      setConfirmingVisitId(null)
+    }
+  }
+
+  async function handleSaveConfig() {
+    try {
+      const token = localStorage.getItem('auth_token')
+      
+      // Salvar recipients
+      await fetch('/api/admin/re/booking/recipients', {
+        method: 'PUT',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ recipients })
+      })
+
+      // Salvar template
+      if (template) {
+        await fetch('/api/admin/re/booking/template', {
+          method: 'PUT',
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({ template_name: template })
+        })
+      }
+
+      alert('Configuração salva com sucesso!')
+      setShowConfigModal(false)
+    } catch (e) {
+      alert('Erro ao salvar: ' + (e as any).message)
+    }
+  }
 }

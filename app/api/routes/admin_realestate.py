@@ -24,6 +24,7 @@ from app.domain.realestate.services.property_service import (
     soft_delete_property,
     hard_delete_property,
 )
+from app.messaging.provider import get_provider
 
 
 router = APIRouter(dependencies=[Depends(require_role_admin)])
@@ -32,9 +33,208 @@ router = APIRouter(dependencies=[Depends(require_role_admin)])
 TASKS: dict[str, dict] = {}
 
 
-@router.get("/ping")
-def ping():
-    return {"status": "ok"}
+def _get_or_create_default_tenant_admin(db: Session):
+    from app.api.routes.admin import _get_or_create_default_tenant
+
+    return _get_or_create_default_tenant(db)
+
+
+def _normalize_wa_id(raw: str) -> str:
+    s = (raw or "").strip()
+    if not s:
+        return s
+    # Aceitar entrada com @c.us
+    if "@" in s:
+        s = s.split("@", 1)[0]
+    # Aceitar +55... removendo +
+    if s.startswith("+"):
+        s = s[1:]
+    # manter somente dígitos
+    s = "".join(ch for ch in s if ch.isdigit())
+    return s
+
+
+def _get_booking_recipients(tenant_settings: dict) -> list[str]:
+    raw = tenant_settings.get("booking_notification_recipients")
+    if not raw:
+        return []
+    if isinstance(raw, list):
+        return [str(x) for x in raw if str(x).strip()]
+    return []
+
+
+def _get_booking_template_name(tenant_settings: dict) -> str | None:
+    t = (tenant_settings.get("booking_notification_template") or "").strip()
+    return t or None
+
+
+class BookingRecipientsIn(BaseModel):
+    recipients: list[str] = Field(default_factory=list)
+
+
+class BookingRecipientsOut(BaseModel):
+    recipients: list[str] = []
+
+
+class BookingTemplateIn(BaseModel):
+    template_name: str | None = None
+
+
+class BookingTemplateOut(BaseModel):
+    template_name: str | None = None
+
+
+@router.get("/booking/recipients", response_model=BookingRecipientsOut)
+def re_booking_get_recipients(db: Session = Depends(get_db)):
+    tenant = _get_or_create_default_tenant_admin(db)
+    current = dict(getattr(tenant, "settings_json", {}) or {})
+    return BookingRecipientsOut(recipients=_get_booking_recipients(current))
+
+
+@router.put("/booking/recipients", response_model=BookingRecipientsOut)
+def re_booking_set_recipients(payload: BookingRecipientsIn, db: Session = Depends(get_db)):
+    tenant = _get_or_create_default_tenant_admin(db)
+    current = dict(getattr(tenant, "settings_json", {}) or {})
+    recipients = sorted({
+        _normalize_wa_id(x) for x in (payload.recipients or []) if _normalize_wa_id(x)
+    })
+    current["booking_notification_recipients"] = recipients
+    tenant.settings_json = current
+    db.add(tenant)
+    db.commit()
+    db.refresh(tenant)
+    return BookingRecipientsOut(recipients=_get_booking_recipients(current))
+
+
+@router.get("/booking/template", response_model=BookingTemplateOut)
+def re_booking_get_template(db: Session = Depends(get_db)):
+    tenant = _get_or_create_default_tenant_admin(db)
+    current = dict(getattr(tenant, "settings_json", {}) or {})
+    return BookingTemplateOut(template_name=_get_booking_template_name(current))
+
+
+@router.put("/booking/template", response_model=BookingTemplateOut)
+def re_booking_set_template(payload: BookingTemplateIn, db: Session = Depends(get_db)):
+    tenant = _get_or_create_default_tenant_admin(db)
+    current = dict(getattr(tenant, "settings_json", {}) or {})
+    name = (payload.template_name or "").strip() or None
+    current["booking_notification_template"] = name
+    tenant.settings_json = current
+    db.add(tenant)
+    db.commit()
+    db.refresh(tenant)
+    return BookingTemplateOut(template_name=_get_booking_template_name(current))
+
+
+def _format_booking_notification(visit: re_models.VisitSchedule, lead: re_models.Lead | None, prop: re_models.Property | None) -> str:
+    lead_name = (getattr(lead, "name", None) or "-")
+    lead_phone = (getattr(lead, "phone", None) or getattr(visit, "contact_phone", None) or "-")
+    ref = ""
+    if prop is not None:
+        ref = getattr(prop, "ref_code", None) or getattr(prop, "external_id", None) or str(getattr(prop, "id", ""))
+    dt = getattr(visit, "scheduled_datetime", None)
+    dt_txt = dt.strftime("%d/%m/%Y %H:%M") if dt else "-"
+    return (
+        "📅 *Visita confirmada*\n"
+        f"• Lead: {lead_name}\n"
+        f"• Contato: {lead_phone}\n"
+        f"• Imóvel: #{ref}\n"
+        f"• Quando: {dt_txt}"
+    )
+
+
+class ConfirmVisitOut(BaseModel):
+    visit_id: int
+    visit_status: str
+    lead_id: int | None = None
+    lead_status: str | None = None
+    notified: int = 0
+    errors: list[dict] = []
+
+
+class VisitListOut(BaseModel):
+    id: int
+    lead_id: int
+    property_id: int
+    status: str
+    scheduled_datetime: str | None = None
+
+
+@router.get("/visits", response_model=list[VisitListOut])
+def re_list_visits(
+    db: Session = Depends(get_db),
+    status: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+):
+    q = db.query(re_models.VisitSchedule)
+    if status:
+        q = q.filter(re_models.VisitSchedule.status == status)
+    rows = (
+        q.order_by(re_models.VisitSchedule.id.desc())
+        .limit(max(1, min(int(limit), 200)))
+        .offset(max(0, int(offset)))
+        .all()
+    )
+    out: list[VisitListOut] = []
+    for v in rows:
+        dt = getattr(v, "scheduled_datetime", None)
+        out.append(
+            VisitListOut(
+                id=int(v.id),
+                lead_id=int(v.lead_id),
+                property_id=int(v.property_id),
+                status=str(v.status),
+                scheduled_datetime=(dt.isoformat() if dt else None),
+            )
+        )
+    return out
+
+
+@router.post("/visits/{visit_id}/confirm", response_model=ConfirmVisitOut)
+def re_confirm_visit(visit_id: int, db: Session = Depends(get_db)):
+    from app.services.visit_service import VisitService
+
+    try:
+        visit = VisitService.confirm_visit(db, int(visit_id))
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    lead = db.get(re_models.Lead, int(visit.lead_id)) if getattr(visit, "lead_id", None) else None
+    prop = db.get(re_models.Property, int(visit.property_id)) if getattr(visit, "property_id", None) else None
+
+    tenant = _get_or_create_default_tenant_admin(db)
+    settings_json = dict(getattr(tenant, "settings_json", {}) or {})
+    recipients = _get_booking_recipients(settings_json)
+    template_name = _get_booking_template_name(settings_json)
+
+    provider = get_provider()
+    notified = 0
+    errors: list[dict] = []
+    text = _format_booking_notification(visit, lead, prop)
+    for raw in recipients:
+        to = _normalize_wa_id(raw)
+        if not to:
+            continue
+        try:
+            # Preferir template para notificações internas (funciona fora da janela 24h)
+            if template_name:
+                provider.send_template(to, template_name, tenant_id=str(tenant.id))
+            else:
+                provider.send_text(to, text, tenant_id=str(tenant.id))
+            notified += 1
+        except Exception as e:
+            # Não falhar a confirmação por erro de mensageria
+            errors.append({"to": raw, "error": str(e)})
+
+    return ConfirmVisitOut(
+        visit_id=int(visit.id),
+        visit_status=str(getattr(visit, "status", "")),
+        lead_id=(int(getattr(lead, "id")) if lead is not None else None),
+        lead_status=(str(getattr(lead, "status")) if lead is not None else None),
+        notified=notified,
+        errors=errors,
+    )
 
 
 # ===== Dependência DB (admin) =====
