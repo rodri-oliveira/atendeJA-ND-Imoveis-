@@ -7,11 +7,16 @@ interface Lead {
   email?: string | null
   source?: string | null
   status?: string | null
-  preferences?: Record<string, any> | null
+  preferences?: Record<string, unknown> | null
   property_interest_id?: number | null
   external_property_id?: string | null
   last_inbound_at?: string | null
   created_at?: string | null
+  finalidade?: string | null
+  tipo?: string | null
+  cidade?: string | null
+  preco_min?: number | null
+  preco_max?: number | null
 }
 
 interface Visit {
@@ -80,11 +85,10 @@ export default function LeadsList() {
     try {
       const res = await fetch('/api/re/leads?limit=200', { cache: 'no-store' })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      const leads = await res.json()
+      const leads: Lead[] = await res.json()
       setData(leads)
       
       // Calcular estatísticas
-      const hoje = new Date().toISOString().split('T')[0] || ''
       setStats({
         total: leads.length,
         iniciados: leads.filter((l: Lead) => l.status === 'iniciado').length,
@@ -99,14 +103,14 @@ export default function LeadsList() {
       try {
         const visRes = await fetch('/api/admin/re/visits?status=requested&limit=50', { cache: 'no-store' })
         if (visRes.ok) {
-          const visData = await visRes.json()
+          const visData: Visit[] = await visRes.json()
           setVisits(visData)
         }
-      } catch (e) {
+      } catch {
         // Silenciar erro de visitas
       }
-    } catch (e: any) {
-      setError(e?.message || 'erro')
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : 'erro')
     } finally {
       setLoading(false)
     }
@@ -128,7 +132,7 @@ export default function LeadsList() {
         const tpl = await tplRes.json()
         if (typeof tpl?.template_name === 'string') setTemplate(tpl.template_name)
       }
-    } catch (e) {
+    } catch {
       // silencioso
     }
   }
@@ -155,24 +159,24 @@ export default function LeadsList() {
 
     // Filtros de preferências (buscar nos campos diretos do lead, não em preferences)
     if (filters.finalidade) {
-      const leadFinalidade = (lead as any).finalidade
+      const leadFinalidade = lead.finalidade
       if (leadFinalidade !== filters.finalidade) return false
     }
     if (filters.tipo) {
-      const leadTipo = (lead as any).tipo
+      const leadTipo = lead.tipo
       if (leadTipo !== filters.tipo) return false
     }
     if (filters.cidade) {
-      const leadCidade = (lead as any).cidade
+      const leadCidade = lead.cidade
       if (!leadCidade?.toLowerCase().includes(filters.cidade.toLowerCase())) return false
     }
     
     if (filters.valorMin) {
-      const leadPrecoMax = (lead as any).preco_max
+      const leadPrecoMax = lead.preco_max
       if (leadPrecoMax && leadPrecoMax < parseFloat(filters.valorMin)) return false
     }
     if (filters.valorMax) {
-      const leadPrecoMin = (lead as any).preco_min
+      const leadPrecoMin = lead.preco_min
       if (leadPrecoMin && leadPrecoMin > parseFloat(filters.valorMax)) return false
     }
 
@@ -244,8 +248,8 @@ export default function LeadsList() {
     return d.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })
   }
 
-  function formatPrice(price?: number) {
-    if (!price) return '-'
+  function formatPrice(price?: number | null) {
+    if (price === null || price === undefined) return '-'
     return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(price)
   }
 
@@ -607,28 +611,27 @@ export default function LeadsList() {
                     <td className="px-6 py-4 whitespace-nowrap">{getStatusBadge(lead.status)}</td>
                     <td className="px-6 py-4">
                       {(() => {
-                        const l = lead as any
-                        const hasData = l.finalidade || l.tipo || l.cidade || l.preco_min || l.preco_max
+                        const hasData = lead.finalidade || lead.tipo || lead.cidade || lead.preco_min || lead.preco_max
                         return hasData ? (
                           <div className="flex flex-wrap gap-2 max-w-xs">
-                            {l.finalidade && (
+                            {lead.finalidade && (
                               <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-emerald-100 text-emerald-800">
-                                {l.finalidade === 'sale' ? '🏠 Compra' : '🔑 Locação'}
+                                {lead.finalidade === 'sale' ? '🏠 Compra' : '🔑 Locação'}
                               </span>
                             )}
-                            {l.tipo && (
+                            {lead.tipo && (
                               <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
-                                {l.tipo === 'apartment' ? '🏢 Apto' : l.tipo === 'house' ? '🏡 Casa' : l.tipo}
+                                {lead.tipo === 'apartment' ? '🏢 Apto' : lead.tipo === 'house' ? '🏡 Casa' : lead.tipo}
                               </span>
                             )}
-                            {l.cidade && (
+                            {lead.cidade && (
                               <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-purple-100 text-purple-800">
-                                📍 {l.cidade}
+                                📍 {lead.cidade}
                               </span>
                             )}
-                            {(l.preco_min || l.preco_max) && (
+                            {(lead.preco_min || lead.preco_max) && (
                               <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-green-100 text-green-800">
-                                💰 {formatPrice(l.preco_min)} - {formatPrice(l.preco_max)}
+                                💰 {formatPrice(lead.preco_min)} - {formatPrice(lead.preco_max)}
                               </span>
                             )}
                           </div>
@@ -732,8 +735,8 @@ export default function LeadsList() {
       } else {
         alert('Erro ao confirmar visita')
       }
-    } catch (e) {
-      alert('Erro: ' + (e as any).message)
+    } catch (e: unknown) {
+      alert('Erro: ' + (e instanceof Error ? e.message : 'erro'))
     } finally {
       setConfirmingVisitId(null)
     }
@@ -767,8 +770,8 @@ export default function LeadsList() {
 
       alert('Configuração salva com sucesso!')
       setShowConfigModal(false)
-    } catch (e) {
-      alert('Erro ao salvar: ' + (e as any).message)
+    } catch (e: unknown) {
+      alert('Erro ao salvar: ' + (e instanceof Error ? e.message : 'erro'))
     }
   }
 }
