@@ -74,7 +74,7 @@ def set_status_task(self: Task, order_id: int, target_status: str):
                 idem = f"order-status-{order.id}-{order.status.value}"
                 if tpl:
                     task_send_template.delay(
-                        tenant_id=tenant.name if tenant else "default",
+                        tenant_id=str(int(tenant.id)) if tenant else "0",
                         to_wa_id=customer.wa_id,
                         template_name=tpl,
                         language_code=lang,
@@ -90,7 +90,7 @@ def set_status_task(self: Task, order_id: int, target_status: str):
                         models.OrderStatus.canceled: "Seu pedido foi cancelado.",
                     }.get(order.status, f"Status do pedido atualizado: {order.status.value}")
                     task_send_text.delay(
-                        tenant_id=order.tenant_id,
+                        tenant_id=str(int(order.tenant_id)),
                         to_wa_id=customer.wa_id,
                         text=msg,
                         idempotency_key=idem,
@@ -165,7 +165,12 @@ def check_sla_alerts(self: Task):
                     )
                     if channel == "whatsapp" and ops_wa:
                         try:
-                            task_send_text.delay(tenant_id=t.name, to_wa_id=ops_wa, text=msg, idempotency_key=f"sla-alert-{o.id}-{o.status.value}")
+                            task_send_text.delay(
+                                tenant_id=str(int(t.id)),
+                                to_wa_id=ops_wa,
+                                text=msg,
+                                idempotency_key=f"sla-alert-{o.id}-{o.status.value}",
+                            )
                         except Exception:
                             log.warning("sla_alert_send_failed", order_id=o.id)
                     else:

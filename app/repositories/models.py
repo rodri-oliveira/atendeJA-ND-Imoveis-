@@ -26,6 +26,7 @@ class User(Base):
     hashed_password: Mapped[str] = mapped_column(String(255))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     role: Mapped[UserRole] = mapped_column(SAEnum(UserRole), default=UserRole.collaborator, index=True)
+    tenant_id: Mapped[int | None] = mapped_column(ForeignKey("tenants.id"), index=True, nullable=True)
 
     __table_args__ = (
         Index("uix_user_email", "email", unique=True),
@@ -38,8 +39,26 @@ class Tenant(Base):
     name: Mapped[str] = mapped_column(String(120), unique=True)
     timezone: Mapped[str] = mapped_column(String(64), default="America/Sao_Paulo")
     settings_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
 
     contacts: Mapped[list[Contact]] = relationship(back_populates="tenant")  # type: ignore
+
+
+class WhatsAppAccount(Base):
+    __tablename__ = "whatsapp_accounts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id"), index=True)
+    phone_number_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    waba_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    token: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        Index("uix_wa_account_phone_number", "phone_number_id", unique=True),
+        Index("idx_wa_account_tenant", "tenant_id"),
+    )
 
 
 class Contact(Base):
@@ -142,4 +161,23 @@ class MessageLog(Base):
     __table_args__ = (
         Index("idx_msglog_tenant_to", "tenant_id", "to"),
         Index("idx_msglog_created", "created_at"),
+    )
+
+
+class UserInvite(Base):
+    """Convites e tokens de reset por tenant."""
+
+    __tablename__ = "user_invites"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[int] = mapped_column(Integer, index=True)
+    email: Mapped[str] = mapped_column(String(180), index=True)
+    role: Mapped[UserRole] = mapped_column(SAEnum(UserRole), default=UserRole.collaborator)
+    token: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        Index("idx_invite_tenant_email", "tenant_id", "email"),
     )

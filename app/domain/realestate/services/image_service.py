@@ -63,11 +63,11 @@ def upload_property_images(
     )
 
     # Persistir arquivos
-    saved = save_property_images(property_id, to_process)
+    saved = save_property_images(int(prop.tenant_id), property_id, to_process)
 
     created: List[Dict] = []
     for idx, (filename, full_path) in enumerate(saved):
-        public_url = f"{base_url}/static/imoveis/{property_id}/{filename}"
+        public_url = f"{base_url}/static/imoveis/{int(prop.tenant_id)}/{property_id}/{filename}"
         img = PropertyImage(
             property_id=property_id,
             url=public_url,

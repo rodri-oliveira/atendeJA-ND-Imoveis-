@@ -10,10 +10,17 @@ export type ActionSpec = {
 
 export type Branding = {
   appTitle?: string
+  tenantName?: string
+}
+
+export type ApiConfig = {
+  tenantId?: number
+  superAdminKey?: string
 }
 
 export type UIConfig = {
   branding?: Branding
+  api?: ApiConfig
   kanban: {
     columns: ColumnSpec[]
     actions?: Record<string, ActionSpec[]>
@@ -29,29 +36,38 @@ export type UIConfig = {
 }
 
 export const defaultConfig: UIConfig = {
-  branding: { appTitle: 'Painel Operacional' },
+  branding: { appTitle: 'Painel Operacional', tenantName: 'ND Imóveis' },
+  api: {},
   kanban: {
     columns: [
-      { status: 'draft', title: 'Rascunho' },
-      { status: 'pending_payment', title: 'Aguardando pagamento' },
-      { status: 'paid', title: 'Pago' },
-      { status: 'in_kitchen', title: 'Em preparo' },
-      { status: 'out_for_delivery', title: 'Saiu para entrega' },
-      { status: 'delivered', title: 'Entregue' },
-      { status: 'canceled', title: 'Cancelado' },
+      { status: 'new', title: 'Novo' },
+      { status: 'contacted', title: 'Contato feito' },
+      { status: 'qualified', title: 'Qualificado' },
+      { status: 'visit_scheduled', title: 'Visita marcada' },
+      { status: 'proposal', title: 'Proposta' },
+      { status: 'won', title: 'Fechado' },
+      { status: 'lost', title: 'Perdido' },
     ],
     actions: {
-      draft: [
-        { label: 'Cancelar', next: 'canceled' },
+      new: [
+        { label: 'Marcar contato feito', next: 'contacted' },
+        { label: 'Marcar perdido', next: 'lost' },
       ],
-      paid: [
-        { label: 'Marcar em preparo', next: 'in_kitchen' },
+      contacted: [
+        { label: 'Qualificar', next: 'qualified' },
+        { label: 'Marcar perdido', next: 'lost' },
       ],
-      in_kitchen: [
-        { label: 'Saiu p/ entrega', next: 'out_for_delivery' },
+      qualified: [
+        { label: 'Marcar visita', next: 'visit_scheduled' },
+        { label: 'Marcar perdido', next: 'lost' },
       ],
-      out_for_delivery: [
-        { label: 'Finalizar', next: 'delivered' },
+      visit_scheduled: [
+        { label: 'Enviar proposta', next: 'proposal' },
+        { label: 'Marcar perdido', next: 'lost' },
+      ],
+      proposal: [
+        { label: 'Fechar', next: 'won' },
+        { label: 'Marcar perdido', next: 'lost' },
       ],
     },
   },

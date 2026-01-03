@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException, UploadFile, File, Depends, Request
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 from app.repositories.db import SessionLocal
 from app.repositories.models import (
@@ -13,6 +13,7 @@ from app.repositories.models import (
     UserRole,
     SuppressedContact,
     MessageLog,
+    UserInvite,
 )
 
 import structlog
@@ -24,7 +25,9 @@ from sqlalchemy import select, delete
 from app.domain.realestate import models as re_models
 import csv
 import io
-from app.api.deps import require_role_admin, get_db
+import secrets
+from datetime import datetime, timedelta
+from app.api.deps import require_role_admin, get_db, require_active_tenant
 from app.messaging.provider import get_provider
 
 # Definição do router e logger (precisa vir antes dos decoradores @router...)
@@ -87,7 +90,10 @@ def _to_dt(v: str | None):
 
 
 @router.post("/re/imoveis/import-csv", summary="Importa imóveis via CSV (upsert por external_id)")
-def import_imoveis_csv(file: UploadFile = File(...)):
+def import_imoveis_csv(
+    file: UploadFile = File(...),
+    tenant_id: int = Depends(require_active_tenant),
+):
     try:
         if settings.RE_READ_ONLY:
             raise HTTPException(status_code=403, detail="read_only_mode")
@@ -123,23 +129,18 @@ def import_imoveis_csv(file: UploadFile = File(...)):
                 },
             )
 
-        created = 0
-        updated = 0
-        images_created = 0
-        tenant_name = settings.DEFAULT_TENANT_ID
+        created = updated = images_created = 0
 
         with SessionLocal() as db:  # type: Session
-            tenant = db.query(Tenant).filter(Tenant.name == tenant_name).first()
+            tenant = db.get(Tenant, int(tenant_id))
             if not tenant:
-                tenant = Tenant(name=tenant_name)
-                db.add(tenant)
-                db.flush()
+                raise HTTPException(status_code=404, detail="tenant_not_found")
 
             for row in reader:
                 ext_id = (row.get("external_id") or "").strip()
                 source = (row.get("source") or "").strip() or None
                 if not ext_id:
-                    log.warn("csv_row_skipped_no_external_id", row=row)
+                    log.warning("csv_row_skipped_no_external_id", row=row)
                     continue
 
                 stmt = select(re_models.Property).where(
@@ -271,8 +272,43 @@ class UserUpdate(BaseModel):
     is_active: bool | None = None
 
 
+class InviteCreateIn(BaseModel):
+    email: str
+    role: UserRole = UserRole.collaborator
+    expires_hours: int = Field(default=72, ge=1, le=168)
+
+
+class InviteCreateOut(BaseModel):
+    token: str
+    email: str
+    role: UserRole
+    expires_at: datetime
+
+
+class InviteResendOut(InviteCreateOut):
+    pass
+
+
+def _issue_invite(db: Session, *, email: str, role: UserRole, tenant_id: int, expires_hours: int = 72) -> InviteCreateOut:
+    token = secrets.token_urlsafe(32)
+    expires_at = datetime.utcnow() + timedelta(hours=max(1, expires_hours))
+    # Opcional: invalidar convites anteriores do mesmo email+tenant
+    db.query(UserInvite).filter(UserInvite.tenant_id == tenant_id, UserInvite.email == email, UserInvite.used_at.is_(None)).delete()
+    inv = UserInvite(
+        email=email,
+        role=role,
+        tenant_id=tenant_id,
+        token=token,
+        expires_at=expires_at,
+    )
+    db.add(inv)
+    db.commit()
+    db.refresh(inv)
+    return InviteCreateOut(token=token, email=email, role=role, expires_at=inv.expires_at)
+
+
 @router.post("/users", response_model=UserOut)
-def create_user(payload: UserCreate):
+def create_user(payload: UserCreate, tenant_id: int = Depends(require_active_tenant)):
     with SessionLocal() as db:  # type: Session
         email = (payload.email or "").strip().lower()
         if not email:
@@ -286,8 +322,9 @@ def create_user(payload: UserCreate):
             email=email,
             full_name=payload.full_name,
             hashed_password=get_password_hash(payload.password),
-            role=payload.role,
             is_active=bool(payload.is_active),
+            role=payload.role,
+            tenant_id=int(tenant_id),
         )
         db.add(user)
         db.commit()
@@ -302,13 +339,7 @@ class SuppressIn(BaseModel):
 
 
 def _get_or_create_default_tenant(db: Session) -> Tenant:
-    tenant_name = settings.DEFAULT_TENANT_ID
-    tenant = db.query(Tenant).filter(Tenant.name == tenant_name).first()
-    if not tenant:
-        tenant = Tenant(name=tenant_name)
-        db.add(tenant)
-        db.flush()
-    return tenant
+    raise HTTPException(status_code=400, detail="tenant_resolution_removed")
 
 
 @router.get("/messaging/logs")
@@ -320,10 +351,13 @@ def list_message_logs(
     limit: int = 50,
     offset: int = 0,
     db: Session = Depends(get_db),
+    tenant_id: int = Depends(require_active_tenant),
 ):
     try:
         from datetime import datetime
-        tenant = _get_or_create_default_tenant(db)
+        tenant = db.get(Tenant, int(tenant_id))
+        if not tenant:
+            raise HTTPException(status_code=404, detail="tenant_not_found")
         q = db.query(MessageLog).filter(MessageLog.tenant_id == tenant.id)
         if to:
             q = q.filter(MessageLog.to == to)
@@ -364,9 +398,11 @@ def list_message_logs(
 
 
 @router.post("/messaging/suppress")
-def add_suppressed_contact(payload: SuppressIn, db: Session = Depends(get_db)):
+def add_suppressed_contact(payload: SuppressIn, db: Session = Depends(get_db), tenant_id: int = Depends(require_active_tenant)):
     try:
-        tenant = _get_or_create_default_tenant(db)
+        tenant = db.get(Tenant, int(tenant_id))
+        if not tenant:
+            raise HTTPException(status_code=404, detail="tenant_not_found")
         wa_id = (payload.wa_id or "").strip()
         if not wa_id:
             raise HTTPException(status_code=400, detail="wa_id_required")
@@ -393,9 +429,11 @@ def add_suppressed_contact(payload: SuppressIn, db: Session = Depends(get_db)):
 
 
 @router.delete("/messaging/suppress")
-def remove_suppressed_contact(wa_id: str, db: Session = Depends(get_db)):
+def remove_suppressed_contact(wa_id: str, db: Session = Depends(get_db), tenant_id: int = Depends(require_active_tenant)):
     try:
-        tenant = _get_or_create_default_tenant(db)
+        tenant = db.get(Tenant, int(tenant_id))
+        if not tenant:
+            raise HTTPException(status_code=404, detail="tenant_not_found")
         wa_id_ = (wa_id or "").strip()
         if not wa_id_:
             raise HTTPException(status_code=400, detail="wa_id_required")
@@ -414,11 +452,13 @@ def remove_suppressed_contact(wa_id: str, db: Session = Depends(get_db)):
 
 
 @router.get("/messaging/window-status")
-def window_status(wa_id: str, db: Session = Depends(get_db)):
+def window_status(wa_id: str, db: Session = Depends(get_db), tenant_id: int = Depends(require_active_tenant)):
     """Retorna se o contato está dentro da janela de 24h e quando foi a última inbound."""
     try:
         from datetime import datetime, timedelta, timezone
-        tenant = _get_or_create_default_tenant(db)
+        tenant = db.get(Tenant, int(tenant_id))
+        if not tenant:
+            raise HTTPException(status_code=404, detail="tenant_not_found")
         contact = db.query(Contact).filter(Contact.tenant_id == tenant.id, Contact.wa_id == wa_id).first()
         if not contact:
             return {"inside_window": False, "last_inbound_at": None, "hours_since": None}
@@ -455,9 +495,11 @@ class TestTextIn(BaseModel):
 
 
 @router.post("/messaging/test-text")
-def messaging_test_text(payload: TestTextIn, db: Session = Depends(get_db)):
+def messaging_test_text(payload: TestTextIn, db: Session = Depends(get_db), tenant_id: int = Depends(require_active_tenant)):
     try:
-        tenant = _get_or_create_default_tenant(db)
+        tenant = db.get(Tenant, int(tenant_id))
+        if not tenant:
+            raise HTTPException(status_code=404, detail="tenant_not_found")
         provider = get_provider()
         data = provider.send_text(payload.wa_id, payload.body, tenant_id=str(tenant.id))
         return {"status": "ok", "provider_response": data}
@@ -482,9 +524,11 @@ class TestTemplateIn(BaseModel):
 
 
 @router.post("/messaging/test-template")
-def messaging_test_template(payload: TestTemplateIn, db: Session = Depends(get_db)):
+def messaging_test_template(payload: TestTemplateIn, db: Session = Depends(get_db), tenant_id: int = Depends(require_active_tenant)):
     try:
-        tenant = _get_or_create_default_tenant(db)
+        tenant = db.get(Tenant, int(tenant_id))
+        if not tenant:
+            raise HTTPException(status_code=404, detail="tenant_not_found")
         provider = get_provider()
         data = provider.send_template(
             payload.wa_id,
@@ -507,8 +551,8 @@ def messaging_test_template(payload: TestTemplateIn, db: Session = Depends(get_d
 
 
 @router.get("/users", response_model=list[UserOut])
-def list_users(role: UserRole | None = None, is_active: bool | None = None, limit: int = 50, offset: int = 0, db: Session = Depends(get_db)):
-    q = db.query(User)
+def list_users(role: UserRole | None = None, is_active: bool | None = None, limit: int = 50, offset: int = 0, db: Session = Depends(get_db), tenant_id: int = Depends(require_active_tenant)):
+    q = db.query(User).filter(User.tenant_id == int(tenant_id))
     if role is not None:
         q = q.filter(User.role == role)
     if is_active is not None:
@@ -518,9 +562,9 @@ def list_users(role: UserRole | None = None, is_active: bool | None = None, limi
 
 
 @router.patch("/users/{user_id}", response_model=UserOut)
-def update_user(user_id: int, payload: UserUpdate, db: Session = Depends(get_db)):
+def update_user(user_id: int, payload: UserUpdate, db: Session = Depends(get_db), tenant_id: int = Depends(require_active_tenant)):
     user = db.get(User, user_id)
-    if not user:
+    if not user or (user.tenant_id is not None and int(user.tenant_id) != int(tenant_id)):
         raise HTTPException(status_code=404, detail="user_not_found")
     data = payload.model_dump(exclude_unset=True)
     if "full_name" in data:
@@ -533,14 +577,53 @@ def update_user(user_id: int, payload: UserUpdate, db: Session = Depends(get_db)
         from app.core.security import get_password_hash
 
         user.hashed_password = get_password_hash(data["password"])
+    if user.tenant_id is None:
+        user.tenant_id = int(tenant_id)
     db.add(user)
     db.commit()
     db.refresh(user)
     return user
 
 
+@router.post("/users/invite", response_model=InviteCreateOut)
+def invite_user(payload: InviteCreateIn, tenant_id: int = Depends(require_active_tenant), db: Session = Depends(get_db)):
+    email = (payload.email or "").strip().lower()
+    if not email:
+        raise HTTPException(status_code=400, detail="email_required")
+    exists = db.query(User).filter(User.email == email).first()
+    if exists:
+        # Impede conflito de email global; fluxo de reset deve ser usado para usuários existentes
+        raise HTTPException(status_code=400, detail="email_already_exists")
+    out = _issue_invite(
+        db,
+        email=email,
+        role=payload.role,
+        tenant_id=int(tenant_id),
+        expires_hours=payload.expires_hours,
+    )
+    return out
+
+
+@router.post("/users/{user_id}/invite/resend", response_model=InviteResendOut)
+def resend_invite(user_id: int, tenant_id: int = Depends(require_active_tenant), db: Session = Depends(get_db)):
+    user = db.get(User, user_id)
+    if not user or (user.tenant_id is not None and int(user.tenant_id) != int(tenant_id)):
+        raise HTTPException(status_code=404, detail="user_not_found")
+    out = _issue_invite(db, email=user.email, role=user.role, tenant_id=int(tenant_id))
+    return InviteResendOut(**out.model_dump())
+
+
+@router.post("/users/{user_id}/reset", response_model=InviteResendOut)
+def reset_user_password(user_id: int, tenant_id: int = Depends(require_active_tenant), db: Session = Depends(get_db)):
+    user = db.get(User, user_id)
+    if not user or (user.tenant_id is not None and int(user.tenant_id) != int(tenant_id)):
+        raise HTTPException(status_code=404, detail="user_not_found")
+    out = _issue_invite(db, email=user.email, role=user.role, tenant_id=int(tenant_id))
+    return InviteResendOut(**out.model_dump())
+
+
 @router.post("/re/imoveis/import-csv-raw", summary="Importa imóveis via CSV bruto no corpo (text/csv)")
-async def import_imoveis_csv_raw(request: Request):
+async def import_imoveis_csv_raw(request: Request, tenant_id: int = Depends(require_active_tenant)):
     try:
         if settings.RE_READ_ONLY:
             raise HTTPException(status_code=403, detail="read_only_mode")
@@ -574,22 +657,17 @@ async def import_imoveis_csv_raw(request: Request):
                 },
             )
 
-        created = 0
-        updated = 0
-        images_created = 0
-        tenant_name = settings.DEFAULT_TENANT_ID
+        created = updated = images_created = 0
         with SessionLocal() as db:  # type: Session
-            tenant = db.query(Tenant).filter(Tenant.name == tenant_name).first()
+            tenant = db.get(Tenant, int(tenant_id))
             if not tenant:
-                tenant = Tenant(name=tenant_name)
-                db.add(tenant)
-                db.flush()
+                raise HTTPException(status_code=404, detail="tenant_not_found")
 
             for row in reader:
                 ext_id = (row.get("external_id") or "").strip()
                 source = (row.get("source") or "").strip() or None
                 if not ext_id:
-                    log.warn("csv_row_skipped_no_external_id", row=row)
+                    log.warning("csv_row_skipped_no_external_id", row=row)
                     continue
                 stmt = select(re_models.Property).where(
                     re_models.Property.tenant_id == tenant.id,
@@ -618,7 +696,7 @@ async def import_imoveis_csv_raw(request: Request):
                 area_total = _to_float(row.get("area_total"))
                 area_util = _to_float(row.get("area_util"))
                 img_urls = [u.strip() for u in (row.get("imagens_urls") or "").split(";") if u.strip()]
-                updated_at_source = (row.get("updated_at_source") or "").strip() or None
+                updated_at_source = _to_dt(row.get("updated_at_source"))
 
                 if prop is None:
                     prop = re_models.Property(

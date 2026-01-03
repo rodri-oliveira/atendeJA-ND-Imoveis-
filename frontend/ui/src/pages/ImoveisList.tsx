@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
+import { apiFetch } from '../lib/auth'
 
 interface Imovel {
   id: number
@@ -32,6 +33,7 @@ export default function ImoveisList() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [total, setTotal] = useState<number>(0)
+  const [typeCounts, setTypeCounts] = useState<Record<string, number>>({})
   // filtros
   const [finalidade, setFinalidade] = useState<string>('')
   const [tipo, setTipo] = useState<string>('')
@@ -93,6 +95,36 @@ export default function ImoveisList() {
     if (off) setOffset(Number(off) || 0)
   }, [])
 
+  useEffect(() => {
+    let alive = true
+    async function loadTypeCounts() {
+      try {
+        const res = await apiFetch('/api/re/imoveis/type-counts', { cache: 'no-store' })
+        if (!res.ok) return
+        const js = await res.json()
+        const m: Record<string, number> = {}
+        for (const row of (js?.type_counts || [])) {
+          if (row && row.tipo) m[String(row.tipo)] = Number(row.count) || 0
+        }
+        if (alive) setTypeCounts(m)
+      } catch {
+        if (alive) setTypeCounts({})
+      }
+    }
+    loadTypeCounts()
+    return () => { alive = false }
+  }, [])
+
+  const tipoOptions = useMemo(() => {
+    const base = [
+      { value: 'apartment', label: 'Apartamento' },
+      { value: 'house', label: 'Casa' },
+      { value: 'commercial', label: 'Comercial' },
+      { value: 'land', label: 'Terreno' },
+    ]
+    return base.map(o => ({ ...o, count: typeCounts[o.value] ?? 0 }))
+  }, [typeCounts])
+
   // Atualizar querystring quando filtros/offset mudarem (usando valores debounced)
   useEffect(() => {
     const params = new URLSearchParams()
@@ -138,7 +170,7 @@ export default function ImoveisList() {
       setError(null)
       try {
         const url = `/api/re/imoveis${queryString ? `?${queryString}` : ''}`
-        const res = await fetch(url, { cache: 'no-store' })
+        const res = await apiFetch(url, { cache: 'no-store' })
         if (!res.ok) throw new Error(`HTTP ${res.status}`)
         const js = await res.json()
         const hdr = res.headers.get('X-Total-Count')
@@ -194,8 +226,11 @@ export default function ImoveisList() {
               <label className="block text-sm font-medium text-slate-700 mb-2">Tipo</label>
               <select value={tipo} onChange={e => setTipo(e.target.value)} className="w-full rounded-lg border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-primary-500 transition-colors">
                 <option value="">Todos</option>
-                <option value="apartment">Apartamento</option>
-                <option value="house">Casa</option>
+                {tipoOptions.map(o => (
+                  <option key={o.value} value={o.value} disabled={o.count === 0}>
+                    {o.label} ({o.count})
+                  </option>
+                ))}
               </select>
             </div>
             <div>

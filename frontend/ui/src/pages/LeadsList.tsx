@@ -1,4 +1,70 @@
 import React, { useEffect, useState } from 'react'
+import { apiFetch } from '../lib/auth'
+import { DndContext, closestCorners, DragEndEvent, useSensor, PointerSensor, useSensors } from '@dnd-kit/core';
+import { SortableContext, verticalListSortingStrategy, useSortable, arrayMove } from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
+
+type ColumnProps = {
+  id: string;
+  leads: Lead[];
+  filters: Filters;
+  getStatusBadge: (status?: string | null) => React.ReactNode;
+  formatPhone: (phone?: string | null) => string;
+  formatDate: (date?: string | null) => string;
+}
+
+function Column({ id, leads, filters, getStatusBadge, formatPhone, formatDate }: ColumnProps) {
+  const filteredLeads = leads.filter((lead: Lead) => {
+    if (filters.search) {
+      const search = filters.search.toLowerCase();
+      return (
+        lead.name?.toLowerCase().includes(search) ||
+        lead.phone?.toLowerCase().includes(search) ||
+        lead.email?.toLowerCase().includes(search)
+      );
+    }
+    return true;
+  });
+
+  return (
+    <div className="w-80 bg-slate-100 rounded-lg p-2 flex-shrink-0">
+      <h3 className="font-semibold text-slate-700 px-2 py-1 mb-2">{id.replace(/_/g, ' ').replace(/^\w/, (c: string) => c.toUpperCase())} <span className="text-sm text-slate-500 font-normal">({filteredLeads.length})</span></h3>
+      <SortableContext items={filteredLeads.map(l => l.id)} strategy={verticalListSortingStrategy}>
+        <div className="space-y-2 h-[600px] overflow-y-auto">
+          {filteredLeads.map((lead: Lead) => (
+            <LeadCard key={lead.id} lead={lead} getStatusBadge={getStatusBadge} formatPhone={formatPhone} formatDate={formatDate} />
+          ))}
+        </div>
+      </SortableContext>
+    </div>
+  );
+}
+
+type LeadCardProps = {
+  lead: Lead;
+  getStatusBadge: (status?: string | null) => React.ReactNode;
+  formatPhone: (phone?: string | null) => string;
+  formatDate: (date?: string | null) => string;
+}
+
+function LeadCard({ lead, getStatusBadge, formatPhone, formatDate }: LeadCardProps) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: lead.id });
+
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    zIndex: isDragging ? 1 : 0,
+  };
+
+  return (
+    <div ref={setNodeRef} style={style} {...attributes} {...listeners} className={`bg-white rounded-md shadow-sm p-3 border ${isDragging ? 'border-primary-500' : 'border-white'}`}>
+      <div className="font-semibold text-slate-800">{lead.name || 'Sem nome'}</div>
+      <div className="text-sm text-slate-600">{formatPhone(lead.phone)}</div>
+      <div className="text-xs text-slate-500 mt-1">{formatDate(lead.last_inbound_at)}</div>
+      {getStatusBadge(lead.status)}
+    </div>
+  );
+}
 
 interface Lead {
   id: number
@@ -17,14 +83,6 @@ interface Lead {
   cidade?: string | null
   preco_min?: number | null
   preco_max?: number | null
-}
-
-interface Visit {
-  id: number
-  lead_id: number
-  property_id: number
-  status: string
-  scheduled_datetime?: string | null
 }
 
 interface Filters {
@@ -68,25 +126,38 @@ export default function LeadsList() {
     sem_imovel: 0
   })
 
-  const [visits, setVisits] = useState<Visit[]>([])
   const [showConfigModal, setShowConfigModal] = useState(false)
   const [recipients, setRecipients] = useState<string[]>([])
   const [template, setTemplate] = useState<string>('')
-  const [confirmingVisitId, setConfirmingVisitId] = useState<number | null>(null)
+
+  // Kanban state
+  const [columns, setColumns] = useState<Record<string, Lead[]>>({})
 
   useEffect(() => {
     loadLeads()
     loadConfig()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   async function loadLeads() {
     setLoading(true)
     setError(null)
     try {
-      const res = await fetch('/api/re/leads?limit=200', { cache: 'no-store' })
+      const res = await apiFetch('/api/re/leads?limit=200', { cache: 'no-store' })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const leads: Lead[] = await res.json()
       setData(leads)
+
+      // Group leads by status for Kanban
+      const grouped = leads.reduce((acc, lead) => {
+        const status = lead.status || 'iniciado';
+        if (!acc[status]) {
+          acc[status] = [];
+        }
+        acc[status]!.push(lead);
+        return acc;
+      }, {} as Record<string, Lead[]>)
+      setColumns(grouped)
       
       // Calcular estatísticas
       setStats({
@@ -99,16 +170,6 @@ export default function LeadsList() {
         sem_imovel: leads.filter((l: Lead) => l.status === 'sem_imovel_disponivel').length
       })
 
-      // Carregar visitas pendentes
-      try {
-        const visRes = await fetch('/api/admin/re/visits?status=requested&limit=50', { cache: 'no-store' })
-        if (visRes.ok) {
-          const visData: Visit[] = await visRes.json()
-          setVisits(visData)
-        }
-      } catch {
-        // Silenciar erro de visitas
-      }
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'erro')
     } finally {
@@ -118,16 +179,12 @@ export default function LeadsList() {
 
   async function loadConfig() {
     try {
-      const token = localStorage.getItem('auth_token')
-      const headers: Record<string, string> = {}
-      if (token) headers['Authorization'] = `Bearer ${token}`
-
-      const recRes = await fetch('/api/admin/re/booking/recipients', { headers, cache: 'no-store' })
+      const recRes = await apiFetch('/api/admin/re/booking/recipients', { cache: 'no-store' })
       if (recRes.ok) {
         const rec = await recRes.json()
         if (rec?.recipients) setRecipients(rec.recipients)
       }
-      const tplRes = await fetch('/api/admin/re/booking/template', { headers, cache: 'no-store' })
+      const tplRes = await apiFetch('/api/admin/re/booking/template', { cache: 'no-store' })
       if (tplRes.ok) {
         const tpl = await tplRes.json()
         if (typeof tpl?.template_name === 'string') setTemplate(tpl.template_name)
@@ -137,6 +194,7 @@ export default function LeadsList() {
     }
   }
 
+  // filteredData is not used in Kanban view, but kept for potential future toggle
   const filteredData = data?.filter(lead => {
     // Busca geral (nome, telefone, email)
     if (filters.search) {
@@ -191,26 +249,6 @@ export default function LeadsList() {
     return true
   })
 
-  // Ordenação client-side (não quebra API): status prioritário > última atividade > id desc
-  const statusOrder: Record<string, number> = {
-    agendamento_pendente: 1,
-    agendado: 2,
-    qualificado: 3,
-    novo: 4,
-    iniciado: 5,
-    sem_imovel_disponivel: 6,
-    direcionado: 7,
-  }
-  const sortedData = [...(filteredData || [])].sort((a, b) => {
-    const ra = statusOrder[(a.status || '').toLowerCase()] ?? 99
-    const rb = statusOrder[(b.status || '').toLowerCase()] ?? 99
-    if (ra !== rb) return ra - rb
-    const da = a.last_inbound_at ? new Date(a.last_inbound_at).getTime() : 0
-    const db = b.last_inbound_at ? new Date(b.last_inbound_at).getTime() : 0
-    if (db !== da) return db - da
-    return (b.id || 0) - (a.id || 0)
-  })
-
   function clearFilters() {
     setFilters({
       search: '',
@@ -248,11 +286,6 @@ export default function LeadsList() {
     return d.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })
   }
 
-  function formatPrice(price?: number | null) {
-    if (price === null || price === undefined) return '-'
-    return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(price)
-  }
-
   // Formata telefone removendo @c.us e aplicando máscara brasileira
   function formatPhone(phone?: string | null) {
     if (!phone) return '-'
@@ -279,6 +312,78 @@ export default function LeadsList() {
     }
     return `${country}${area}${formatted}`.trim()
   }
+
+  const sensors = useSensors(
+    useSensor(PointerSensor, {
+      activationConstraint: {
+        distance: 8,
+      },
+    })
+  );
+
+  const handleDragEnd = async (event: DragEndEvent) => {
+    const { active, over } = event;
+    if (!over) return;
+
+    const activeId = active.id;
+    const overId = over.id;
+
+    const activeContainer = active.data.current?.sortable.containerId;
+    const overContainer = over.data.current?.sortable.containerId || over.id;
+
+    if (activeContainer !== overContainer) {
+      // Move between columns
+      const sourceColumn = columns[activeContainer];
+      const destColumn = columns[overContainer];
+      if (!sourceColumn || !destColumn) return;
+
+      const activeIndex = sourceColumn.findIndex(l => l.id === activeId);
+      const overIndex = destColumn.findIndex(l => l.id === overId);
+
+      const [movedItem] = sourceColumn.splice(activeIndex, 1);
+      if (!movedItem) return;
+
+      destColumn.splice(overIndex, 0, movedItem);
+
+      setColumns(prev => ({
+        ...prev,
+        [activeContainer]: [...sourceColumn],
+        [overContainer]: [...destColumn],
+      }));
+
+      // API call
+      try {
+        await apiFetch(`/api/re/leads/${activeId}/status`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ status: overContainer }),
+        });
+      } catch (err) {
+        console.error("Failed to update lead status:", err);
+        // Revert on error
+        sourceColumn.splice(activeIndex, 0, movedItem);
+        destColumn.splice(overIndex, 1);
+        setColumns(prev => ({ ...prev, [activeContainer]: [...sourceColumn], [overContainer]: [...destColumn] }));
+        alert('Falha ao atualizar o status do lead.');
+      }
+    } else {
+      // Move within the same column
+      const column = columns[activeContainer];
+      if (!column) return;
+
+      const oldIndex = column.findIndex(l => l.id === activeId);
+      const newIndex = column.findIndex(l => l.id === overId);
+
+      if (oldIndex !== newIndex) {
+        setColumns(prev => ({
+          ...prev,
+          [activeContainer]: arrayMove(column, oldIndex, newIndex),
+        }));
+      }
+    }
+  };
+
+  const columnOrder: (keyof typeof columns)[] = ['iniciado', 'novo', 'qualificado', 'agendamento_pendente', 'agendado', 'sem_imovel_disponivel'];
 
   return (
     <section className="space-y-6">
@@ -576,90 +681,15 @@ export default function LeadsList() {
         </div>
       )}
 
-      {/* Table */}
+      {/* Kanban Board */}
       {!loading && !error && (
-        <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
-          <div className="overflow-x-auto">
-            <table className="min-w-full divide-y divide-slate-200">
-              <thead className="bg-slate-50">
-                <tr>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-slate-700 uppercase tracking-wider">ID</th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-slate-700 uppercase tracking-wider">Nome</th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-slate-700 uppercase tracking-wider">Telefone</th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-slate-700 uppercase tracking-wider">Email</th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-slate-700 uppercase tracking-wider">Status</th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-slate-700 uppercase tracking-wider">Preferências</th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-slate-700 uppercase tracking-wider">Última Conversa</th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-slate-700 uppercase tracking-wider">Ações</th>
-                </tr>
-              </thead>
-              <tbody className="bg-white divide-y divide-slate-200">
-                {sortedData.map((lead) => (
-                  <tr key={lead.id} className="hover:bg-slate-50 transition-colors">
-                    <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-slate-900">#{lead.id}</td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <div className="flex items-center gap-2">
-                        <span className="text-sm text-slate-900">{lead.name || <span className="text-slate-400 italic">Não informado</span>}</span>
-                      </div>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <span className="text-sm text-slate-600">{formatPhone(lead.phone)}</span>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <span className="text-sm text-slate-600">{lead.email || <span className="text-slate-400 italic">-</span>}</span>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap">{getStatusBadge(lead.status)}</td>
-                    <td className="px-6 py-4">
-                      {(() => {
-                        const hasData = lead.finalidade || lead.tipo || lead.cidade || lead.preco_min || lead.preco_max
-                        return hasData ? (
-                          <div className="flex flex-wrap gap-2 max-w-xs">
-                            {lead.finalidade && (
-                              <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-emerald-100 text-emerald-800">
-                                {lead.finalidade === 'sale' ? '🏠 Compra' : '🔑 Locação'}
-                              </span>
-                            )}
-                            {lead.tipo && (
-                              <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
-                                {lead.tipo === 'apartment' ? '🏢 Apto' : lead.tipo === 'house' ? '🏡 Casa' : lead.tipo}
-                              </span>
-                            )}
-                            {lead.cidade && (
-                              <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-purple-100 text-purple-800">
-                                📍 {lead.cidade}
-                              </span>
-                            )}
-                            {(lead.preco_min || lead.preco_max) && (
-                              <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-green-100 text-green-800">
-                                💰 {formatPrice(lead.preco_min)} - {formatPrice(lead.preco_max)}
-                              </span>
-                            )}
-                          </div>
-                        ) : (
-                          <span className="text-slate-400 text-sm">-</span>
-                        )
-                      })()}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-slate-600">
-                      {formatDate(lead.last_inbound_at)}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm">
-                      {lead.status === 'agendamento_pendente' && (
-                        <button
-                          onClick={() => handleConfirmVisit(lead.id)}
-                          disabled={confirmingVisitId === lead.id}
-                          className="px-3 py-1 bg-red-600 text-white rounded text-xs hover:bg-red-700 disabled:opacity-50 transition-colors"
-                        >
-                          {confirmingVisitId === lead.id ? '⏳' : '✓ Confirmar'}
-                        </button>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+        <DndContext sensors={sensors} collisionDetection={closestCorners} onDragEnd={handleDragEnd}>
+          <div className="flex gap-4 overflow-x-auto pb-4">
+            {columnOrder.map(columnId => (
+              <Column key={columnId} id={columnId} leads={columns[columnId] || []} filters={filters} getStatusBadge={getStatusBadge} formatPhone={formatPhone} formatDate={formatDate} />
+            ))}
           </div>
-        </div>
+        </DndContext>
       )}
 
       {/* Config Modal */}
@@ -712,58 +742,21 @@ export default function LeadsList() {
     </section>
   )
 
-  async function handleConfirmVisit(leadId: number) {
-    const visit = visits.find(v => v.lead_id === leadId)
-    if (!visit) {
-      alert('Nenhuma visita pendente encontrada para este lead')
-      return
-    }
-
-    setConfirmingVisitId(visit.id)
-    try {
-      const token = localStorage.getItem('auth_token')
-      const res = await fetch(`/api/admin/re/visits/${visit.id}/confirm`, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json'
-        }
-      })
-      if (res.ok) {
-        alert('Visita confirmada com sucesso!')
-        loadLeads()
-      } else {
-        alert('Erro ao confirmar visita')
-      }
-    } catch (e: unknown) {
-      alert('Erro: ' + (e instanceof Error ? e.message : 'erro'))
-    } finally {
-      setConfirmingVisitId(null)
-    }
-  }
 
   async function handleSaveConfig() {
     try {
-      const token = localStorage.getItem('auth_token')
-      
       // Salvar recipients
-      await fetch('/api/admin/re/booking/recipients', {
+      await apiFetch('/api/admin/re/booking/recipients', {
         method: 'PUT',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json'
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ recipients })
       })
 
       // Salvar template
       if (template) {
-        await fetch('/api/admin/re/booking/template', {
+        await apiFetch('/api/admin/re/booking/template', {
           method: 'PUT',
-          headers: {
-            'Authorization': `Bearer ${token}`,
-            'Content-Type': 'application/json'
-          },
+          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ template_name: template })
         })
       }

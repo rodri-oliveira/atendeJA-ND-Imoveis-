@@ -38,7 +38,9 @@ def _resolve_tenant_id(db: Session) -> int:
 
 
 def create_property(db: Session, data: Dict[str, Any]) -> Property:
-    tenant_id = _resolve_tenant_id(db)
+    tenant_id = int(data.get("tenant_id") or 0) if isinstance(data, dict) else 0
+    if not tenant_id:
+        tenant_id = _resolve_tenant_id(db)
     prop = Property(
         tenant_id=tenant_id,
         title=data["titulo"],
@@ -69,6 +71,7 @@ def create_property(db: Session, data: Dict[str, Any]) -> Property:
 
 def list_properties(
     db: Session,
+    tenant_id: int | None = None,
     finalidade: Optional[PropertyPurpose] = None,
     tipo: Optional[PropertyType] = None,
     cidade: Optional[str] = None,
@@ -81,7 +84,7 @@ def list_properties(
     offset: int = 0,
 ) -> Tuple[List[Dict[str, Any]], int]:
     # Monta condições base (evita duplicação entre consulta e contagem)
-    tenant_id = _resolve_tenant_id(db)
+    tenant_id = int(tenant_id) if tenant_id is not None else _resolve_tenant_id(db)
     conds = [
         Property.is_active == True,  # noqa: E712
         Property.tenant_id == tenant_id,
@@ -162,15 +165,18 @@ def list_properties(
     return out, int(total)
 
 
-def get_property(db: Session, property_id: int) -> Property:
+def get_property(db: Session, property_id: int, tenant_id: int | None = None) -> Property:
+    tenant_id = int(tenant_id) if tenant_id is not None else _resolve_tenant_id(db)
     prop = db.get(Property, property_id)
     if not prop:
+        raise ValueError("property_not_found")
+    if int(getattr(prop, "tenant_id", 0) or 0) != int(tenant_id):
         raise ValueError("property_not_found")
     return prop
 
 
-def update_property(db: Session, property_id: int, data: Dict[str, Any]) -> Property:
-    prop = db.get(Property, property_id)
+def update_property(db: Session, property_id: int, data: Dict[str, Any], tenant_id: int | None = None) -> Property:
+    prop = get_property(db, property_id, tenant_id=tenant_id)
     if not prop:
         raise ValueError("property_not_found")
 
@@ -201,8 +207,8 @@ def update_property(db: Session, property_id: int, data: Dict[str, Any]) -> Prop
     return prop
 
 
-def get_property_details(db: Session, property_id: int) -> Dict[str, Any]:
-    prop = db.get(Property, property_id)
+def get_property_details(db: Session, property_id: int, tenant_id: int | None = None) -> Dict[str, Any]:
+    prop = get_property(db, property_id, tenant_id=tenant_id)
     if not prop:
         raise ValueError("property_not_found")
 
@@ -245,8 +251,8 @@ def get_property_details(db: Session, property_id: int) -> Dict[str, Any]:
         "imagens": norm_imgs,
     }
 
-def hard_delete_property(db: Session, property_id: int) -> Dict[str, Any]:
-    prop = db.get(Property, property_id)
+def hard_delete_property(db: Session, property_id: int, tenant_id: int | None = None) -> Dict[str, Any]:
+    prop = get_property(db, property_id, tenant_id=tenant_id)
     if not prop:
         raise ValueError("property_not_found")
     imgs = db.execute(select(PropertyImage).where(PropertyImage.property_id == property_id)).scalars().all()
@@ -263,8 +269,8 @@ def hard_delete_property(db: Session, property_id: int) -> Dict[str, Any]:
     return {"ok": True, "images_deleted": removed_files}
 
 
-def set_active_property(db: Session, property_id: int, active: bool) -> Property:
-    prop = db.get(Property, property_id)
+def set_active_property(db: Session, property_id: int, active: bool, tenant_id: int | None = None) -> Property:
+    prop = get_property(db, property_id, tenant_id=tenant_id)
     if not prop:
         raise ValueError("property_not_found")
     prop.is_active = bool(active)
@@ -274,9 +280,9 @@ def set_active_property(db: Session, property_id: int, active: bool) -> Property
     return prop
 
 
-def soft_delete_property(db: Session, property_id: int) -> Dict[str, Any]:
+def soft_delete_property(db: Session, property_id: int, tenant_id: int | None = None) -> Dict[str, Any]:
     # Sem remover arquivos/imagens; apenas marca como inativo
-    prop = db.get(Property, property_id)
+    prop = get_property(db, property_id, tenant_id=tenant_id)
     if not prop:
         raise ValueError("property_not_found")
     if not prop.is_active:

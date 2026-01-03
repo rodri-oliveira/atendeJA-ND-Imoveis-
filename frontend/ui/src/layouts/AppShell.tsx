@@ -3,11 +3,14 @@ import { Link, NavLink, Outlet, useNavigate } from 'react-router-dom'
 import ErrorBoundary from '../components/ErrorBoundary'
 import { isAuthenticated, clearToken } from '../lib/auth'
 import { apiFetch } from '../lib/auth'
+import { useUIConfig } from '../config/provider'
 
 export default function AppShell() {
   const authed = isAuthenticated()
-  const [me, setMe] = useState<{ email?: string } | null>(null)
+  const [me, setMe] = useState<{ email?: string; tenant_id?: number | null } | null>(null)
   const navigate = useNavigate()
+  const cfg = useUIConfig()
+  const [showSuper, setShowSuper] = useState(false)
 
   useEffect(() => {
     let alive = true
@@ -18,6 +21,12 @@ export default function AppShell() {
         if (res.ok) {
           const js = await res.json()
           if (alive) setMe(js)
+          try {
+            const tid = (js as { tenant_id?: number | null })?.tenant_id
+            if (typeof tid === 'number') localStorage.setItem('ui_tenant_id', String(tid))
+          } catch {
+            // ignore
+          }
         } else {
           if (alive) setMe(null)
         }
@@ -28,6 +37,14 @@ export default function AppShell() {
     loadMe()
     return () => { alive = false }
   }, [authed])
+
+  useEffect(() => {
+    try {
+      setShowSuper(!!localStorage.getItem('ui_super_admin_key'))
+    } catch {
+      setShowSuper(false)
+    }
+  }, [cfg])
 
   function onLogout() {
     clearToken()
@@ -44,7 +61,7 @@ export default function AppShell() {
             </div>
             <div>
               <div className="text-lg font-bold">AtendeJá</div>
-              <div className="text-xs text-slate-300">ND Imóveis</div>
+              <div className="text-xs text-slate-300">{cfg?.branding?.tenantName || 'Tenant'}</div>
             </div>
           </Link>
         </div>
@@ -64,6 +81,7 @@ export default function AppShell() {
                 Admin
               </NavLink>
               <Item to="/users" label="Usuários" />
+              {showSuper && <Item to="/super/tenants" label="Tenants" />}
             </>
           )}
           <Item to="/sobre" label="Sobre" />

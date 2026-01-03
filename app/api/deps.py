@@ -1,12 +1,12 @@
 from typing import Annotated
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, status, Header
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
 
 from app.core.security import decode_token
 from app.repositories.db import SessionLocal
-from app.repositories.models import User, UserRole
+from app.repositories.models import User, UserRole, Tenant
 import redis
 from app.core.config import settings
 from app.services.conversation_state import ConversationStateService
@@ -65,3 +65,53 @@ def require_role_admin(user: Annotated[User, Depends(get_current_user)]) -> User
     if user.role != UserRole.admin:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="admin_only")
     return user
+
+
+def get_tenant_id(x_tenant_id: Annotated[str | None, Header(alias="X-Tenant-Id")] = None) -> int:
+    """Resolve tenant_id for HTTP routes.
+
+    Production: header is mandatory.
+    Dev/Test: header is optional (falls back to DEFAULT_TENANT_ID when numeric, else 1).
+    """
+    env = (settings.APP_ENV or "").lower()
+    if x_tenant_id:
+        try:
+            return int(str(x_tenant_id).strip())
+        except Exception:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="invalid_tenant_id")
+
+    if env == "prod":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="missing_tenant_id")
+
+    # Dev/Test fallback
+    try:
+        return int(str(settings.DEFAULT_TENANT_ID).strip())
+    except Exception:
+        return 1
+
+
+def require_active_tenant(
+    tenant_id: Annotated[int, Depends(get_tenant_id)],
+    db: Annotated[Session, Depends(get_db)],
+) -> int:
+    tenant = db.get(Tenant, int(tenant_id))
+    if not tenant:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="tenant_not_found")
+    if not bool(getattr(tenant, "is_active", True)):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="tenant_suspended")
+    return int(tenant_id)
+
+
+def require_super_admin(
+    x_super_admin_key: Annotated[str | None, Header(alias="X-Super-Admin-Key")] = None,
+) -> None:
+    expected = (settings.SUPER_ADMIN_API_KEY or "").strip()
+    if not expected:
+        env = (settings.APP_ENV or "").lower()
+        if env in {"dev", "test"}:
+            expected = "dev"
+        else:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="super_admin_not_configured")
+    provided = (x_super_admin_key or "").strip()
+    if provided != expected:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="super_admin_only")

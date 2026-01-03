@@ -145,6 +145,9 @@ class PropertyExternalRef(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
+class InvalidLeadStatusTransition(Exception):
+    pass
+
 class Lead(Base):
     __tablename__ = "re_leads"
 
@@ -154,11 +157,10 @@ class Lead(Base):
     name: Mapped[str | None] = mapped_column(String(160), nullable=True)
     phone: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     email: Mapped[str | None] = mapped_column(String(160), nullable=True)
-    source: Mapped[str | None] = mapped_column(String(64), nullable=True)  # whatsapp, site, instagram, etc.
+    source: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
-    preferences: Mapped[dict | None] = mapped_column(JSON, default=None)  # filtros desejados
+    preferences: Mapped[dict | None] = mapped_column(JSON, default=None)
     consent_lgpd: Mapped[bool] = mapped_column(Boolean, default=False)
-    # Campanhas / atribuição
     campaign_source: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     campaign_medium: Mapped[str | None] = mapped_column(String(32), nullable=True)
     campaign_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
@@ -166,17 +168,14 @@ class Lead(Base):
     landing_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     external_property_id: Mapped[str | None] = mapped_column(String(160), nullable=True)
 
-    # Status e timestamps de interação
-    status: Mapped[str] = mapped_column(String(32), default="novo", index=True)
+    status: Mapped[LeadStatus] = mapped_column(SAEnum(LeadStatus), default=LeadStatus.novo, index=True)
     last_inbound_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     last_outbound_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     status_updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
-    # Direcionamento e integrações
     property_interest_id: Mapped[int | None] = mapped_column(ForeignKey("re_properties.id"), nullable=True, index=True)
-    contact_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)  # FK removida temporariamente
+    contact_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
 
-    # Preferências denormalizadas para filtros
     finalidade: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
     tipo: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     cidade: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
@@ -187,6 +186,65 @@ class Lead(Base):
     preco_max: Mapped[float | None] = mapped_column(Float, nullable=True, index=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    @staticmethod
+    def create_for_contact(tenant_id: int, contact_id: int, phone: str) -> Lead:
+        return Lead(
+            tenant_id=tenant_id,
+            contact_id=contact_id,
+            phone=phone,
+            source="whatsapp",
+            status=LeadStatus.iniciado,
+            last_inbound_at=datetime.utcnow(),
+        )
+
+    def provide_preferences(self, criteria: dict):
+        if self.status not in [LeadStatus.iniciado, LeadStatus.novo]:
+            raise InvalidLeadStatusTransition(f"Cannot provide preferences for lead in state {self.status}")
+        
+        self.preferences = criteria
+        self.finalidade = criteria.get("purpose")
+        self.tipo = criteria.get("type")
+        self.cidade = criteria.get("city")
+        self.estado = criteria.get("state")
+        self.dormitorios = criteria.get("bedrooms")
+        self.preco_min = criteria.get("min_price")
+        self.preco_max = criteria.get("max_price")
+        
+        self._transition_to(LeadStatus.novo)
+
+    def mark_as_qualified(self, search_results: list):
+        if self.status != LeadStatus.novo:
+            raise InvalidLeadStatusTransition(f"Cannot mark as qualified lead in state {self.status}")
+        
+        if not self.preferences:
+            self.preferences = {}
+        self.preferences['search_results'] = search_results
+        self._transition_to(LeadStatus.qualificado)
+
+    def request_visit(self):
+        if self.status not in [LeadStatus.qualificado, LeadStatus.agendamento_pendente]:
+            raise InvalidLeadStatusTransition(f"Cannot request visit for lead in state {self.status}")
+        self._transition_to(LeadStatus.agendamento_pendente)
+
+    def _transition_to(self, new_status: LeadStatus):
+        self.status = new_status
+        self.status_updated_at = datetime.utcnow()
+
+    def change_status(self, new_status: LeadStatus):
+        # Para ações manuais do usuário (Kanban), permitimos transições mais flexíveis,
+        # mas ainda podemos adicionar regras aqui se necessário (ex: não reverter de 'agendado' para 'novo')
+        if not isinstance(new_status, LeadStatus):
+            raise ValueError("Invalid status provided")
+        self._transition_to(new_status)
+
+    def reactivate_if_needed(self):
+        if self.status == LeadStatus.sem_resposta_24h:
+            # A lógica de qualificação é complexa e depende de buscas, então por ora
+            # a regra mais simples é voltar para 'novo' para re-engajar no funil.
+            # Uma versão mais avançada poderia chamar um 'LeadQualificationService'.
+            self._transition_to(LeadStatus.novo)
+
 
 
 class InquiryType(str, Enum):

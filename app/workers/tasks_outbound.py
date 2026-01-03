@@ -4,10 +4,10 @@ import time
 import structlog
 from celery import Task
 from app.core.config import settings
-from app.domain.messaging.wa_client import get_wa_client
 from app.domain.policies import within_business_hours
 from app.repositories.db import SessionLocal
 from app.repositories import models
+from app.messaging.provider import get_provider
 from .celery_app import celery
 
 log = structlog.get_logger()
@@ -27,6 +27,20 @@ def _backoff(retry_count: int) -> float:
     return min(30.0, base + jitter)
 
 
+def _resolve_tenant(db, raw_tenant_id) -> models.Tenant | None:
+    tid = str(raw_tenant_id or "").strip()
+    if not tid:
+        return None
+    try:
+        t_int = int(tid)
+        return db.get(models.Tenant, t_int)
+    except Exception:
+        pass
+    if (settings.APP_ENV or "").lower() == "prod":
+        return None
+    return db.query(models.Tenant).filter(models.Tenant.name == tid).first()
+
+
 @celery.task(name="outbound.send_text", bind=True, max_retries=5)
 def send_text(self: Task, tenant_id: str, to_wa_id: str, text: str, idempotency_key: str | None = None) -> dict:
     # Respect business hours (simple policy for now)
@@ -35,12 +49,9 @@ def send_text(self: Task, tenant_id: str, to_wa_id: str, text: str, idempotency_
         return {"status": "scheduled"}
 
     with SessionLocal() as db:
-        # Resolve tenant by name (DEFAULT_TENANT_ID currently mapped to name)
-        tenant = db.query(models.Tenant).filter(models.Tenant.name == tenant_id).first()
+        tenant = _resolve_tenant(db, tenant_id)
         if tenant is None:
-            tenant = models.Tenant(name=tenant_id)
-            db.add(tenant)
-            db.flush()
+            return {"status": "error", "error": "tenant_not_found"}
 
         # Idempotency guard
         if idempotency_key:
@@ -95,11 +106,10 @@ def send_text(self: Task, tenant_id: str, to_wa_id: str, text: str, idempotency_
         db.add(msg)
         db.commit()
 
-    client = get_wa_client()
     try:
-        resp = client.send_text(to_wa_id=to_wa_id, text=text)
-    except Exception as e:  # Consider HTTP status in logs handled inside client
-        # Retry on transient errors; here we assume any exception is transient for simplicity
+        provider = get_provider()
+        resp = provider.send_text(to=to_wa_id, text=text, tenant_id=str(int(tenant.id)))
+    except Exception as e:
         retry_no = self.request.retries
         delay = _backoff(retry_no)
         log.warning("outbound_retry", retries=retry_no + 1, delay=delay)
@@ -138,11 +148,9 @@ def send_template(
         return {"status": "scheduled"}
 
     with SessionLocal() as db:
-        tenant = db.query(models.Tenant).filter(models.Tenant.name == tenant_id).first()
+        tenant = _resolve_tenant(db, tenant_id)
         if tenant is None:
-            tenant = models.Tenant(name=tenant_id)
-            db.add(tenant)
-            db.flush()
+            return {"status": "error", "error": "tenant_not_found"}
 
         if idempotency_key:
             existing = (
@@ -198,13 +206,14 @@ def send_template(
         db.add(msg)
         db.commit()
 
-    client = get_wa_client()
     try:
-        resp = client.send_template(
-            to_wa_id=to_wa_id,
+        provider = get_provider()
+        resp = provider.send_template(
+            to=to_wa_id,
             template_name=template_name,
-            language_code=language_code,
+            language=language_code,
             components=components,
+            tenant_id=str(int(tenant.id)),
         )
     except Exception as e:
         retry_no = self.request.retries

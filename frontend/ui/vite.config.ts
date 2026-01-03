@@ -12,6 +12,12 @@ export default defineConfig({
         // remove o prefixo /api ao encaminhar
         rewrite: (path) => path.replace(/^\/api/, ''),
       },
+
+      // Roteia chamadas de /super para o backend FastAPI (super-admin)
+      '/super': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+      },
     },
   },
 })

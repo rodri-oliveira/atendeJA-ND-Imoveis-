@@ -29,6 +29,7 @@ def _guess_ext_from_name(name: str | None) -> str | None:
 
 
 def save_property_images(
+    tenant_id: int,
     property_id: int,
     files: List[any],  # FastAPI UploadFile-like (possui .filename, .content_type, .file)
 ) -> List[Tuple[str, Path]]:
@@ -37,7 +38,7 @@ def save_property_images(
     (filename, full_path) para cada arquivo salvo.
     """
     ensure_base_dirs()
-    target_dir = UPLOAD_IMOVEIS_DIR / str(property_id)
+    target_dir = UPLOAD_IMOVEIS_DIR / str(int(tenant_id)) / str(property_id)
     target_dir.mkdir(parents=True, exist_ok=True)
 
     saved: List[Tuple[str, Path]] = []

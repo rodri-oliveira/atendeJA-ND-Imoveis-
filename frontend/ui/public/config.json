@@ -1,36 +1,37 @@
 {
   "$schema": "./config.schema.json",
-  "branding": { "appTitle": "Painel Operacional" },
+  "branding": { "appTitle": "Painel Operacional", "tenantName": "ND Imóveis" },
+  "api": { "tenantId": 1, "superAdminKey": "dev" },
   "kanban": {
     "columns": [
-      { "status": "draft", "title": "Rascunho" },
-      { "status": "pending_payment", "title": "Aguardando pagamento" },
-      { "status": "paid", "title": "Pago" },
-      { "status": "in_kitchen", "title": "Em preparo" },
-      { "status": "out_for_delivery", "title": "Em rota" },
-      { "status": "delivered", "title": "Finalizado" },
-      { "status": "canceled", "title": "Cancelado" }
+      { "status": "new", "title": "Novo" },
+      { "status": "contacted", "title": "Contato feito" },
+      { "status": "qualified", "title": "Qualificado" },
+      { "status": "visit_scheduled", "title": "Visita marcada" },
+      { "status": "proposal", "title": "Proposta" },
+      { "status": "won", "title": "Fechado" },
+      { "status": "lost", "title": "Perdido" }
     ],
     "actions": {
-      "draft": [
-        { "label": "Aguardando pagamento", "next": "pending_payment" },
-        { "label": "Cancelar", "next": "canceled" }
+      "new": [
+        { "label": "Marcar contato feito", "next": "contacted" },
+        { "label": "Marcar perdido", "next": "lost" }
       ],
-      "pending_payment": [
-        { "label": "Confirmar pagamento", "next": "paid" },
-        { "label": "Cancelar", "next": "canceled" }
+      "contacted": [
+        { "label": "Qualificar", "next": "qualified" },
+        { "label": "Marcar perdido", "next": "lost" }
       ],
-      "paid": [
-        { "label": "Marcar em preparo", "next": "in_kitchen" },
-        { "label": "Cancelar", "next": "canceled" }
+      "qualified": [
+        { "label": "Marcar visita", "next": "visit_scheduled" },
+        { "label": "Marcar perdido", "next": "lost" }
       ],
-      "in_kitchen": [
-        { "label": "Saiu p/ entrega", "next": "out_for_delivery" },
-        { "label": "Cancelar", "next": "canceled" }
+      "visit_scheduled": [
+        { "label": "Enviar proposta", "next": "proposal" },
+        { "label": "Marcar perdido", "next": "lost" }
       ],
-      "out_for_delivery": [
-        { "label": "Finalizar", "next": "delivered" },
-        { "label": "Cancelar", "next": "canceled" }
+      "proposal": [
+        { "label": "Fechar", "next": "won" },
+        { "label": "Marcar perdido", "next": "lost" }
       ]
     }
   },

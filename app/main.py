@@ -15,17 +15,18 @@ from app.api.routes.admin_realestate import router as admin_realestate_router
 from app.api.routes.metrics import router as metrics_router
 from app.api.routes.llm import router as llm_router
 from app.api.routes.auth import router as auth_router
+from app.api.routes.super_admin import router as super_admin_router
 from app.repositories.db import SessionLocal, engine
 from app.api.deps import get_db
 
-
-from app.repositories.models import Base, User, UserRole
+from app.repositories.models import Base, User, UserRole, Tenant
 import app.domain.realestate.models  # noqa: F401 - importa modelos para registrar no metadata
 from contextlib import asynccontextmanager
 import structlog
 import traceback
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
+from sqlalchemy import text
 from app.core.security import get_password_hash
 
 configure_logging()
@@ -47,12 +48,72 @@ async def lifespan(app: FastAPI):
             log.error("metadata_create_error", error=str(e))
     else:
         Base.metadata.create_all(bind=engine)
+        # Garante que exista tenant_id=1 em dev/test (evita 404 quando o front usa tenantId=1)
+        try:
+            with SessionLocal() as db:  # type: Session
+                env = (settings.APP_ENV or "").lower()
+                if env in {"dev", "test"}:
+                    t1 = db.get(Tenant, 1)
+                    if not t1:
+
+                        # Evitar conflito de nome único
+                        name = "Default"
+                        exists_by_name = db.query(Tenant).filter(Tenant.name == name).first()
+                        if exists_by_name:
+                            name = "Default (1)"
+                        t = Tenant(id=1, name=name)
+                        db.add(t)
+                        db.commit()
+                        t1 = t
+                    # Garantir tenant 1 ativo
+                    if t1 is not None and not bool(getattr(t1, "is_active", True)):
+                        t1.is_active = True
+                        db.add(t1)
+                        db.commit()
+
+                    # Em dev/test, se existir base de imóveis em outro tenant, manter o admin no tenant com dados.
+                    # Isso evita "lista vazia" após migração/multi-tenant.
+                    try:
+                        rows = db.execute(text("select tenant_id, count(1) as c from re_properties group by tenant_id order by c desc")).fetchall()
+                        if rows:
+                            data_tenant_id = int(rows[0][0])
+                            if data_tenant_id:
+                                data_tenant = db.get(Tenant, data_tenant_id)
+                                if data_tenant is not None and not bool(getattr(data_tenant, "is_active", True)):
+                                    data_tenant.is_active = True
+                                    db.add(data_tenant)
+                                    db.commit()
+
+                                u = db.query(User).filter(User.email == "admin@example.com").first()
+                                if u and u.tenant_id is not None and int(u.tenant_id) != data_tenant_id:
+                                    u.tenant_id = data_tenant_id
+                                    db.add(u)
+                                    db.commit()
+                    except Exception:
+                        # tabela pode não existir em instalações novas
+                        db.rollback()
+                else:
+                    first_tenant = db.query(Tenant).order_by(Tenant.id.asc()).first()
+                    if not first_tenant:
+                        t = Tenant(name="Default")
+                        db.add(t)
+                        db.commit()
+        except Exception as e:
+            log.error("tenant_bootstrap_error", error=str(e))
+
         # Seed do usuário admin, se configurado
         try:
             seed_email = (settings.AUTH_SEED_ADMIN_EMAIL or "").strip().lower()
             seed_password = (settings.AUTH_SEED_ADMIN_PASSWORD or "").strip()
             if seed_email and seed_password:
                 with SessionLocal() as db:  # type: Session
+                    tenant = db.query(Tenant).order_by(Tenant.id.asc()).first()
+                    if not tenant:
+                        tenant = Tenant(name="Default")
+                        db.add(tenant)
+                        db.commit()
+                        db.refresh(tenant)
+
                     user = db.query(User).filter(User.email == seed_email).first()
                     if not user:
                         user = User(
@@ -61,10 +122,15 @@ async def lifespan(app: FastAPI):
                             hashed_password=get_password_hash(seed_password),
                             is_active=True,
                             role=UserRole.admin,
+                            tenant_id=int(tenant.id),
                         )
                         db.add(user)
                         db.commit()
                         log.info("admin_seeded", email=seed_email)
+                    elif getattr(user, "tenant_id", None) is None and tenant is not None:
+                        user.tenant_id = int(tenant.id)
+                        db.add(user)
+                        db.commit()
         except Exception as e:
             log.error("admin_seed_error", error=str(e))
     yield
@@ -78,6 +144,7 @@ tags_metadata = [
     {"name": "admin", "description": "Endpoints administrativos (futuros)."},
     {"name": "realestate", "description": "Domínio imobiliário: imóveis e leads."},
     {"name": "auth", "description": "Autenticação JWT e informações do usuário."},
+    {"name": "super-admin", "description": "Endpoints de super-administração para onboarding de locatários."},
 ]
 
 app = FastAPI(
@@ -144,8 +211,11 @@ app.include_router(auth_router, prefix="/auth", tags=["auth"])
 app.include_router(metrics_router, prefix="/metrics", tags=["metrics"])
 app.include_router(llm_router, prefix="/llm", tags=["llm"]) 
 app.include_router(admin_realestate_router, prefix="/admin/re", tags=["admin-re"]) 
+app.include_router(super_admin_router, tags=["super-admin"])
 
-# Servir uploads locais (MVP). Em produção usar CDN/Storage dedicado.
+# Servir uploads locais (MVP). Estrutura esperada: /static/imoveis/{tenant_id}/{property_id}/{filename}.
+# Em produção usar CDN/Storage dedicado.
+
 try:
     import os
     from pathlib import Path

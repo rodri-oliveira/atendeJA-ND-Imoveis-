@@ -5,7 +5,15 @@ import time
 
 from app.messaging.limits import RateLimiter
 from app.repositories.db import SessionLocal
-from app.repositories.models import SuppressedContact, MessageLog, Contact, Conversation, Message, MessageDirection
+from app.repositories.models import (
+    SuppressedContact,
+    MessageLog,
+    Contact,
+    Conversation,
+    Message,
+    MessageDirection,
+    WhatsAppAccount,
+)
 from app.core.config import settings
 
 
@@ -22,8 +30,43 @@ class MetaCloudProvider:
             "Content-Type": "application/json",
         }
 
-    def _messages_url(self) -> str:
-        return f"{self.api_base}/{self.phone_number_id}/messages"
+    def _messages_url(self, phone_number_id: str) -> str:
+        return f"{self.api_base}/{phone_number_id}/messages"
+
+    def _resolve_credentials(self, tenant_id: Optional[str]) -> tuple[str, str]:
+        """Resolve (token, phone_number_id) for a given tenant.
+
+        Falls back to global settings when tenant is not provided or no account exists.
+        """
+        token = self.token
+        phone_number_id = self.phone_number_id
+        if not tenant_id:
+            return token, phone_number_id
+        try:
+            tid = int(tenant_id)
+        except Exception:
+            return token, phone_number_id
+
+        try:
+            with SessionLocal() as db:
+                acct = (
+                    db.query(WhatsAppAccount)
+                    .filter(
+                        WhatsAppAccount.tenant_id == tid,
+                        WhatsAppAccount.is_active == True,  # noqa: E712
+                    )
+                    .order_by(WhatsAppAccount.id.desc())
+                    .first()
+                )
+                if acct:
+                    if acct.token:
+                        token = acct.token
+                    if acct.phone_number_id:
+                        phone_number_id = acct.phone_number_id
+        except Exception:
+            # Fail closed on credential override issues: keep default settings
+            pass
+        return token, phone_number_id
 
     def _post_with_retry(self, url: str, json: Dict[str, Any], max_attempts: int = 3) -> httpx.Response:
         last_exc: Exception | None = None
@@ -43,6 +86,7 @@ class MetaCloudProvider:
 
     def send_text(self, to: str, text: str, tenant_id: Optional[str] = None) -> Dict[str, Any]:
         tenant = tenant_id or "0"
+        token, phone_number_id = self._resolve_credentials(tenant_id)
         # Rate limit & supressão
         limiter = RateLimiter(
             tenant,
@@ -102,7 +146,13 @@ class MetaCloudProvider:
             "text": {"preview_url": False, "body": text[:4096]},
         }
         try:
-            r = self._post_with_retry(self._messages_url(), payload)
+            url = f"{self.api_base}/{phone_number_id}/messages"
+            prev = self.token
+            try:
+                self.token = token
+                r = self._post_with_retry(url, payload)
+            finally:
+                self.token = prev
             data = r.json()
             provider_id = None
             try:
@@ -154,6 +204,7 @@ class MetaCloudProvider:
         tenant_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         tenant = tenant_id or "0"
+        token, phone_number_id = self._resolve_credentials(tenant_id)
         limiter = RateLimiter(
             tenant,
             por_contato_interval_s=settings.WA_RATE_LIMIT_PER_CONTACT_SECONDS,
@@ -191,7 +242,14 @@ class MetaCloudProvider:
         if components:
             payload["template"]["components"] = components
         try:
-            r = self._post_with_retry(self._messages_url(), payload)
+            url = f"{self.api_base}/{phone_number_id}/messages"
+            # Temporarily override token for this request
+            prev = self.token
+            try:
+                self.token = token
+                r = self._post_with_retry(url, payload)
+            finally:
+                self.token = prev
             data = r.json()
             provider_id = None
             try:
@@ -240,5 +298,5 @@ class MetaCloudProvider:
             "status": "read",
             "message_id": message_id,
         }
-        r = self._post_with_retry(self._messages_url(), payload)
+        r = self._post_with_retry(f"{self.api_base}/{self.phone_number_id}/messages", payload)
         return r.json()

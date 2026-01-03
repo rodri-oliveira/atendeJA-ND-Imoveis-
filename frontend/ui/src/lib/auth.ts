@@ -9,13 +9,17 @@ export function getToken(): string | null {
 export function setToken(token: string) {
   try {
     localStorage.setItem('auth_token', token)
-  } catch {}
+  } catch {
+    // ignore
+  }
 }
 
 export function clearToken() {
   try {
     localStorage.removeItem('auth_token')
-  } catch {}
+  } catch {
+    // ignore
+  }
 }
 
 export function isAuthenticated(): boolean {
@@ -31,6 +35,22 @@ export async function apiFetch(input: string, init: RequestInit = {}): Promise<R
   if (url.startsWith('/api/')) {
     const token = getToken()
     if (token) headers.set('Authorization', `Bearer ${token}`)
+
+    try {
+      const tid = localStorage.getItem('ui_tenant_id')
+      if (tid) headers.set('X-Tenant-Id', tid)
+    } catch {
+      // ignore
+    }
+  }
+
+  if (url.startsWith('/super/')) {
+    try {
+      const key = localStorage.getItem('ui_super_admin_key')
+      if (key) headers.set('X-Super-Admin-Key', key)
+    } catch {
+      // ignore
+    }
   }
 
   return fetch(url, { ...init, headers })

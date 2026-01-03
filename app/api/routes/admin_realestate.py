@@ -1,8 +1,9 @@
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from pydantic import BaseModel, Field
 from typing import Literal
+
 from app.api.deps import require_role_admin
-from app.repositories.db import SessionLocal
+from app.api.deps import require_active_tenant
 from app.api.deps import get_db
 from sqlalchemy import select, func, delete
 from app.domain.realestate import models as re_models
@@ -25,18 +26,12 @@ from app.domain.realestate.services.property_service import (
     hard_delete_property,
 )
 from app.messaging.provider import get_provider
-
+from app.repositories.models import Tenant
 
 router = APIRouter(dependencies=[Depends(require_role_admin)])
 
 # Registro simples em memória para tarefas assíncronas (MVP)
 TASKS: dict[str, dict] = {}
-
-
-def _get_or_create_default_tenant_admin(db: Session):
-    from app.api.routes.admin import _get_or_create_default_tenant
-
-    return _get_or_create_default_tenant(db)
 
 
 def _normalize_wa_id(raw: str) -> str:
@@ -85,15 +80,19 @@ class BookingTemplateOut(BaseModel):
 
 
 @router.get("/booking/recipients", response_model=BookingRecipientsOut)
-def re_booking_get_recipients(db: Session = Depends(get_db)):
-    tenant = _get_or_create_default_tenant_admin(db)
+def re_booking_get_recipients(db: Session = Depends(get_db), tenant_id: int = Depends(require_active_tenant)):
+    tenant = db.get(Tenant, int(tenant_id))
+    if not tenant:
+        raise HTTPException(status_code=404, detail="tenant_not_found")
     current = dict(getattr(tenant, "settings_json", {}) or {})
     return BookingRecipientsOut(recipients=_get_booking_recipients(current))
 
 
 @router.put("/booking/recipients", response_model=BookingRecipientsOut)
-def re_booking_set_recipients(payload: BookingRecipientsIn, db: Session = Depends(get_db)):
-    tenant = _get_or_create_default_tenant_admin(db)
+def re_booking_set_recipients(payload: BookingRecipientsIn, db: Session = Depends(get_db), tenant_id: int = Depends(require_active_tenant)):
+    tenant = db.get(Tenant, int(tenant_id))
+    if not tenant:
+        raise HTTPException(status_code=404, detail="tenant_not_found")
     current = dict(getattr(tenant, "settings_json", {}) or {})
     recipients = sorted({
         _normalize_wa_id(x) for x in (payload.recipients or []) if _normalize_wa_id(x)
@@ -107,15 +106,19 @@ def re_booking_set_recipients(payload: BookingRecipientsIn, db: Session = Depend
 
 
 @router.get("/booking/template", response_model=BookingTemplateOut)
-def re_booking_get_template(db: Session = Depends(get_db)):
-    tenant = _get_or_create_default_tenant_admin(db)
+def re_booking_get_template(db: Session = Depends(get_db), tenant_id: int = Depends(require_active_tenant)):
+    tenant = db.get(Tenant, int(tenant_id))
+    if not tenant:
+        raise HTTPException(status_code=404, detail="tenant_not_found")
     current = dict(getattr(tenant, "settings_json", {}) or {})
     return BookingTemplateOut(template_name=_get_booking_template_name(current))
 
 
 @router.put("/booking/template", response_model=BookingTemplateOut)
-def re_booking_set_template(payload: BookingTemplateIn, db: Session = Depends(get_db)):
-    tenant = _get_or_create_default_tenant_admin(db)
+def re_booking_set_template(payload: BookingTemplateIn, db: Session = Depends(get_db), tenant_id: int = Depends(require_active_tenant)):
+    tenant = db.get(Tenant, int(tenant_id))
+    if not tenant:
+        raise HTTPException(status_code=404, detail="tenant_not_found")
     current = dict(getattr(tenant, "settings_json", {}) or {})
     name = (payload.template_name or "").strip() or None
     current["booking_notification_template"] = name
@@ -163,11 +166,12 @@ class VisitListOut(BaseModel):
 @router.get("/visits", response_model=list[VisitListOut])
 def re_list_visits(
     db: Session = Depends(get_db),
+    tenant_id: int = Depends(require_active_tenant),
     status: str | None = None,
     limit: int = 50,
     offset: int = 0,
 ):
-    q = db.query(re_models.VisitSchedule)
+    q = db.query(re_models.VisitSchedule).filter(re_models.VisitSchedule.tenant_id == int(tenant_id))
     if status:
         q = q.filter(re_models.VisitSchedule.status == status)
     rows = (
@@ -192,7 +196,7 @@ def re_list_visits(
 
 
 @router.post("/visits/{visit_id}/confirm", response_model=ConfirmVisitOut)
-def re_confirm_visit(visit_id: int, db: Session = Depends(get_db)):
+def re_confirm_visit(visit_id: int, db: Session = Depends(get_db), tenant_id: int = Depends(require_active_tenant)):
     from app.services.visit_service import VisitService
 
     try:
@@ -200,10 +204,27 @@ def re_confirm_visit(visit_id: int, db: Session = Depends(get_db)):
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
-    lead = db.get(re_models.Lead, int(visit.lead_id)) if getattr(visit, "lead_id", None) else None
-    prop = db.get(re_models.Property, int(visit.property_id)) if getattr(visit, "property_id", None) else None
+    if int(getattr(visit, "tenant_id", 0) or 0) != int(tenant_id):
+        raise HTTPException(status_code=404, detail="visit_not_found")
 
-    tenant = _get_or_create_default_tenant_admin(db)
+    lead = (
+        db.query(re_models.Lead)
+        .filter(re_models.Lead.tenant_id == int(tenant_id), re_models.Lead.id == int(visit.lead_id))
+        .first()
+        if getattr(visit, "lead_id", None)
+        else None
+    )
+    prop = (
+        db.query(re_models.Property)
+        .filter(re_models.Property.tenant_id == int(tenant_id), re_models.Property.id == int(visit.property_id))
+        .first()
+        if getattr(visit, "property_id", None)
+        else None
+    )
+
+    tenant = db.get(Tenant, int(tenant_id))
+    if not tenant:
+        raise HTTPException(status_code=404, detail="tenant_not_found")
     settings_json = dict(getattr(tenant, "settings_json", {}) or {})
     recipients = _get_booking_recipients(settings_json)
     template_name = _get_booking_template_name(settings_json)
@@ -247,8 +268,20 @@ class ReorderIn(BaseModel):
 
 
 @router.delete("/imoveis/{property_id}/imagens/{image_id}")
-def admin_delete_image(property_id: int, image_id: int, db: Session = Depends(get_db)):
+def admin_delete_image(
+    property_id: int,
+    image_id: int,
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(require_active_tenant),
+):
     try:
+        prop = (
+            db.query(re_models.Property)
+            .filter(re_models.Property.tenant_id == int(tenant_id), re_models.Property.id == int(property_id))
+            .first()
+        )
+        if not prop:
+            raise HTTPException(status_code=404, detail="property_not_found")
         res = delete_property_image(db, property_id, image_id)
         return res
     except ValueError as e:
@@ -256,8 +289,20 @@ def admin_delete_image(property_id: int, image_id: int, db: Session = Depends(ge
 
 
 @router.patch("/imoveis/{property_id}/imagens/{image_id}/capa")
-def admin_set_cover(property_id: int, image_id: int, db: Session = Depends(get_db)):
+def admin_set_cover(
+    property_id: int,
+    image_id: int,
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(require_active_tenant),
+):
     try:
+        prop = (
+            db.query(re_models.Property)
+            .filter(re_models.Property.tenant_id == int(tenant_id), re_models.Property.id == int(property_id))
+            .first()
+        )
+        if not prop:
+            raise HTTPException(status_code=404, detail="property_not_found")
         res = set_property_cover(db, property_id, image_id)
         return res
     except ValueError as e:
@@ -265,8 +310,20 @@ def admin_set_cover(property_id: int, image_id: int, db: Session = Depends(get_d
 
 
 @router.post("/imoveis/{property_id}/imagens/reorder")
-def admin_reorder_images(property_id: int, payload: ReorderIn, db: Session = Depends(get_db)):
+def admin_reorder_images(
+    property_id: int,
+    payload: ReorderIn,
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(require_active_tenant),
+):
     try:
+        prop = (
+            db.query(re_models.Property)
+            .filter(re_models.Property.tenant_id == int(tenant_id), re_models.Property.id == int(property_id))
+            .first()
+        )
+        if not prop:
+            raise HTTPException(status_code=404, detail="property_not_found")
         res = reorder_property_images(db, property_id, payload.items or [])
         return res
     except ValueError as e:
@@ -293,15 +350,12 @@ class BackfillRefCodeOut(BaseModel):
 
 
 @router.post("/properties/backfill_ref_code", response_model=BackfillRefCodeOut)
-def re_properties_backfill_ref_code(payload: BackfillRefCodeIn):
-    """
-    Preenche `ref_code` para imóveis cujo `external_id` contém código no padrão ND IMÓVEIS (ex.: A738),
-    quando `ref_code` estiver vazio. Evita duplicidades por tenant.
-    """
+def re_properties_backfill_ref_code(payload: BackfillRefCodeIn, tenant_id: int = Depends(require_active_tenant)):
     try:
-        from app.api.routes.admin import _get_or_create_default_tenant
         with SessionLocal() as db:
-            tenant = _get_or_create_default_tenant(db)
+            tenant = db.get(Tenant, int(tenant_id))
+            if not tenant:
+                raise HTTPException(status_code=404, detail="tenant_not_found")
             stmt = (
                 select(
                     re_models.Property.id,
@@ -351,7 +405,7 @@ def re_properties_backfill_ref_code(payload: BackfillRefCodeIn):
                     continue
                 # Atualizar ref_code
                 prop = db.get(re_models.Property, int(pid))
-                if prop:
+                if prop and int(getattr(prop, "tenant_id", 0) or 0) == int(tenant.id):
                     prop.ref_code = eid
                     try:
                         db.add(prop)
@@ -371,26 +425,31 @@ def re_properties_backfill_ref_code(payload: BackfillRefCodeIn):
 
 
 @router.patch("/imoveis/{property_id}/ativo")
-def admin_set_active(property_id: int, payload: SetActiveIn, db: Session = Depends(get_db)):
+def admin_set_active(
+    property_id: int,
+    payload: SetActiveIn,
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(require_active_tenant),
+):
     try:
-        prop = set_active_property(db, property_id, payload.ativo)
+        prop = set_active_property(db, property_id, payload.ativo, tenant_id=int(tenant_id))
         return {"ok": True, "id": prop.id, "ativo": bool(prop.is_active)}
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
 
 @router.delete("/imoveis/{property_id}")
-def admin_soft_delete_property(property_id: int, db: Session = Depends(get_db)):
+def admin_soft_delete_property(property_id: int, db: Session = Depends(get_db), tenant_id: int = Depends(require_active_tenant)):
     try:
-        return soft_delete_property(db, property_id)
+        return soft_delete_property(db, property_id, tenant_id=int(tenant_id))
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
 
 @router.delete("/imoveis/{property_id}/hard")
-def admin_hard_delete_property(property_id: int, db: Session = Depends(get_db)):
+def admin_hard_delete_property(property_id: int, db: Session = Depends(get_db), tenant_id: int = Depends(require_active_tenant)):
     try:
-        return hard_delete_property(db, property_id)
+        return hard_delete_property(db, property_id, tenant_id=int(tenant_id))
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
@@ -403,10 +462,9 @@ class BulkDeleteIn(BaseModel):
 
 
 @router.post("/imoveis/bulk-delete")
-def admin_bulk_delete_properties(payload: BulkDeleteIn, db: Session = Depends(get_db)):
+def admin_bulk_delete_properties(payload: BulkDeleteIn, db: Session = Depends(get_db), tenant_id: int = Depends(require_active_tenant)):
     try:
-        from app.api.routes.admin import _get_or_create_default_tenant
-        tenant = _get_or_create_default_tenant(db)
+        tenant = db.get(Tenant, int(tenant_id))
         term_title = (payload.title_contains or "").strip()
         term_desc = (payload.description_contains or "").strip()
         if not term_title and not term_desc:
@@ -421,9 +479,9 @@ def admin_bulk_delete_properties(payload: BulkDeleteIn, db: Session = Depends(ge
         for p in props:
             try:
                 if (payload.mode or "soft").lower() == "hard":
-                    hard_delete_property(db, int(p.id))
+                    hard_delete_property(db, int(p.id), tenant_id=int(tenant_id))
                 else:
-                    soft_delete_property(db, int(p.id))
+                    soft_delete_property(db, int(p.id), tenant_id=int(tenant_id))
                 deleted += 1
             except Exception:
                 continue
@@ -434,244 +492,13 @@ def admin_bulk_delete_properties(payload: BulkDeleteIn, db: Session = Depends(ge
         raise HTTPException(status_code=400, detail={"code": "bulk_delete_error", "message": str(e)})
 
 
-# Em desenvolvimento, usamos http para evitar problemas de cadeia SSL no Windows.
-# Em produção, prefira https.
-ND_BASE = "http://www.ndimoveis.com.br"
-
-
-class NDCheckIn(BaseModel):
-    finalidade: Literal["venda", "locacao", "both"] = Field(default="both")
-    page_start: int = Field(default=1, ge=1)
-    max_pages: int = Field(default=1, ge=1, le=50)
-    per_detail: bool = True
-    throttle_ms: int = Field(default=400, ge=0)
-
-
-class NDCheckOut(BaseModel):
-    discovered: int
-    new: int
-    existing: int
-    new_items: list[dict]
-    existing_items: list[dict]
-
-
-def _nd_list_url_candidates(finalidade: str, page: int) -> list[str]:
-    # Delega ao adapter centralizado
-    return nd.list_url_candidates(finalidade, page)
-
-
-def _extract_detail_links(html: str) -> list[str]:
-    # Usa BeautifulSoup via adapter para maior robustez
-    return nd.discover_list_links(html)
-
-
-def _extract_external_id_from_detail(html: str) -> str | None:
-    # Mantemos como fallback: o adapter já tenta extrair no parse_detail
-    m = re.search(r"Código:\s*([A-Za-z]\d{2,})", html, flags=re.IGNORECASE)
-    if m:
-        return m.group(1).strip()
-    m2 = re.search(r"#([A-Za-z]\d{2,})", html)
-    if m2:
-        return m2.group(1).strip()
-    return None
-
-
-@router.post("/import/ndimoveis/check", response_model=NDCheckOut)
-def re_nd_check(payload: NDCheckIn, db: Session = Depends(get_db)):
-    try:
-        fins = ["venda", "locacao"] if payload.finalidade == "both" else [payload.finalidade]
-        discovered_urls: list[str] = []
-
-        # Nota: em alguns ambientes Windows, a cadeia de certificados pode não estar instalada
-        # corretamente, causando CERTIFICATE_VERIFY_FAILED. Para fins de desenvolvimento,
-        # desativamos a verificação SSL aqui. Em produção, habilite verify=True.
-        with httpx.Client(
-            timeout=20.0,
-            headers={"User-Agent": "AtendeJA-Bot/1.0"},
-            verify=False,
-            follow_redirects=True,
-        ) as client:
-            for fin in fins:
-                for page in range(payload.page_start, payload.page_start + payload.max_pages):
-                    candidates = _nd_list_url_candidates(fin, page)
-                    page_links: list[str] = []
-                    for url in candidates:
-                        try:
-                            r = client.get(url)
-                            if r.status_code != 200:
-                                continue
-                            links = _extract_detail_links(r.text)
-                            page_links.extend(links)
-                            if links:
-                                # Achou links nesta variação, segue
-                                break
-                        except Exception:
-                            continue
-                        finally:
-                            time.sleep(payload.throttle_ms / 1000.0)
-                    if not page_links and page == payload.page_start and payload.page_start == 1:
-                        # Fallback: tentar homepage capturar destaques
-                        try:
-                            hr = client.get(f"{ND_BASE}/")
-                            if hr.status_code == 200:
-                                page_links = _extract_detail_links(hr.text)
-                        except Exception:
-                            pass
-                    if not page_links:
-                        break
-                    discovered_urls.extend(page_links)
-
-            discovered_urls = sorted(list({u for u in discovered_urls}))
-            new_items: list[dict] = []
-            existing_items: list[dict] = []
-
-            # garante tenant default via nome em settings (já usado no admin.py)
-            from app.api.routes.admin import _get_or_create_default_tenant  # evitar duplicação
-
-            tenant = _get_or_create_default_tenant(db)
-            for url in discovered_urls:
-                ext_id: str | None = None
-                if payload.per_detail:
-                    try:
-                        dr = client.get(url)
-                        if dr.status_code == 200:
-                            dto = nd.parse_detail(dr.text, url)
-                            ext_id = dto.external_id
-                    except Exception:
-                        ext_id = None
-                    time.sleep(payload.throttle_ms / 1000.0)
-
-                item = {"url": url}
-                if ext_id:
-                    item["external_id"] = ext_id
-                    stmt = select(re_models.Property.id).where(
-                        re_models.Property.tenant_id == tenant.id,
-                        re_models.Property.source == "ndimoveis",
-                        re_models.Property.external_id == ext_id,
-                    )
-                    exists = db.execute(stmt).scalar_one_or_none()
-                    (existing_items if exists else new_items).append(item)
-                else:
-                    new_items.append(item)
-
-        return NDCheckOut(
-            discovered=len(discovered_urls),
-            new=len(new_items),
-            existing=len(existing_items),
-            new_items=new_items[:200],
-            existing_items=existing_items[:200],
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=400, detail={"code": "nd_check_error", "message": str(e)})
-
-
-class NDRunIn(BaseModel):
-    finalidade: Literal["venda", "locacao", "both"] = Field(default="both")
-    page_start: int = Field(default=1, ge=1)
-    max_pages: int = Field(default=2, ge=1, le=50)
-    limit_properties: int | None = Field(default=10, ge=1, le=200)
-    throttle_ms: int = Field(default=400, ge=0)
-
-
-class NDRunOut(BaseModel):
-    created: int
-    updated: int
-    images_created: int
-    processed: int
-    sampled_external_ids: list[str]
-
-
-@router.post("/import/ndimoveis/run", response_model=NDRunOut)
-def re_nd_run(payload: NDRunIn, db: Session = Depends(get_db)):
-    try:
-        fins = ["venda", "locacao"] if payload.finalidade == "both" else [payload.finalidade]
-        discovered_urls: list[str] = []
-        with httpx.Client(
-            timeout=25.0,
-            headers={"User-Agent": "AtendeJA-Bot/1.0"},
-            verify=False,
-            follow_redirects=True,
-        ) as client:
-            for fin in fins:
-                for page in range(payload.page_start, payload.page_start + payload.max_pages):
-                    candidates = _nd_list_url_candidates(fin, page)
-                    page_links: list[str] = []
-                    for url in candidates:
-                        try:
-                            r = client.get(url)
-                            if r.status_code != 200:
-                                continue
-                            links = _extract_detail_links(r.text)
-                            page_links.extend(links)
-                            if links:
-                                break
-                        except Exception:
-                            continue
-                        finally:
-                            time.sleep(payload.throttle_ms / 1000.0)
-
-                    if not page_links and page == payload.page_start and payload.page_start == 1:
-                        try:
-                            hr = client.get(f"{ND_BASE}/")
-                            if hr.status_code == 200:
-                                page_links = _extract_detail_links(hr.text)
-                        except Exception:
-                            pass
-                    if not page_links:
-                        break
-                    discovered_urls.extend(page_links)
-
-            # Limitar quantos processar
-            unique_urls = sorted(list({u for u in discovered_urls}))
-            if payload.limit_properties:
-                unique_urls = unique_urls[: payload.limit_properties]
-
-            from app.api.routes.admin import _get_or_create_default_tenant  # reuse
-            created = updated = images_created = processed = 0
-            sample_ids: list[str] = []
-
-            tenant = _get_or_create_default_tenant(db)
-            for url in unique_urls:
-                # Detalhe
-                try:
-                    dr = client.get(url)
-                    if dr.status_code != 200:
-                        continue
-                    html = dr.text
-                except Exception:
-                    continue
-                time.sleep(payload.throttle_ms / 1000.0)
-
-                dto = nd.parse_detail(html, url)
-                if dto.external_id:
-                    sample_ids.append(dto.external_id)
-
-                status, imgs_created = upsert_property(db, tenant.id, dto)
-                if status == "created":
-                    created += 1
-                else:
-                    updated += 1
-                images_created += imgs_created
-                processed += 1
-
-            db.commit()
-
-        return NDRunOut(
-            created=created,
-            updated=updated,
-            images_created=images_created,
-            processed=processed,
-            sampled_external_ids=sample_ids[:20],
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=400, detail={"code": "nd_run_error", "message": str(e)})
-
-
 # ====== Enfileiramento assíncrono (MVP) ======
+class NDRunIn(BaseModel):
+    tenant_id: int
+    urls: list[str]
+    throttle_ms: int = 250
+
+
 class EnqueueIn(NDRunIn):
     pass
 
@@ -722,11 +549,10 @@ class RECountOut(BaseModel):
 
 
 @router.get("/properties/count", response_model=RECountOut)
-def re_properties_count(source: str = "ndimoveis"):
+def re_properties_count(source: str = "ndimoveis", tenant_id: int = Depends(require_active_tenant)):
     try:
-        from app.api.routes.admin import _get_or_create_default_tenant
         with SessionLocal() as db:
-            tenant = _get_or_create_default_tenant(db)
+            tenant = db.get(Tenant, int(tenant_id))
             stmt = select(re_models.Property).where(re_models.Property.tenant_id == tenant.id)
             if source:
                 stmt = stmt.where(re_models.Property.source == source)
@@ -752,11 +578,10 @@ class RESampleOut(BaseModel):
 
 
 @router.get("/properties/sample", response_model=RESampleOut)
-def re_properties_sample(source: str = "ndimoveis", limit: int = 10, order: Literal["created", "updated"] = "created"):
+def re_properties_sample(source: str = "ndimoveis", limit: int = 10, order: Literal["created", "updated"] = "created", tenant_id: int = Depends(require_active_tenant)):
     try:
-        from app.api.routes.admin import _get_or_create_default_tenant
         with SessionLocal() as db:
-            tenant = _get_or_create_default_tenant(db)
+            tenant = db.get(Tenant, int(tenant_id))
             stmt = (
                 select(
                     re_models.Property.id,
@@ -796,10 +621,14 @@ class PropertyMetaOut(BaseModel):
 
 
 @router.get("/properties/{property_id}/meta", response_model=PropertyMetaOut)
-def re_property_meta(property_id: int):
+def re_property_meta(property_id: int, tenant_id: int = Depends(require_active_tenant)):
     try:
         with SessionLocal() as db:
-            prop = db.get(re_models.Property, property_id)
+            prop = (
+                db.query(re_models.Property)
+                .filter(re_models.Property.tenant_id == int(tenant_id), re_models.Property.id == int(property_id))
+                .first()
+            )
             if not prop:
                 raise HTTPException(status_code=404, detail="property_not_found")
             return PropertyMetaOut(id=prop.id, external_id=prop.external_id, source=prop.source, title=prop.title)
@@ -820,10 +649,14 @@ class PropertyInternalOut(BaseModel):
 
 
 @router.get("/properties/{property_id}/internal", response_model=PropertyInternalOut)
-def re_property_internal(property_id: int):
+def re_property_internal(property_id: int, tenant_id: int = Depends(require_active_tenant)):
     try:
         with SessionLocal() as db:
-            prop = db.get(re_models.Property, property_id)
+            prop = (
+                db.query(re_models.Property)
+                .filter(re_models.Property.tenant_id == int(tenant_id), re_models.Property.id == int(property_id))
+                .first()
+            )
             if not prop:
                 raise HTTPException(status_code=404, detail="property_not_found")
             return PropertyInternalOut(
@@ -858,20 +691,18 @@ class RECheckByExternalOut(BaseModel):
 
 
 @router.post("/properties/check_by_external", response_model=RECheckByExternalOut)
-def re_properties_check_by_external(payload: RECheckByExternalIn):
+def re_properties_check_by_external(payload: RECheckByExternalIn, tenant_id: int = Depends(require_active_tenant)):
     try:
-        from app.api.routes.admin import _get_or_create_default_tenant
         out: list[RECheckItem] = []
         ext_ids = [str(e).strip() for e in (payload.external_ids or []) if str(e).strip()]
         if not ext_ids:
             return RECheckByExternalOut(items=[])
         with SessionLocal() as db:
-            tenant = _get_or_create_default_tenant(db)
             for eid in ext_ids:
                 stmt = (
                     select(re_models.Property)
                     .where(
-                        re_models.Property.tenant_id == tenant.id,
+                        re_models.Property.tenant_id == int(tenant_id),
                         re_models.Property.source == "ndimoveis",
                         re_models.Property.external_id == eid,
                     )
@@ -914,11 +745,13 @@ class RepairByIdOut(BaseModel):
 
 
 @router.post("/import/ndimoveis/repair_by_id", response_model=RepairByIdOut)
-def re_nd_repair_by_id(payload: RepairByIdIn, db: Session = Depends(get_db)):
+def re_nd_repair_by_id(payload: RepairByIdIn, db: Session = Depends(get_db), tenant_id: int = Depends(require_active_tenant)):
     try:
-        from app.api.routes.admin import _get_or_create_default_tenant
-        tenant = _get_or_create_default_tenant(db)
-        prop = db.get(re_models.Property, payload.property_id)
+        prop = (
+            db.query(re_models.Property)
+            .filter(re_models.Property.tenant_id == int(tenant_id), re_models.Property.id == int(payload.property_id))
+            .first()
+        )
         if not prop:
             raise HTTPException(status_code=404, detail="property_not_found")
         if (prop.source or "").lower() != "ndimoveis":
@@ -948,7 +781,7 @@ def re_nd_repair_by_id(payload: RepairByIdIn, db: Session = Depends(get_db)):
                                     continue
                                 dto = nd.parse_detail(dr.text, durl)
                                 if dto.external_id and str(dto.external_id) == target_eid:
-                                    st, imgs = upsert_property(db, tenant.id, dto)
+                                    st, imgs = upsert_property(db, int(tenant_id), dto)
                                     db.commit()
                                     return RepairByIdOut(repaired=True, images_created=imgs, external_id=target_eid, url=durl)
                             except Exception:
@@ -978,11 +811,12 @@ class RepairPricesOut(BaseModel):
 
 
 @router.post("/repair/prices", response_model=RepairPricesOut)
-def re_repair_prices(payload: RepairPricesIn):
+def re_repair_prices(payload: RepairPricesIn, tenant_id: int = Depends(require_active_tenant)):
     try:
-        from app.api.routes.admin import _get_or_create_default_tenant
         with SessionLocal() as db:
-            tenant = _get_or_create_default_tenant(db)
+            tenant = db.get(Tenant, int(tenant_id))
+            if not tenant:
+                raise HTTPException(status_code=404, detail="tenant_not_found")
             # Seleciona últimos N imóveis pela data de atualização (prioridade) do source
             stmt = (
                 select(
@@ -1047,8 +881,8 @@ def re_repair_prices(payload: RepairPricesIn):
                     # Mesmo sem preço válido, ainda podemos corrigir finalidade
                     pass
                 stmt = select(re_models.Property).where(
-                    re_models.Property.tenant_id == tenant.id,  # type: ignore
-                    re_models.Property.source == payload.source,  # type: ignore
+                    re_models.Property.tenant_id == tenant.id,
+                    re_models.Property.source == payload.source,
                     re_models.Property.external_id == eid,
                 )
                 prop = db.execute(stmt).scalar_one_or_none()
@@ -1098,11 +932,12 @@ class RepairPurposeOut(BaseModel):
 
 
 @router.post("/repair/purpose_from_title", response_model=RepairPurposeOut)
-def re_repair_purpose_from_title(payload: RepairPurposeIn):
+def re_repair_purpose_from_title(payload: RepairPurposeIn, tenant_id: int = Depends(require_active_tenant)):
     try:
-        from app.api.routes.admin import _get_or_create_default_tenant
         with SessionLocal() as db:
-            tenant = _get_or_create_default_tenant(db)
+            tenant = db.get(Tenant, int(tenant_id))
+            if not tenant:
+                raise HTTPException(status_code=404, detail="tenant_not_found")
             stmt = (
                 select(
                     re_models.Property.id,
@@ -1112,8 +947,8 @@ def re_repair_purpose_from_title(payload: RepairPurposeIn):
                     re_models.Property.address_state,
                 )
                 .where(
-                    re_models.Property.tenant_id == tenant.id,  # type: ignore
-                    re_models.Property.source == payload.source,  # type: ignore
+                    re_models.Property.tenant_id == tenant.id,
+                    re_models.Property.source == payload.source,
                 )
                 .order_by(re_models.Property.updated_at.desc())
                 .limit(payload.limit)
@@ -1153,7 +988,11 @@ def re_repair_purpose_from_title(payload: RepairPurposeIn):
                     except Exception:
                         unchanged += 1
                         continue
-                    prop = db.get(re_models.Property, rid)
+                    prop = (
+                        db.query(re_models.Property)
+                        .filter(re_models.Property.tenant_id == tenant.id, re_models.Property.id == int(rid))
+                        .first()
+                    )
                     if not prop:
                         unchanged += 1
                         continue
@@ -1228,22 +1067,23 @@ def _is_valid_image_url(url: str | None) -> bool:
 
 
 @router.post("/images/repair_invalid", response_model=RepairImagesOut)
-def re_repair_invalid_images(payload: RepairImagesIn):
+def re_repair_invalid_images(payload: RepairImagesIn, tenant_id: int = Depends(require_active_tenant)):
     """
     Remove imagens com URLs inválidas (sem domínio válido) e promove 
     uma imagem válida como capa quando necessário.
     """
     try:
-        from app.api.routes.admin import _get_or_create_default_tenant
         with SessionLocal() as db:
-            tenant = _get_or_create_default_tenant(db)
+            tenant = db.get(Tenant, int(tenant_id))
+            if not tenant:
+                raise HTTPException(status_code=404, detail="tenant_not_found")
             
             # Buscar imóveis
             stmt = (
                 select(re_models.Property.id)
                 .where(
-                    re_models.Property.tenant_id == tenant.id,  # type: ignore
-                    re_models.Property.source == payload.source,  # type: ignore
+                    re_models.Property.tenant_id == tenant.id,
+                    re_models.Property.source == payload.source,
                 )
                 .order_by(re_models.Property.updated_at.desc())
                 .limit(payload.limit)
@@ -1302,7 +1142,11 @@ def re_repair_invalid_images(payload: RepairImagesIn):
                 if property_changed or payload.dry_run:
                     properties_updated += 1
                     if len(examples) < 10:
-                        prop = db.get(re_models.Property, prop_id)
+                        prop = (
+                            db.query(re_models.Property)
+                            .filter(re_models.Property.tenant_id == tenant.id, re_models.Property.id == int(prop_id))
+                            .first()
+                        )
                         examples.append({
                             "property_id": prop_id,
                             "title": prop.title if prop else None,
@@ -1343,16 +1187,17 @@ class REResetOut(BaseModel):
 
 
 @router.post("/properties/reset", response_model=REResetOut)
-def re_properties_reset(payload: REResetIn):
+def re_properties_reset(payload: REResetIn, tenant_id: int = Depends(require_active_tenant)):
     """
     Remove TODOS os imóveis e imagens da fonte informada apenas para o tenant padrão.
     - dry_run=True: apenas retorna as contagens (não deleta nada)
     - Para executar a exclusão, envie confirm="CONFIRM" e dry_run=False
     """
     try:
-        from app.api.routes.admin import _get_or_create_default_tenant
         with SessionLocal() as db:
-            tenant = _get_or_create_default_tenant(db)
+            tenant = db.get(Tenant, int(tenant_id))
+            if not tenant:
+                raise HTTPException(status_code=404, detail="tenant_not_found")
 
             # Coletar IDs de imóveis por tenant+source
             p_stmt = (
@@ -1431,16 +1276,17 @@ class NDFromUrlsOut(BaseModel):
 
 
 @router.post("/import/ndimoveis/from_urls", response_model=NDFromUrlsOut)
-def re_nd_import_from_urls(payload: NDFromUrlsIn, db: Session = Depends(get_db)):
+def re_nd_import_from_urls(payload: NDFromUrlsIn, db: Session = Depends(get_db), tenant_id: int = Depends(require_active_tenant)):
     try:
         if not payload.urls:
             return NDFromUrlsOut(created=0, updated=0, images_created=0, processed=0, sampled_external_ids=[], errors=[])
-        from app.api.routes.admin import _get_or_create_default_tenant  # reuse
         created = updated = images_created = processed = 0
         sample_ids: list[str] = []
         errs: list[dict] = []
         with httpx.Client(timeout=25.0, headers={"User-Agent": "AtendeJA-Bot/1.0"}, verify=False) as client:
-            tenant = _get_or_create_default_tenant(db)
+            tenant = db.get(Tenant, int(tenant_id))
+            if not tenant:
+                raise HTTPException(status_code=404, detail="tenant_not_found")
             for url in payload.urls:
                 try:
                     r = client.get(url)
@@ -1450,7 +1296,7 @@ def re_nd_import_from_urls(payload: NDFromUrlsIn, db: Session = Depends(get_db))
                     dto = nd.parse_detail(r.text, url)
                     if dto.external_id:
                         sample_ids.append(dto.external_id)
-                    st, imgs = upsert_property(db, tenant.id, dto)
+                    st, imgs = upsert_property(db, int(tenant.id), dto)
                     if st == "created":
                         created += 1
                     else:
@@ -1475,6 +1321,7 @@ def re_nd_import_from_urls(payload: NDFromUrlsIn, db: Session = Depends(get_db))
     except Exception as e:
         raise HTTPException(status_code=400, detail={"code": "nd_from_urls_error", "message": str(e)})
 
+
 # ====== Importar (SEGURO) apenas descrição + link por URLs (ND Imóveis) ======
 class NDFromUrlsSafeIn(BaseModel):
     urls: list[str]
@@ -1495,18 +1342,19 @@ class NDFromUrlsSafeOut(BaseModel):
 
 
 @router.post("/import/ndimoveis/from_urls_safe", response_model=NDFromUrlsSafeOut)
-def re_nd_import_from_urls_safe(payload: NDFromUrlsSafeIn, db: Session = Depends(get_db)):
+def re_nd_import_from_urls_safe(payload: NDFromUrlsSafeIn, db: Session = Depends(get_db), tenant_id: int = Depends(require_active_tenant)):
     """Atualiza SOMENTE description (se vazia por padrão) e address_json.source_url, sem tocar em preço, tipo, imagens."""
     try:
         if not payload.urls:
             return NDFromUrlsSafeOut(processed=0, matched=0, updated_descriptions=0, updated_links=0, not_found=[], errors=[])
-        from app.api.routes.admin import _get_or_create_default_tenant
         processed = matched = upd_desc = upd_link = 0
         not_found: list[str] = []
         errs: list[dict] = []
         with httpx.Client(timeout=25.0, headers={"User-Agent": "AtendeJA-Bot/1.0"}, verify=False) as client:
             with contextlib.nullcontext(db) as db:
-                tenant = _get_or_create_default_tenant(db)
+                tenant = db.get(Tenant, int(tenant_id))
+                if not tenant:
+                    raise HTTPException(status_code=404, detail="tenant_not_found")
                 for url in payload.urls:
                     try:
                         r = client.get(url)
@@ -1550,7 +1398,6 @@ def re_nd_import_from_urls_safe(payload: NDFromUrlsSafeIn, db: Session = Depends
                                     if payload.normalize_ref_url and ext:
                                         canonical_url = f"https://www.ndimoveis.com.br/imovel/?ref={ext}"
                                     data["source_url"] = canonical_url or url
-                                    from app.api.routes.admin import _get_or_create_default_tenant as _get_tenant  # local import reuse
                                     prop = re_models.Property(
                                         tenant_id=tenant.id,
                                         title=title,
@@ -1668,7 +1515,7 @@ class NDBackfillAllOut(BaseModel):
 
 
 @router.post("/import/ndimoveis/backfill_all", response_model=NDBackfillAllOut)
-def re_nd_backfill_all(payload: NDBackfillAllIn, bg: BackgroundTasks, db: Session = Depends(get_db)):
+def re_nd_backfill_all(payload: NDBackfillAllIn, bg: BackgroundTasks, tenant_id: int = Depends(require_active_tenant)):
     """
     Processa TODOS os imóveis da base (source=ndimoveis) em background:
     - Para cada imóvel, busca external_id
@@ -1679,9 +1526,10 @@ def re_nd_backfill_all(payload: NDBackfillAllIn, bg: BackgroundTasks, db: Sessio
     import uuid
     task_id = str(uuid.uuid4())
     
-    from app.api.routes.admin import _get_or_create_default_tenant
-    with contextlib.nullcontext(db) as db:
-        tenant = _get_or_create_default_tenant(db)
+    with SessionLocal() as db:
+        tenant = db.get(Tenant, int(tenant_id))
+        if not tenant:
+            raise HTTPException(status_code=404, detail="tenant_not_found")
         stmt = select(re_models.Property.id, re_models.Property.external_id).where(
             re_models.Property.tenant_id == tenant.id,
             re_models.Property.source == "ndimoveis",
@@ -1746,7 +1594,6 @@ def re_nd_backfill_all(payload: NDBackfillAllIn, bg: BackgroundTasks, db: Sessio
                     
                     # Atualiza via from_urls_safe logic
                     with SessionLocal() as db2:
-                        tenant2 = _get_or_create_default_tenant(db2)
                         try:
                             r = client.get(found_url)
                             if r.status_code != 200:
@@ -1756,7 +1603,7 @@ def re_nd_backfill_all(payload: NDBackfillAllIn, bg: BackgroundTasks, db: Sessio
                             stmt = (
                                 select(re_models.Property)
                                 .where(
-                                    re_models.Property.tenant_id == tenant2.id,
+                                    re_models.Property.tenant_id == tenant.id,
                                     re_models.Property.source == "ndimoveis",
                                     re_models.Property.external_id == ext_id,
                                 )
@@ -1819,11 +1666,12 @@ class BackfillProgressOut(BaseModel):
 
 
 @router.get("/import/ndimoveis/backfill_progress", response_model=BackfillProgressOut)
-def re_nd_backfill_progress(db: Session = Depends(get_db)):
+def re_nd_backfill_progress(db: Session = Depends(get_db), tenant_id: int = Depends(require_active_tenant)):
     """Consulta direta no banco para ver quantos imóveis já têm descrição e source_url preenchidos."""
-    from app.api.routes.admin import _get_or_create_default_tenant
     with contextlib.nullcontext(db) as db:
-        tenant = _get_or_create_default_tenant(db)
+        tenant = db.get(Tenant, int(tenant_id))
+        if not tenant:
+            raise HTTPException(status_code=404, detail="tenant_not_found")
         
         # Total
         total = db.execute(

@@ -426,14 +426,29 @@ def parse_detail(html: str, page_url: str) -> PropertyDTO:
 
     ptype = None
     bt = body_text
-    if re.search(r"Apartamento", bt, re.IGNORECASE):
-        ptype = "apartment"
-    elif re.search(r"Casa|Sobrado", bt, re.IGNORECASE):
-        ptype = "house"
-    elif re.search(r"Sala|Comercial", bt, re.IGNORECASE):
-        ptype = "commercial"
-    elif re.search(r"Terreno|Lote", bt, re.IGNORECASE):
-        ptype = "land"
+
+    # Inferir tipo priorizando o título (menos ruído de menu/rodapé)
+    ttl = (title or "").strip()
+    if ttl:
+        if re.search(r"\b(Casa|Sobrado)\b", ttl, re.IGNORECASE):
+            ptype = "house"
+        elif re.search(r"\b(Apartamento|Apto\.?|Ap\.?\b)\b", ttl, re.IGNORECASE):
+            ptype = "apartment"
+        elif re.search(r"\b(Terreno|Lote)\b", ttl, re.IGNORECASE):
+            ptype = "land"
+        elif re.search(r"\b(Sala|Comercial)\b", ttl, re.IGNORECASE):
+            ptype = "commercial"
+
+    # Fallback: procurar no corpo (ordem evita classificar como apartment por ruído)
+    if ptype is None:
+        if re.search(r"\b(Casa|Sobrado)\b", bt, re.IGNORECASE):
+            ptype = "house"
+        elif re.search(r"\b(Terreno|Lote)\b", bt, re.IGNORECASE):
+            ptype = "land"
+        elif re.search(r"\b(Sala|Comercial)\b", bt, re.IGNORECASE):
+            ptype = "commercial"
+        elif re.search(r"\b(Apartamento|Apto\.?|Ap\.?\b)\b", bt, re.IGNORECASE):
+            ptype = "apartment"
 
     # address / neighborhood / city-state
     address = None

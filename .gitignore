@@ -67,11 +67,15 @@ adapter-wa/package-lock.json
 nd-check*.json
 uploads/
 mcp_*.json
+scripts/.nd_seen_urls_*.json
 *.db-journal
 *.sqlite-journal
 *.sqlite3
 frontend/node_modules/
 frontend/dist/
+
+# node_modules na raiz (evitar ruído caso rode npm/yarn no root)
+node_modules/
 
 # Development scripts and local files
 *.bat

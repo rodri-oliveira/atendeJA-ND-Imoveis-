@@ -64,6 +64,9 @@ class Settings(BaseSettings):
     AUTH_SEED_ADMIN_EMAIL: str = ""
     AUTH_SEED_ADMIN_PASSWORD: str = ""
 
+    # Super Admin (gestão de tenants) – chave de operação
+    SUPER_ADMIN_API_KEY: str = ""
+
     @property
     def DATABASE_URL(self) -> str:
         # Testes: usar SQLite local para isolar e acelerar a suíte

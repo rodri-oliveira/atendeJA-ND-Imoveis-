@@ -12,23 +12,30 @@ type User = {
   is_active: boolean
 }
 
+type InviteOut = {
+  token: string
+  email: string
+  role: Role
+  expires_at: string
+}
+
 export default function UsersAdmin() {
   const [list, setList] = useState<User[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
   const [fullName, setFullName] = useState('')
   const [role, setRole] = useState<Role>('collaborator')
   const [creating, setCreating] = useState(false)
   const [filterRole, setFilterRole] = useState<string>('')
   const [filterActive, setFilterActive] = useState<string>('')
+  const [lastInvite, setLastInvite] = useState<InviteOut | null>(null)
   const authed = isAuthenticated()
   const navigate = useNavigate()
 
   useEffect(() => {
     if (!authed) navigate('/login')
-  }, [authed])
+  }, [authed, navigate])
 
   const queryString = useMemo(() => {
     const p = new URLSearchParams()
@@ -45,35 +52,44 @@ export default function UsersAdmin() {
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const js = await res.json()
       setList(js)
-    } catch (e: any) {
-      setError(e?.message || 'erro')
+    } catch (e) {
+      const err = e as Error
+      setError(err?.message || 'erro')
     } finally {
       setLoading(false)
     }
   }
 
-  useEffect(() => { load() }, [queryString])
+  useEffect(() => { load() }, [queryString]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  async function onCreate(e: React.FormEvent) {
+  async function onInvite(e: React.FormEvent) {
     e.preventDefault()
     setCreating(true)
     setError(null)
     try {
-      const payload = { email, password, full_name: fullName || undefined, role, is_active: true }
-      const res = await apiFetch('/api/admin/users', {
+      const payload = { email, role, expires_hours: 72 }
+      const res = await apiFetch('/api/admin/users/invite', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       })
       if (!res.ok) {
         let msg = `HTTP ${res.status}`
-        try { const js = await res.json(); msg = js?.detail || js?.message || msg } catch {}
+        try {
+          const js = await res.json()
+          msg = js?.detail || js?.message || msg
+        } catch {
+          /* ignore */
+        }
         throw new Error(msg)
       }
-      setEmail(''); setPassword(''); setFullName(''); setRole('collaborator')
+      const js: InviteOut = await res.json()
+      setLastInvite(js)
+      setEmail(''); setFullName(''); setRole('collaborator')
       await load()
-    } catch (e: any) {
-      setError(e?.message || 'falha ao criar usuário')
+    } catch (e) {
+      const err = e as Error
+      setError(err?.message || 'falha ao convidar usuário')
     } finally {
       setCreating(false)
     }
@@ -107,6 +123,31 @@ export default function UsersAdmin() {
     }
   }
 
+
+  async function onResendInvite(u: User) {
+    try {
+      const res = await apiFetch(`/api/admin/users/${u.id}/invite/resend`, { method: 'POST' })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const js: InviteOut = await res.json()
+      setLastInvite(js)
+    } catch (e) {
+      const err = e as Error
+      setError(err?.message || 'falha ao reenviar convite')
+    }
+  }
+
+  async function onReset(u: User) {
+    try {
+      const res = await apiFetch(`/api/admin/users/${u.id}/reset`, { method: 'POST' })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const js: InviteOut = await res.json()
+      setLastInvite(js)
+    } catch (e) {
+      const err = e as Error
+      setError(err?.message || 'falha ao resetar senha')
+    }
+  }
+
   return (
     <section className="space-y-4">
       <header className="flex items-center justify-between">
@@ -115,14 +156,10 @@ export default function UsersAdmin() {
       </header>
 
       <div className="card space-y-4">
-        <form onSubmit={onCreate} className="grid grid-cols-1 md:grid-cols-5 gap-3 items-end">
+        <form onSubmit={onInvite} className="grid grid-cols-1 md:grid-cols-5 gap-3 items-end">
           <div>
             <label className="block text-sm font-medium text-slate-700 mb-2">Email</label>
             <input className="input" type="email" value={email} onChange={e => setEmail(e.target.value)} required />
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-slate-700 mb-2">Senha</label>
-            <input className="input" type="password" value={password} onChange={e => setPassword(e.target.value)} required />
           </div>
           <div>
             <label className="block text-sm font-medium text-slate-700 mb-2">Nome</label>
@@ -136,10 +173,17 @@ export default function UsersAdmin() {
             </select>
           </div>
           <div className="flex items-center gap-2">
-            <button disabled={creating} className="btn btn-primary">{creating ? 'Criando...' : 'Criar'}</button>
+            <button disabled={creating} className="btn btn-primary">{creating ? 'Enviando...' : 'Convidar'}</button>
             <Link className="text-sm text-slate-600 underline hover:text-slate-800" to="/imoveis">Voltar</Link>
           </div>
         </form>
+        {lastInvite && (
+          <div className="text-sm text-slate-700 bg-slate-50 border border-slate-200 rounded-lg p-3">
+            Convite gerado para <strong>{lastInvite.email}</strong> (papel: {lastInvite.role})<br />
+            Token (use na tela de aceite): <code className="break-all">{lastInvite.token}</code><br />
+            Expira em: {new Date(lastInvite.expires_at).toLocaleString()}
+          </div>
+        )}
       </div>
 
       <div className="card space-y-4">
@@ -191,6 +235,8 @@ export default function UsersAdmin() {
                     <td className="py-2 pr-3 flex gap-2">
                       <button onClick={() => onPromote(u)} className="btn btn-primary">{u.role === 'admin' ? 'Rebaixar' : 'Promover'}</button>
                       <button onClick={() => onToggleActive(u)} className={`btn ${u.is_active ? 'btn-warning' : 'btn-success'}`}>{u.is_active ? 'Desativar' : 'Ativar'}</button>
+                      <button onClick={() => onResendInvite(u)} className="btn btn-secondary">Reenviar convite</button>
+                      <button onClick={() => onReset(u)} className="btn btn-secondary">Resetar senha</button>
                     </td>
                   </tr>
                 ))}

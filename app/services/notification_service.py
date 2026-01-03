@@ -6,7 +6,6 @@ import structlog
 
 from sqlalchemy.orm import Session
 
-from app.core.config import settings
 from app.domain.realestate import models as re_models
 from app.messaging.provider import get_provider
 from app.repositories.models import Tenant
@@ -16,17 +15,6 @@ log = structlog.get_logger()
 
 class NotificationService:
     """Serviço para enviar notificações sobre agendamentos."""
-
-    @staticmethod
-    def _get_or_create_default_tenant(db: Session) -> Tenant:
-        tenant_name = settings.DEFAULT_TENANT_ID
-        tenant = db.query(Tenant).filter(Tenant.name == tenant_name).first()
-        if not tenant:
-            tenant = Tenant(name=tenant_name)
-            db.add(tenant)
-            db.commit()
-            db.refresh(tenant)
-        return tenant
 
     @staticmethod
     def _normalize_wa_id(raw: str) -> str:
@@ -73,14 +61,17 @@ class NotificationService:
 
     @staticmethod
     def notify_visit_requested(db: Session, visit_id: int) -> dict:
-        tenant = NotificationService._get_or_create_default_tenant(db)
-        settings_json = dict(getattr(tenant, "settings_json", {}) or {})
-        recipients = NotificationService._get_recipients(settings_json)
-        template_name = NotificationService._get_template_name(settings_json)
-
         visit = db.get(re_models.VisitSchedule, int(visit_id))
         if not visit:
             return {"notified": 0, "errors": [{"error": "visit_not_found"}]}
+
+        tenant = db.get(Tenant, int(getattr(visit, "tenant_id", 0)))
+        if not tenant:
+            return {"notified": 0, "errors": [{"error": "tenant_not_found"}]}
+
+        settings_json = dict(getattr(tenant, "settings_json", {}) or {})
+        recipients = NotificationService._get_recipients(settings_json)
+        template_name = NotificationService._get_template_name(settings_json)
 
         lead = db.get(re_models.Lead, int(getattr(visit, "lead_id"))) if getattr(visit, "lead_id", None) else None
         prop = db.get(re_models.Property, int(getattr(visit, "property_id"))) if getattr(visit, "property_id", None) else None

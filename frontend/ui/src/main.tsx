@@ -6,9 +6,7 @@ import { ConfigProvider } from './config/provider'
 
 const root = createRoot(document.getElementById('root')!)
 root.render(
-  <React.StrictMode>
-    <ConfigProvider>
-      <App />
-    </ConfigProvider>
-  </React.StrictMode>
+  <ConfigProvider>
+    <App />
+  </ConfigProvider>
 )

@@ -33,6 +33,15 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
               actions: data?.kanban?.actions ?? defaultConfig.kanban.actions,
             },
           })
+
+          try {
+            const tenantId = data?.api?.tenantId
+            const superKey = data?.api?.superAdminKey
+            if (typeof tenantId === 'number') localStorage.setItem('ui_tenant_id', String(tenantId))
+            if (typeof superKey === 'string' && superKey.trim()) localStorage.setItem('ui_super_admin_key', superKey.trim())
+          } catch {
+            // ignore
+          }
         }
       } catch {
         // fallback para defaultConfig em caso de erro

@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, 
 from fastapi.responses import Response
  
 from sqlalchemy.orm import Session
-from sqlalchemy import select, func
+from sqlalchemy import select, func, text
 import structlog
 import httpx
 from app.domain.realestate.services.image_service import upload_property_images
@@ -41,8 +41,10 @@ from app.domain.realestate.models import (
     PropertyType,
     Lead,
     PropertyImage,
+    LeadStatus,
 )
 from pydantic import BaseModel
+from app.api.deps import require_active_tenant
 
 router = APIRouter()
 log = structlog.get_logger()
@@ -67,10 +69,16 @@ log = structlog.get_logger()
     summary="Cadastrar imóvel",
     description="Cria um novo imóvel com os atributos básicos (tipo, finalidade, preço e localização)",
 )
-def create_property(payload: ImovelCriar, db: Session = Depends(get_db)):
+def create_property(
+    payload: ImovelCriar,
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(require_active_tenant),
+):
     if settings.RE_READ_ONLY:
         raise HTTPException(status_code=403, detail="read_only_mode")
-    prop = svc_create_property(db, payload.model_dump())
+    data = payload.model_dump()
+    data["tenant_id"] = int(tenant_id)
+    prop = svc_create_property(db, data)
     return ImovelSaida(**to_imovel_dict(prop))
 
 
@@ -81,8 +89,10 @@ def create_property(payload: ImovelCriar, db: Session = Depends(get_db)):
     description="Lista imóveis com filtros comuns: finalidade (compra/locação), tipo, cidade/estado, faixa de preço e dormitórios.",
 )
 def list_properties(
+    request: Request,
     response: Response,
     db: Session = Depends(get_db),
+    tenant_id: int = Depends(require_active_tenant),
     finalidade: Optional[PropertyPurpose] = Query(None),
     tipo: Optional[PropertyType] = Query(None),
     cidade: Optional[str] = Query(None),
@@ -96,6 +106,7 @@ def list_properties(
 ):
     items, total = svc_list_properties(
         db,
+        tenant_id=int(tenant_id),
         finalidade=finalidade,
         tipo=tipo,
         cidade=cidade,
@@ -110,6 +121,7 @@ def list_properties(
     try:
         log.info(
             "re_list_total",
+            query=str(getattr(request.url, "query", "")),
             finalidade=(finalidade.value if finalidade else None),
             tipo=(tipo.value if tipo else None),
             cidade=cidade,
@@ -123,6 +135,30 @@ def list_properties(
         pass
     response.headers["X-Total-Count"] = str(total)
     return [ImovelSaida(**it) for it in items]
+
+
+@router.get(
+    "/imoveis/type-counts",
+    summary="Contagem de imóveis por tipo",
+    description="Retorna contagem de imóveis ativos por tipo (apartment/house/land/commercial) para o tenant atual.",
+)
+def list_property_type_counts(
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(require_active_tenant),
+):
+    rows = db.execute(
+        text(
+            """
+            select type::text as tipo, count(1) as count
+            from re_properties
+            where tenant_id = :tenant_id and is_active = true
+            group by 1
+            order by 2 desc
+            """
+        ),
+        {"tenant_id": int(tenant_id)},
+    ).fetchall()
+    return {"tenant_id": int(tenant_id), "type_counts": [dict(r._mapping) for r in rows]}
 
 
 @router.post(
@@ -139,6 +175,7 @@ def upload_imagens(
     request: Request,
     files: List[UploadFile] = File(..., description="Arquivos de imagem"),
     db: Session = Depends(get_db),
+    tenant_id: int = Depends(require_active_tenant),
 ):
     """Upload local (MVP). Encaminha para o service e retorna DTOs de imagem."""
     if settings.RE_READ_ONLY:
@@ -146,6 +183,8 @@ def upload_imagens(
 
     base_url = str(request.base_url).rstrip("/")
     try:
+        # Ensure property belongs to tenant (service validates by tenant_id via header)
+        _ = svc_get_property(db, property_id, tenant_id=int(tenant_id))
         created = upload_property_images(db, property_id, files, base_url)
         return [ImagemSaida(id=i["id"], url=i["url"], is_capa=bool(i["is_capa"]), ordem=int(i["ordem"])) for i in created]
     except ValueError as e:
@@ -160,11 +199,15 @@ def upload_imagens(
     "/admin/re/imoveis/{property_id}",
     summary="Soft delete de imóvel",
 )
-def admin_soft_delete_property(property_id: int, db: Session = Depends(get_db)):
+def admin_soft_delete_property(
+    property_id: int,
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(require_active_tenant),
+):
     if settings.RE_READ_ONLY:
         raise HTTPException(status_code=403, detail="read_only_mode")
     try:
-        res = svc_soft_delete_property(db, property_id)
+        res = svc_soft_delete_property(db, property_id, tenant_id=int(tenant_id))
         return res
     except ValueError:
         raise HTTPException(status_code=404, detail="property_not_found")
@@ -174,11 +217,15 @@ def admin_soft_delete_property(property_id: int, db: Session = Depends(get_db)):
     "/admin/re/imoveis/{property_id}/hard",
     summary="Hard delete de imóvel",
 )
-def admin_hard_delete_property(property_id: int, db: Session = Depends(get_db)):
+def admin_hard_delete_property(
+    property_id: int,
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(require_active_tenant),
+):
     if settings.RE_READ_ONLY:
         raise HTTPException(status_code=403, detail="read_only_mode")
     try:
-        res = svc_hard_delete_property(db, property_id)
+        res = svc_hard_delete_property(db, property_id, tenant_id=int(tenant_id))
         return res
     except ValueError:
         raise HTTPException(status_code=404, detail="property_not_found")
@@ -194,14 +241,17 @@ class BulkDeleteIn(BaseModel):
     "/admin/re/imoveis/bulk-delete",
     summary="Exclusão em lote por filtros",
 )
-def admin_bulk_delete_properties(payload: BulkDeleteIn, db: Session = Depends(get_db)):
+def admin_bulk_delete_properties(
+    payload: BulkDeleteIn,
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(require_active_tenant),
+):
     if settings.RE_READ_ONLY:
         raise HTTPException(status_code=403, detail="read_only_mode")
     term_title = (payload.title_contains or "").strip()
     term_desc = (payload.description_contains or "").strip()
     if not term_title and not term_desc:
         raise HTTPException(status_code=400, detail="missing_filters")
-    tenant_id = svc_resolve_tenant_id(db)
     q = db.query(Property).filter(Property.tenant_id == tenant_id)
     if term_title:
         q = q.filter(Property.title.ilike(f"%{term_title}%"))
@@ -212,9 +262,9 @@ def admin_bulk_delete_properties(payload: BulkDeleteIn, db: Session = Depends(ge
     for r in rows:
         try:
             if (payload.mode or "soft").lower() == "hard":
-                svc_hard_delete_property(db, int(r.id))
+                svc_hard_delete_property(db, int(r.id), tenant_id=int(tenant_id))
             else:
-                svc_soft_delete_property(db, int(r.id))
+                svc_soft_delete_property(db, int(r.id), tenant_id=int(tenant_id))
             count += 1
         except Exception:
             continue
@@ -226,9 +276,13 @@ def admin_bulk_delete_properties(payload: BulkDeleteIn, db: Session = Depends(ge
     summary="Obter imóvel",
     description="Retorna um imóvel pelo seu ID.",
 )
-def get_property(property_id: int, db: Session = Depends(get_db)):
+def get_property(
+    property_id: int,
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(require_active_tenant),
+):
     try:
-        prop = svc_get_property(db, property_id)
+        prop = svc_get_property(db, property_id, tenant_id=int(tenant_id))
         return ImovelSaida(**to_imovel_dict(prop))
     except ValueError:
         raise HTTPException(status_code=404, detail="property_not_found")
@@ -240,11 +294,16 @@ def get_property(property_id: int, db: Session = Depends(get_db)):
     summary="Atualizar imóvel (parcial)",
     description="Atualiza parcialmente campos do imóvel, incluindo ativação/desativação.",
 )
-def update_property(property_id: int, payload: ImovelAtualizar, db: Session = Depends(get_db)):
+def update_property(
+    property_id: int,
+    payload: ImovelAtualizar,
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(require_active_tenant),
+):
     if settings.RE_READ_ONLY:
         raise HTTPException(status_code=403, detail="read_only_mode")
     try:
-        prop = svc_update_property(db, property_id, payload.model_dump(exclude_unset=True))
+        prop = svc_update_property(db, property_id, payload.model_dump(exclude_unset=True), tenant_id=int(tenant_id))
         return ImovelSaida(**to_imovel_dict(prop))
     except ValueError:
         raise HTTPException(status_code=404, detail="property_not_found")
@@ -260,8 +319,11 @@ def update_property(property_id: int, payload: ImovelAtualizar, db: Session = De
     summary="Cadastrar lead",
     description="Cria um lead com preferências de busca e consentimento LGPD.",
 )
-def create_lead(payload: LeadCreate, db: Session = Depends(get_db)):
-    tenant_id = int(1) if settings.DEFAULT_TENANT_ID == "default" else 1
+def create_lead(
+    payload: LeadCreate,
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(require_active_tenant),
+):
     data = payload.model_dump(exclude_unset=True)
     lead = Lead(
         tenant_id=tenant_id,
@@ -332,6 +394,7 @@ def create_lead(payload: LeadCreate, db: Session = Depends(get_db)):
 )
 def list_leads(
     db: Session = Depends(get_db),
+    tenant_id: int = Depends(require_active_tenant),
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
     status: Optional[str] = Query(None),
@@ -346,7 +409,7 @@ def list_leads(
     direcionado: Optional[bool] = Query(None, description="Se True, apenas leads com property_interest_id"),
     campaign_source: Optional[str] = Query(None, description="Origem de campanha (ex.: facebook, chavesnamao)"),
 ):
-    q = db.query(Lead)
+    q = db.query(Lead).filter(Lead.tenant_id == int(tenant_id))
     if status:
         q = q.filter(Lead.status == status)
     if finalidade:
@@ -412,6 +475,30 @@ def list_leads(
         )
         for r in rows
     ]
+
+class LeadStatusUpdate(BaseModel):
+    status: LeadStatus
+
+@router.patch("/leads/{lead_id}/status", response_model=LeadOut, summary="Atualizar status do lead")
+def update_lead_status(
+    lead_id: int,
+    payload: LeadStatusUpdate,
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(require_active_tenant),
+):
+    lead = db.query(Lead).filter(Lead.id == lead_id, Lead.tenant_id == tenant_id).first()
+    if not lead:
+        raise HTTPException(status_code=404, detail="lead_not_found")
+
+    try:
+        lead.change_status(payload.status)
+        db.add(lead)
+        db.commit()
+        db.refresh(lead)
+        return lead
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
 # --- Staging de Leads (MVP sem tabela dedicada) ---
  # --
 
@@ -419,14 +506,17 @@ def list_leads(
 @router.post(
     "/leads/staging",
     response_model=LeadStagingOut,
-    summary="Staging/Upsert de leads a partir de integra\u00E7\u00F5es (MVP)",
+    summary="Staging/Upsert de leads a partir de integrações (MVP)",
     description=(
         "Upsert de Lead utilizando phone/email como chaves principais.\n"
         "Armazena external_lead_id e updated_at_source dentro de preferences para rastreabilidade."
     ),
 )
-def upsert_lead_from_staging(payload: LeadStagingIn, db: Session = Depends(get_db)):
-    tenant_id = int(1) if settings.DEFAULT_TENANT_ID == "default" else 1
+def upsert_lead_from_staging(
+    payload: LeadStagingIn,
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(require_active_tenant),
+):
     data = payload.model_dump(exclude_unset=True)
 
     # Estratégia de deduplicação (MVP): phone > email
@@ -513,8 +603,13 @@ def upsert_lead_from_staging(payload: LeadStagingIn, db: Session = Depends(get_d
     response_model=ImagemSaida,
     summary="Adicionar imagem ao imóvel",
 )
-def add_imagem(property_id: int, payload: ImagemCriar, db: Session = Depends(get_db)):
-    prop = db.get(Property, property_id)
+def add_imagem(
+    property_id: int,
+    payload: ImagemCriar,
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(require_active_tenant),
+):
+    prop = svc_get_property(db, property_id, tenant_id=int(tenant_id))
     if not prop:
         raise HTTPException(status_code=404, detail="property_not_found")
     img = PropertyImage(
@@ -535,8 +630,12 @@ def add_imagem(property_id: int, payload: ImagemCriar, db: Session = Depends(get
     response_model=List[ImagemSaida],
     summary="Listar imagens do imóvel",
 )
-def list_imagens(property_id: int, db: Session = Depends(get_db)):
-    prop = db.get(Property, property_id)
+def list_imagens(
+    property_id: int,
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(require_active_tenant),
+):
+    prop = svc_get_property(db, property_id, tenant_id=int(tenant_id))
     if not prop:
         raise HTTPException(status_code=404, detail="property_not_found")
     stmt = (
@@ -562,9 +661,13 @@ def list_imagens(property_id: int, db: Session = Depends(get_db)):
     response_model=ImovelDetalhes,
     summary="Detalhes do imóvel (com imagens)",
 )
-def get_imovel_detalhes(property_id: int, db: Session = Depends(get_db)):
+def get_imovel_detalhes(
+    property_id: int,
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(require_active_tenant),
+):
     try:
-        d = svc_get_property_details(db, property_id)
+        d = svc_get_property_details(db, property_id, tenant_id=int(tenant_id))
         d_out = ImovelDetalhes(
             id=d["id"],
             titulo=d["titulo"],

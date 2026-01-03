@@ -34,6 +34,20 @@ def _compose(prev: str, new: str) -> str:
     return out
 
 
+def _resolve_tenant(db, raw_tenant_id) -> models.Tenant | None:
+    tid = str(raw_tenant_id or "").strip()
+    if not tid:
+        return None
+    try:
+        t_int = int(tid)
+        return db.get(models.Tenant, t_int)
+    except Exception:
+        pass
+    if (settings.APP_ENV or "").lower() == "prod":
+        return None
+    return db.query(models.Tenant).filter(models.Tenant.name == tid).first()
+
+
 @celery.task(name="inbound.buffer")
 def buffer_incoming_message(tenant_id: str, wa_id: str, text: str, raw_event: dict) -> None:
     r = _redis()
@@ -66,12 +80,10 @@ def flush_incoming_message(tenant_id: str, wa_id: str) -> None:
     log.info("inbound_flushed", key=key, text_len=len(text))
     # Normalize: resolve/create Contact & Conversation and register Message
     with SessionLocal() as db:
-        # Tenant (for now default logical tenant; in future map from token/page)
-        tenant = db.query(models.Tenant).filter(models.Tenant.name == tenant_id).first()
+        tenant = _resolve_tenant(db, tenant_id)
         if tenant is None:
-            tenant = models.Tenant(name=tenant_id)
-            db.add(tenant)
-            db.flush()
+            log.error("tenant_not_found", tenant_id=tenant_id)
+            return
 
         contact = (
             db.query(models.Contact)

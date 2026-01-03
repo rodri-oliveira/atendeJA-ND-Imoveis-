@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useState, useMemo } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { apiFetch, isAuthenticated } from '../lib/auth'
 
@@ -35,6 +35,7 @@ export default function ImovelDetalhes() {
   const [data, setData] = useState<Detalhes | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [mainImage, setMainImage] = useState<Imagem | null>(null)
 
   // Helper: aceita URLs relativas, localhost e IPs (backend já normaliza externas)
   const toDirect = (url?: string | null) => {
@@ -56,27 +57,23 @@ export default function ImovelDetalhes() {
   }
 
   async function fetchDetails() {
-    if (!id) return
-    setLoading(true)
-    setError(null)
+    if (!id) return;
+    setLoading(true);
+    setError(null);
     try {
-      const res = await fetch(`/api/re/imoveis/${encodeURIComponent(id)}/detalhes`, { cache: 'no-store' })
-      if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      const js = await res.json()
-      try {
-        console.groupCollapsed('[DETALHES] payload', { id })
-        console.debug('payload.raw', js)
-        if (Array.isArray(js?.imagens)) {
-          console.debug('payload.images.count', js.imagens.length)
-          console.debug('payload.images.sample', js.imagens.slice(0, 10).map((i: any) => i?.url))
-        }
-        console.groupEnd()
-      } catch {}
-      setData(js)
-    } catch (e: any) {
-      setError(e?.message || 'erro')
+      const res = await apiFetch(`/api/re/imoveis/${encodeURIComponent(id)}/detalhes`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const js = await res.json();
+      setData(js);
+      if (js.imagens && js.imagens.length > 0) {
+        const cover = js.imagens.find((i: Imagem) => i.is_capa) || js.imagens[0];
+        setMainImage(cover);
+      }
+    } catch (e: unknown) {
+      const err = e as Error;
+      setError(err?.message || 'erro');
     } finally {
-      setLoading(false)
+      setLoading(false);
     }
   }
 
@@ -112,161 +109,98 @@ export default function ImovelDetalhes() {
     if (res.ok) navigate('/imoveis')
   }
 
-  async function onSetCover(imageId: number) {
-    if (!id) return
-    const res = await apiFetch(`/api/admin/re/imoveis/${encodeURIComponent(id)}/imagens/${imageId}/capa`, { method: 'PATCH' })
-    if (res.ok) await fetchDetails()
-  }
 
-  async function onDeleteImage(imageId: number) {
-    if (!id) return
-    if (!confirm('Remover esta imagem?')) return
-    const res = await apiFetch(`/api/admin/re/imoveis/${encodeURIComponent(id)}/imagens/${imageId}`, { method: 'DELETE' })
-    if (res.ok) await fetchDetails()
-  }
-
-  async function moveImage(imageId: number, delta: number) {
-    if (!id || !data?.imagens?.length) return
-    const arr = [...data.imagens]
-    const idx = arr.findIndex(i => i.id === imageId)
-    if (idx < 0) return
-    const newIdx = Math.max(0, Math.min(arr.length - 1, idx + delta))
-    if (newIdx === idx) return
-    const removed = arr.splice(idx, 1)
-    const item = removed[0]
-    if (!item) return
-    arr.splice(newIdx, 0, item)
-    // Monta payload de reorder e envia
-    const items = arr.map((it, i) => ({ id: it.id, ordem: i }))
-    const res = await apiFetch(`/api/admin/re/imoveis/${encodeURIComponent(id)}/imagens/reorder`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ items })
-    })
-    if (res.ok) setData({ ...data, imagens: arr })
-  }
+  const characteristics = useMemo(() => {
+    if (!data) return [];
+    return [
+      { icon: '🛏️', label: 'Dormitórios', value: data.dormitorios },
+      { icon: '🛁', label: 'Banheiros', value: data.banheiros },
+      { icon: '🚿', label: 'Suítes', value: data.suites },
+      { icon: '🚗', label: 'Vagas', value: data.vagas },
+      { icon: '🌳', label: 'Área Total', value: data.area_total, suffix: ' m²' },
+      { icon: '🏠', label: 'Área Útil', value: data.area_util, suffix: ' m²' },
+    ].filter(c => typeof c.value === 'number');
+  }, [data]);
 
   return (
-    <section className="space-y-4">
+    <section className="space-y-6">
       <header className="flex items-center justify-between">
         <div className="flex items-center gap-2 text-sm text-slate-600">
           <Link to="/imoveis" className="inline-flex items-center gap-1 text-primary-600 hover:underline focus:outline-none focus:ring-2 focus:ring-primary-300 rounded px-1">
             <span aria-hidden>←</span>
-            <span>Voltar</span>
+            <span>Voltar para a lista</span>
           </Link>
-          <span className="text-slate-400">/</span>
-          <span className="text-slate-800 font-medium">Detalhes do Imóvel</span>
         </div>
       </header>
-      {loading && <div className="text-sm text-gray-600">Carregando...</div>}
-      {error && <div className="text-sm text-red-600">Erro: {error}</div>}
+
+      {loading && <div className="text-center py-12 text-slate-500">Carregando detalhes do imóvel...</div>}
+      {error && <div className="card text-red-600">Erro ao carregar imóvel: {error}</div>}
+
       {!loading && !error && data && (
-        <div className="space-y-4">
-          <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
-            <div className="flex flex-col gap-2">
-              <div className="flex items-center justify-between">
-                <h2 className="text-xl font-semibold text-slate-900">{data.titulo}</h2>
-                <div className="flex items-center gap-2">
-                  <span className="text-[11px] px-2 py-0.5 rounded-full bg-slate-100 text-slate-700">
-                    {data.tipo === 'apartment' ? 'Apartamento' : data.tipo === 'house' ? 'Casa' : data.tipo}
-                  </span>
-                  {isAdmin && (
-                    <div className="flex items-center gap-2">
-                      <button className="text-xs px-2 py-1 rounded bg-blue-600 text-white hover:bg-blue-700" onClick={() => navigate(`/imoveis/${id}/editar`)}>Editar</button>
-                      <button className="text-xs px-2 py-1 rounded bg-amber-600 text-white hover:bg-amber-700" onClick={onSoftDelete}>Arquivar</button>
-                      <button className="text-xs px-2 py-1 rounded bg-red-600 text-white hover:bg-red-700" onClick={onHardDelete}>Excluir</button>
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+          {/* Coluna Principal (Esquerda) */}
+          <div className="lg:col-span-2 space-y-6">
+            {/* Galeria de Imagens Hero */}
+            <div className="space-y-3">
+              <div className="aspect-[16/10] bg-slate-100 rounded-xl overflow-hidden border">
+                {mainImage && <img src={toDirect(mainImage.url)} alt="Imagem principal do imóvel" className="w-full h-full object-cover" />}
+              </div>
+              <div className="grid grid-cols-5 md:grid-cols-8 gap-2">
+                {data.imagens.map(img => (
+                  <button key={img.id} onClick={() => setMainImage(img)} className={`aspect-square bg-slate-100 rounded-lg overflow-hidden border-2 transition-all ${mainImage?.id === img.id ? 'border-primary-500' : 'border-transparent hover:border-slate-300'}`}>
+                    <img src={toDirect(img.url)} alt={`Imagem ${img.id}`} className="w-full h-full object-cover" />
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Título e Localização */}
+            <div>
+              <h1 className="text-3xl font-bold text-slate-900">{data.titulo}</h1>
+              <p className="text-slate-600 mt-1">{data.bairro}, {data.cidade} - {data.estado}</p>
+            </div>
+
+            {/* Características com Ícones */}
+            <div className="card">
+              <h2 className="card-header">Características</h2>
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-4 mt-4">
+                {characteristics.map(char => (
+                  <div key={char.label} className="flex items-center gap-3">
+                    <span className="text-2xl">{char.icon}</span>
+                    <div>
+                      <div className="text-sm text-slate-600">{char.label}</div>
+                      <div className="font-semibold text-slate-800">{char.value}{char.suffix || ''}</div>
                     </div>
-                  )}
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Descrição */}
+            {data.descricao && (
+              <div className="card">
+                <h2 className="card-header">Descrição</h2>
+                <p className="text-slate-700 mt-4 whitespace-pre-wrap">{data.descricao}</p>
+              </div>
+            )}
+          </div>
+
+          {/* Coluna Lateral (Direita) */}
+          <div className="lg:col-span-1">
+            <div className="sticky top-4 space-y-4">
+              {/* Ações do Admin */}
+              {isAdmin && (
+                <div className="card">
+                  <h2 className="card-header">Ações do Administrador</h2>
+                  <div className="flex flex-col gap-2 mt-4">
+                    <button className="btn btn-secondary" onClick={() => navigate(`/imoveis/${id}/editar`)}>Editar Imóvel</button>
+                    <button className="btn btn-warning" onClick={onSoftDelete}>Arquivar Imóvel</button>
+                    <button className="btn btn-danger" onClick={onHardDelete}>Excluir Permanentemente</button>
+                  </div>
                 </div>
-              </div>
-              <div className="text-sm text-slate-600">
-                {data.finalidade === 'sale' ? 'Venda' : 'Locação'} · {data.cidade}-{data.estado}
-              </div>
-              <div className="text-lg font-semibold text-primary-600">
-                {data.preco > 0
-                  ? new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(data.preco)
-                  : 'Consulte'}
-              </div>
-              {data.descricao && <p className="text-sm text-slate-700">{data.descricao}</p>}
-              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2 text-xs text-slate-700">
-                {typeof data.dormitorios === 'number' && <div><span className="text-slate-500">Dormitórios:</span> {data.dormitorios}</div>}
-                {typeof data.banheiros === 'number' && <div><span className="text-slate-500">Banheiros:</span> {data.banheiros}</div>}
-                {typeof data.suites === 'number' && <div><span className="text-slate-500">Suítes:</span> {data.suites}</div>}
-                {typeof data.vagas === 'number' && <div><span className="text-slate-500">Vagas:</span> {data.vagas}</div>}
-                {typeof data.area_total === 'number' && <div><span className="text-slate-500">Área total:</span> {data.area_total} m²</div>}
-                {typeof data.area_util === 'number' && <div><span className="text-slate-500">Área útil:</span> {data.area_util} m²</div>}
-              </div>
+              )}
             </div>
           </div>
-          {!!data.imagens?.length && (
-            <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
-              <h3 className="text-sm font-medium text-slate-900 mb-2">Galeria de imagens</h3>
-              {(() => {
-                // Filtra HTTPS e hosts válidos para depuração e uso na renderização
-                const filteredImages = (data.imagens || []).filter((img) => {
-                  try {
-                    const u = String(img?.url || '')
-                    if (!u) return false
-                    if (u.startsWith('/')) return true
-                    if (u.startsWith('http://') || u.startsWith('https://')) {
-                      const parsed = new URL(u)
-                      const host = parsed.hostname || ''
-                      const isIPv4 = /^\d{1,3}(?:\.\d{1,3}){3}$/.test(host)
-                      return host === 'localhost' || host === '::1' || isIPv4 || host.includes('.')
-                    }
-                    return false
-                  } catch { return false }
-                })
-                try {
-                  console.groupCollapsed('[DETALHES] imagens (filtradas)', { id })
-                  console.debug('filtered.count', filteredImages.length)
-                  console.debug('filtered.sample', filteredImages.slice(0, 10).map((i: any) => i?.url))
-                  console.debug('all.count', data.imagens.length)
-                  console.groupEnd()
-                } catch {}
-                return (
-                  <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
-                    {filteredImages.map((img) => {
-                      const src = toDirect(img.url)
-                      // Usar proxy para imagens externas (CDN)
-                      const proxiedSrc = src && src.includes('cdn-imobibrasil.com.br') 
-                        ? `/api/re/images/proxy?url=${encodeURIComponent(src)}`
-                        : src
-                      return (
-                        <div key={img.id} className="relative aspect-[4/3] overflow-hidden rounded-lg border border-slate-200 bg-slate-100">
-                          {proxiedSrc ? (
-                            <img
-                              src={proxiedSrc}
-                              alt={`Imagem ${img.id}`}
-                              className="w-full h-full object-cover transition-transform duration-200 hover:scale-[1.02]"
-                              onError={(e) => {
-                                try {
-                                  console.error('[IMG_ERROR] detalhes', { id, imgId: img.id, url: proxiedSrc, original: src })
-                                } catch {}
-                                const el = e.currentTarget as HTMLImageElement
-                                el.style.display = 'none'
-                              }}
-                              onLoad={() => { try { console.debug('[IMG_OK] detalhes', { id, imgId: img.id, url: proxiedSrc }) } catch {} }}
-                            />
-                          ) : null}
-                          {isAdmin && (
-                            <div className="absolute left-1 top-1 flex gap-1">
-                              <button className="text-[10px] px-2 py-0.5 rounded bg-slate-900/80 text-white hover:bg-slate-900" onClick={() => onSetCover(img.id)}>Capa</button>
-                              <button className="text-[10px] px-2 py-0.5 rounded bg-red-600/90 text-white hover:bg-red-700" onClick={() => onDeleteImage(img.id)}>Remover</button>
-                            </div>
-                          )}
-                          {isAdmin && (
-                            <div className="absolute right-1 bottom-1 flex gap-1">
-                              <button className="text-[10px] px-2 py-0.5 rounded bg-slate-800/80 text-white hover:bg-slate-800" onClick={() => moveImage(img.id, -1)}>↑</button>
-                              <button className="text-[10px] px-2 py-0.5 rounded bg-slate-800/80 text-white hover:bg-slate-800" onClick={() => moveImage(img.id, 1)}>↓</button>
-                            </div>
-                          )}
-                        </div>
-                      )
-                    })}
-                  </div>
-                )
-              })()}
-            </div>
-          )}
         </div>
       )}
     </section>
