@@ -311,6 +311,14 @@ def format_invalid_time() -> str:
     )
 
 
+def format_past_time_error(time_str: str) -> str:
+    """Mensagem quando o horário escolhido já passou."""
+    return (
+        f"O horário das {time_str} de hoje já passou. 😕\n\n"
+        f"Por favor, escolha um horário futuro."
+    )
+
+
 def format_visit_scheduled(name: str, date_str: str, time_str: str, property_code: str) -> str:
     """Confirma agendamento da visita."""
     first_name = name.split()[0]

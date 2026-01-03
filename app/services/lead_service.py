@@ -76,7 +76,7 @@ class LeadService:
             Lead criado
         """
         lead_data = {
-            "nome": None,
+            "nome": state.get("user_name"),
             "telefone": sender_id,
             "email": None,
             "origem": "whatsapp",
