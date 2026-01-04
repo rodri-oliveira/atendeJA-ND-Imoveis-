@@ -104,6 +104,31 @@ Antes de aprovar PRs que mexem em chat/lead/catálogo/flows, validar:
     *   LGPD avança apenas com confirmação explícita.
     *   `não encontrei imóvel` salva lead com status esperado no tenant correto.
 
+---
+
+## Decisão Arquitetural (V1) — Gestão de Flows
+
+Para o V1 do painel administrativo e do motor “Flow as Data”, a decisão é priorizar simplicidade operacional e segurança.
+
+1.  **1 flow publicado por tenant + domínio:**
+    *   Para cada par (`tenant_id`, `domain`) existe exatamente 1 flow em produção (publicado) ativo.
+    *   Evita ambiguidade e reduz risco de selecionar o flow errado em runtime.
+
+2.  **Draft separado do publicado:**
+    *   O operador edita um rascunho (draft) sem afetar o flow publicado.
+    *   Publicação deve ser uma troca atômica (após validar e testar).
+
+3.  **Versionamento mínimo obrigatório:**
+    *   Cada publicação deve registrar metadados (ex.: `published_at`, `published_by`, `published_version`).
+    *   Manter histórico das últimas versões publicadas para rollback rápido.
+
+4.  **Duplicação permitida, mas controlada:**
+    *   Permitir duplicar um flow publicado para gerar um novo draft.
+    *   Regra: apenas 1 publicado por (`tenant_id`, `domain`); os demais ficam como drafts/arquivados.
+
+5.  **Workflow padrão do painel:**
+    *   Validar → Testar (simulação) → Publicar → (se necessário) Reverter para versão anterior.
+
 ## Fase 1: Implementar "Flow as Data" (Domínio Imobiliário)
 
 O objetivo desta fase é refatorar o motor de conversa para que ele leia o fluxo de um modelo de dados, em vez de seguir uma lógica "hardcoded". A funcionalidade para o cliente atual (ND Imóveis) permanecerá idêntica.
