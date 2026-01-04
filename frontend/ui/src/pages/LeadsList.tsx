@@ -11,9 +11,10 @@ type ColumnProps = {
   getStatusBadge: (status?: string | null) => React.ReactNode;
   formatPhone: (phone?: string | null) => string;
   formatDate: (date?: string | null) => string;
+  onCardClick: (lead: Lead) => void;
 }
 
-function Column({ id, leads, filters, getStatusBadge, formatPhone, formatDate }: ColumnProps) {
+function Column({ id, leads, filters, getStatusBadge, formatPhone, formatDate, onCardClick }: ColumnProps) {
   const filteredLeads = leads.filter((lead: Lead) => {
     if (filters.search) {
       const search = filters.search.toLowerCase();
@@ -32,7 +33,7 @@ function Column({ id, leads, filters, getStatusBadge, formatPhone, formatDate }:
       <SortableContext items={filteredLeads.map(l => l.id)} strategy={verticalListSortingStrategy}>
         <div className="space-y-2 h-[600px] overflow-y-auto">
           {filteredLeads.map((lead: Lead) => (
-            <LeadCard key={lead.id} lead={lead} getStatusBadge={getStatusBadge} formatPhone={formatPhone} formatDate={formatDate} />
+            <LeadCard key={lead.id} lead={lead} getStatusBadge={getStatusBadge} formatPhone={formatPhone} formatDate={formatDate} onCardClick={onCardClick} />
           ))}
         </div>
       </SortableContext>
@@ -45,9 +46,62 @@ type LeadCardProps = {
   getStatusBadge: (status?: string | null) => React.ReactNode;
   formatPhone: (phone?: string | null) => string;
   formatDate: (date?: string | null) => string;
+  onCardClick: (lead: Lead) => void;
 }
 
-function LeadCard({ lead, getStatusBadge, formatPhone, formatDate }: LeadCardProps) {
+function PreferencesDisplay({ preferences }: { preferences: Record<string, unknown> | null | undefined }) {
+  if (!preferences) {
+    return <p className="text-sm text-slate-600">Nenhuma preferência registrada.</p>;
+  }
+
+  const formatCurrency = (value: number) => {
+    return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(value);
+  };
+
+  const preferenceLabels: Record<string, string> = {
+    purpose: 'Finalidade',
+    type: 'Tipo de Imóvel',
+    city: 'Cidade',
+    neighborhood: 'Bairro',
+    bedrooms: 'Quartos',
+    price_min: 'Valor Mínimo',
+    price_max: 'Valor Máximo',
+  };
+
+  const purposeValues: Record<string, string> = {
+    sale: 'Venda',
+    rent: 'Aluguel',
+  };
+
+  const typeValues: Record<string, string> = {
+    house: 'Casa',
+    apartment: 'Apartamento',
+    commercial: 'Comercial',
+    land: 'Terreno',
+  };
+
+  return (
+    <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-3 text-sm">
+      {Object.entries(preferenceLabels).map(([key, label]) => {
+        let value = preferences[key];
+        if (value === null || value === undefined || value === '') return null;
+
+        if (key === 'purpose') value = purposeValues[value] || value;
+        if (key === 'type') value = typeValues[value] || value;
+        if (key === 'price_min' || key === 'price_max') value = typeof value === 'number' ? formatCurrency(value) : value;
+
+        return (
+          <div key={key}>
+            <strong className="text-slate-600">{label}:</strong>
+            <span className="text-slate-800 ml-2 capitalize">{String(value)}</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function LeadCard({ lead, getStatusBadge, formatPhone, formatDate, onCardClick }: LeadCardProps) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: lead.id });
 
   const style = {
@@ -57,7 +111,13 @@ function LeadCard({ lead, getStatusBadge, formatPhone, formatDate }: LeadCardPro
   };
 
   return (
-    <div ref={setNodeRef} style={style} {...attributes} {...listeners} className={`bg-white rounded-md shadow-sm p-3 border ${isDragging ? 'border-primary-500' : 'border-white'}`}>
+    <div 
+      ref={setNodeRef} 
+      style={style} 
+      {...attributes} 
+      {...listeners} 
+      onClick={() => onCardClick(lead)}
+      className={`bg-white rounded-md shadow-sm p-3 border cursor-pointer hover:border-primary-300 transition-colors ${isDragging ? 'border-primary-500' : 'border-white'}`}>
       <div className="font-semibold text-slate-800">{lead.name || 'Sem nome'}</div>
       <div className="text-sm text-slate-600">{formatPhone(lead.phone)}</div>
       <div className="text-xs text-slate-500 mt-1">{formatDate(lead.last_inbound_at)}</div>
@@ -132,18 +192,44 @@ export default function LeadsList() {
 
   // Kanban state
   const [columns, setColumns] = useState<Record<string, Lead[]>>({})
+  const [selectedLead, setSelectedLead] = useState<Lead | null>(null)
 
   useEffect(() => {
-    loadLeads()
-    loadConfig()
+    loadLeads(filters);
+    loadConfig();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, []);
 
-  async function loadLeads() {
+  // Gatilho para recarregar os leads quando os filtros mudam
+  useEffect(() => {
+    const handler = setTimeout(() => {
+      loadLeads(filters);
+    }, 500); // Debounce para evitar chamadas excessivas
+
+    return () => {
+      clearTimeout(handler);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filters]);
+
+  async function loadLeads(currentFilters: Filters) {
     setLoading(true)
     setError(null)
     try {
-      const res = await apiFetch('/api/re/leads?limit=200', { cache: 'no-store' })
+      const params = new URLSearchParams();
+      params.append('limit', '500');
+
+      // Adiciona filtros à query string apenas se tiverem valor
+      if (currentFilters.status) params.append('status', currentFilters.status);
+      if (currentFilters.finalidade) params.append('finalidade', currentFilters.finalidade);
+      if (currentFilters.tipo) params.append('tipo', currentFilters.tipo);
+      if (currentFilters.cidade) params.append('cidade', currentFilters.cidade);
+      if (currentFilters.valorMin) params.append('preco_min', currentFilters.valorMin);
+      if (currentFilters.valorMax) params.append('preco_max', currentFilters.valorMax);
+      if (currentFilters.codigoImovel) params.append('external_property_id', currentFilters.codigoImovel);
+      // NOTE: date filters are not implemented in backend yet
+
+      const res = await apiFetch(`/api/re/leads?${params.toString()}`, { cache: 'no-store' })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const leads: Lead[] = await res.json()
       setData(leads)
@@ -401,7 +487,7 @@ export default function LeadsList() {
             ⚙️ Configurar notificações
           </button>
           <button
-            onClick={loadLeads}
+            onClick={() => loadLeads(filters)}
             className="px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 transition-colors text-sm font-medium"
           >
             🔄 Atualizar
@@ -686,10 +772,54 @@ export default function LeadsList() {
         <DndContext sensors={sensors} collisionDetection={closestCorners} onDragEnd={handleDragEnd}>
           <div className="flex gap-4 overflow-x-auto pb-4">
             {columnOrder.map(columnId => (
-              <Column key={columnId} id={columnId} leads={columns[columnId] || []} filters={filters} getStatusBadge={getStatusBadge} formatPhone={formatPhone} formatDate={formatDate} />
+              <Column key={columnId} id={columnId} leads={columns[columnId] || []} filters={filters} getStatusBadge={getStatusBadge} formatPhone={formatPhone} formatDate={formatDate} onCardClick={setSelectedLead} />
             ))}
           </div>
         </DndContext>
+      )}
+
+
+      {/* Lead Details Modal */}
+      {selectedLead && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" onClick={() => setSelectedLead(null)}>
+          <div className="bg-white rounded-xl p-6 max-w-2xl w-full mx-4 shadow-lg max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+            <div className="flex items-start justify-between">
+              <div>
+                <h2 className="text-xl font-bold text-slate-900 mb-1">{selectedLead.name || 'Lead Sem Nome'}</h2>
+                <p className="text-sm text-slate-600">{formatPhone(selectedLead.phone)}</p>
+              </div>
+              <button 
+                onClick={() => setSelectedLead(null)}
+                className="text-slate-500 hover:text-slate-800 transition-colors"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+              </button>
+            </div>
+
+            <div className="mt-4 pt-4 border-t border-slate-200 grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
+              <div><strong className="text-slate-600">Status:</strong> {getStatusBadge(selectedLead.status)}</div>
+              <div><strong className="text-slate-600">Origem:</strong> <span className="capitalize">{selectedLead.source || '-'}</span></div>
+              <div><strong className="text-slate-600">Último Contato:</strong> {formatDate(selectedLead.last_inbound_at)}</div>
+              <div><strong className="text-slate-600">ID do Imóvel:</strong> {selectedLead.external_property_id || '-'}</div>
+            </div>
+
+            <div className="mt-4 pt-4 border-t border-slate-200">
+              <h3 className="text-lg font-semibold text-slate-800 mb-2">Preferências de Busca</h3>
+              <div className="bg-slate-50 p-4 rounded-lg mt-2">
+                <PreferencesDisplay preferences={selectedLead.preferences} />
+              </div>
+            </div>
+
+            <div className="flex justify-end mt-6">
+              <button
+                onClick={() => setSelectedLead(null)}
+                className="px-4 py-2 border border-slate-300 text-slate-700 rounded-lg hover:bg-slate-50 transition-colors"
+              >
+                Fechar
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Config Modal */}

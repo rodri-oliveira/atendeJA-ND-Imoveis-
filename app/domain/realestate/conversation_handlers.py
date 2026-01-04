@@ -454,6 +454,11 @@ class ConversationHandler:
         if not parsed_time:
             msg = fmt.format_invalid_time()
             return (msg, state, False)
+
+        # Guardrail: impedir agendamento no passado
+        if parsed_time < datetime.now():
+            msg = fmt.format_past_time_error(parsed_time.strftime("%H:%M"))
+            return (msg, state, False)
         
         # Criar agendamento
         user_name = state.get("user_name", "Cliente")
