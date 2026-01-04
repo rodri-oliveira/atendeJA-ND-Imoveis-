@@ -101,23 +101,27 @@ client.on('ready', () => {
   if (ALLOW_FROM_ME) {
     console.log('[wa] ⚠️  Auto-teste habilitado (WA_ALLOW_FROM_ME=true): processará mensagens fromMe')
   }
-  // DEV: limpar estado no backend para contatos da whitelist
+  // DEV: limpar estado no backend
+  console.log(`[wa-debug] Checando limpeza de estado: CLEAR_ON_START=${CLEAR_ON_START}, allowedJids.size=${allowedJids.size}`)
   if (CLEAR_ON_START && allowedJids.size > 0) {
-    (async () => {
+    console.log('[wa-debug] Condições para limpeza atendidas. Executando...')
+    ;(async () => {
       try {
         const url = MCP_URL.replace(/\/execute$/, '/admin/state/clear')
         const sender_ids = Array.from(allowedJids)
         const headers = { 'Content-Type': 'application/json' }
         if (MCP_TOKEN) headers['Authorization'] = `Bearer ${MCP_TOKEN}`
-        console.log('[wa] 🧹 URL de limpeza:', url)
-        console.log('[wa] 🧹 Limpando estado no backend para:', sender_ids.join(', '))
+        console.log('[wa] 🧹 [ACTION] Limpando estado no backend para:', sender_ids.join(', '))
+        console.log('[wa-debug] 🧹 URL de limpeza:', url)
         const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify({ sender_ids }) })
         const js = await res.json().catch(() => ({}))
-        console.log('[wa] 🧹 Resultado limpeza:', res.status, js)
+        console.log('[wa] 🧹 [RESULT] Resultado limpeza:', res.status, js)
       } catch (e) {
         console.warn('[wa] ⚠️ Falha ao limpar estado no backend:', e.message)
       }
     })()
+  } else {
+    console.log('[wa-debug] Condições para limpeza NÃO atendidas. Pulando limpeza.')
   }
 })
 
