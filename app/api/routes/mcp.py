@@ -228,6 +228,15 @@ async def execute_mcp(
     state = state_service.get_state(body.sender_id) or {}
     # Garantir que sender_id esteja no state para uso posterior (persistência de leads)
     state["sender_id"] = body.sender_id
+
+    # Persistir tenant_id resolvido no state (evita salvar Lead no tenant errado)
+    try:
+        state["tenant_id"] = int(str(body.tenant_id).strip())
+    except Exception:
+        try:
+            state["tenant_id"] = int(str(settings.DEFAULT_TENANT_ID).strip())
+        except Exception:
+            state["tenant_id"] = 1
     
     # DEBUG: Log do estado atual
     import structlog

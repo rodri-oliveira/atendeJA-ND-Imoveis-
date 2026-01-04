@@ -24,8 +24,14 @@ class LeadService:
             Lead criado
         """
         now = datetime.utcnow()
+        tenant_id = lead_data.get("tenant_id")
+        try:
+            tenant_id_int = int(str(tenant_id).strip()) if tenant_id is not None else 1
+        except Exception:
+            tenant_id_int = 1
+
         lead = Lead(
-            tenant_id=1,
+            tenant_id=tenant_id_int,
             name=lead_data.get("nome"),
             phone=lead_data.get("telefone"),
             email=lead_data.get("email"),
@@ -75,9 +81,11 @@ class LeadService:
         Returns:
             Lead criado
         """
+        phone = LeadService._extract_phone(sender_id)
         lead_data = {
+            "tenant_id": state.get("tenant_id"),
             "nome": state.get("user_name"),
-            "telefone": sender_id,
+            "telefone": phone,
             "email": None,
             "origem": "whatsapp",
             "consentimento_lgpd": lgpd_consent,
@@ -108,7 +116,16 @@ class LeadService:
         email: str | None = None,
         property_id: int | None = None,
     ) -> Lead:
-        lead = db.query(Lead).filter(Lead.phone == phone).order_by(Lead.id.desc()).first()
+        tenant_id = state.get("tenant_id")
+        try:
+            tenant_id_int = int(str(tenant_id).strip()) if tenant_id is not None else None
+        except Exception:
+            tenant_id_int = None
+
+        q = db.query(Lead).filter(Lead.phone == phone)
+        if tenant_id_int is not None:
+            q = q.filter(Lead.tenant_id == tenant_id_int)
+        lead = q.order_by(Lead.id.desc()).first()
         if lead:
             lead.status = status
             lead.last_inbound_at = datetime.utcnow()
@@ -127,6 +144,7 @@ class LeadService:
             return lead
         else:
             lead_data = {
+                "tenant_id": tenant_id_int,
                 "nome": name,
                 "telefone": phone,
                 "email": email,
