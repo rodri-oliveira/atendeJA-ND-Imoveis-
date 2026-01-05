@@ -129,6 +129,61 @@ Para o V1 do painel administrativo e do motor “Flow as Data”, a decisão é 
 5.  **Workflow padrão do painel:**
     *   Validar → Testar (simulação) → Publicar → (se necessário) Reverter para versão anterior.
 
+---
+
+## Playbook Anti-Regressão (Git, Migrations, Rollback)
+
+O objetivo desta seção é evitar repetir problemas operacionais comuns durante refactors (boot quebrando, Alembic inconsistente, dados “sumindo” por tenant errado, etc.).
+
+1.  **Git: evitar reset destrutivo sem estratégia**
+    *   Preferir `git revert` para desfazer mudanças já publicadas, em vez de reescrever histórico.
+    *   Se precisar reescrever histórico (ex.: `reset --hard`):
+        *   Assumir que migrations podem ficar inconsistentes.
+        *   Documentar o commit alvo e validar `git reflog` para possível recuperação.
+
+2.  **Migrations: regra de ouro**
+    *   Não apagar migration que já foi aplicada em algum ambiente.
+    *   Após `reset`/rebase, antes de rodar o app:
+        *   Validar que os arquivos de revision existem no repo.
+        *   Validar Alembic (ex.: `alembic history` e `alembic current`).
+    *   Se uma revision aplicada “sumiu” do repo:
+        *   Criar migration “dummy” com o `revision` esperado para restaurar a cadeia.
+        *   Executar `alembic stamp` apenas com entendimento claro do estado do banco.
+
+3.  **Rollback do chat (Flow as Data)**
+    *   Publicação deve ser reversível sem deploy:
+        *   Manter histórico de versões publicadas.
+        *   Permitir “reverter para versão anterior” no painel.
+    *   Regra: publicar apenas após validação do schema e smoke test de simulação.
+
+4.  **Diagnóstico rápido (quando “parou de funcionar”)**
+    *   Confirmar `tenant_id` resolvido (logs) e `DEFAULT_TENANT_ID` numérico.
+    *   Confirmar seed do flow para o tenant.
+    *   Confirmar que o estado do `sender_id` no Redis não está “preso” em outro estágio.
+
+---
+
+## Matriz de Testes Obrigatórios (por fase)
+
+1.  **Fase 1 (Flow as Data):**
+    *   Boot da API sobe sem erro mesmo com legado presente.
+    *   Conversa nova:
+        *   `oi` → mensagem inicial.
+        *   LGPD só avança com confirmação explícita.
+        *   fluxo completo até busca e apresentação.
+    *   Troca de tenant (DEV): validar que `tenant_id` entra no state e no log.
+
+2.  **Fase 2 (Catálogo Genérico):**
+    *   Busca/detalhe por `CatalogItem` retorna dados esperados por tenant.
+    *   Imagens por `CatalogItemImage` retornam na ordem esperada.
+    *   Migração idempotente (rodar 2x não duplica).
+
+3.  **Fase 3 (Novo domínio):**
+    *   Tenant automotive com flow seedado e catálogo carregado.
+    *   UI/admin adapta sem ifs espalhados (por `domain`).
+
+---
+
 ## Fase 1: Implementar "Flow as Data" (Domínio Imobiliário)
 
 O objetivo desta fase é refatorar o motor de conversa para que ele leia o fluxo de um modelo de dados, em vez de seguir uma lógica "hardcoded". A funcionalidade para o cliente atual (ND Imóveis) permanecerá idêntica.
