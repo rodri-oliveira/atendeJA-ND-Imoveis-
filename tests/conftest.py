@@ -10,6 +10,7 @@ from sqlalchemy.pool import StaticPool
 os.environ["APP_ENV"] = "test"
 os.environ["WA_PROVIDER"] = "noop"
 os.environ.setdefault("DATABASE_URL_OVERRIDE", "sqlite:///:memory:")
+os.environ.setdefault("DEFAULT_TENANT_ID", "1")
 
 # Ensure the project root (which contains the 'app' package) is on sys.path
 THIS_DIR = os.path.dirname(__file__)
@@ -20,6 +21,7 @@ if PROJECT_ROOT not in sys.path:
 from app.main import app
 from app.api.deps import get_db as deps_get_db
 from app.repositories.db import Base
+from app.repositories.models import Tenant
 
 
 @pytest.fixture(scope="function")
@@ -35,6 +37,9 @@ def db_session():
 
     db = TestingSessionLocal()
     try:
+        if db.get(Tenant, 1) is None:
+            db.add(Tenant(id=1, name="tenant-1"))
+            db.commit()
         yield db
     finally:
         db.close()

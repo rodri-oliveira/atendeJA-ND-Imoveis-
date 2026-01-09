@@ -5,7 +5,7 @@ import structlog
 from celery import Task
 from app.core.config import settings
 from app.domain.policies import within_business_hours
-from app.repositories.db import SessionLocal
+from app.repositories.db import db_session
 from app.repositories import models
 from app.messaging.provider import get_provider
 from .celery_app import celery
@@ -48,7 +48,7 @@ def send_text(self: Task, tenant_id: str, to_wa_id: str, text: str, idempotency_
         log.info("outbound_skipped_off_hours", tenant_id=tenant_id, to=to_wa_id)
         return {"status": "scheduled"}
 
-    with SessionLocal() as db:
+    with db_session() as db:
         tenant = _resolve_tenant(db, tenant_id)
         if tenant is None:
             return {"status": "error", "error": "tenant_not_found"}
@@ -116,7 +116,7 @@ def send_text(self: Task, tenant_id: str, to_wa_id: str, text: str, idempotency_
         raise self.retry(exc=TransientSendError(str(e)), countdown=delay)
 
     # Mark as sent
-    with SessionLocal() as db:
+    with db_session() as db:
         last = (
             db.query(models.Message)
             .filter(models.Message.tenant_id == tenant.id)
@@ -147,7 +147,7 @@ def send_template(
         log.info("outbound_template_skipped_off_hours", tenant_id=tenant_id, to=to_wa_id)
         return {"status": "scheduled"}
 
-    with SessionLocal() as db:
+    with db_session() as db:
         tenant = _resolve_tenant(db, tenant_id)
         if tenant is None:
             return {"status": "error", "error": "tenant_not_found"}
@@ -221,7 +221,7 @@ def send_template(
         log.warning("outbound_template_retry", retries=retry_no + 1, delay=delay)
         raise self.retry(exc=TransientSendError(str(e)), countdown=delay)
 
-    with SessionLocal() as db:
+    with db_session() as db:
         last = (
             db.query(models.Message)
             .filter(models.Message.tenant_id == tenant.id)

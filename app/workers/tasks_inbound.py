@@ -5,7 +5,7 @@ import structlog
 import redis
 from app.core.config import settings
 from .celery_app import celery
-from app.repositories.db import SessionLocal
+from app.repositories.db import db_session
 from app.repositories import models
 
 log = structlog.get_logger()
@@ -79,7 +79,7 @@ def flush_incoming_message(tenant_id: str, wa_id: str) -> None:
     r.delete(key)
     log.info("inbound_flushed", key=key, text_len=len(text))
     # Normalize: resolve/create Contact & Conversation and register Message
-    with SessionLocal() as db:
+    with db_session() as db:
         tenant = _resolve_tenant(db, tenant_id)
         if tenant is None:
             log.error("tenant_not_found", tenant_id=tenant_id)

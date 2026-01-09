@@ -1,10 +1,11 @@
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from pydantic import BaseModel, Field
-from typing import Literal
+from typing import Literal, Optional, List, Any, Dict
 
-from app.api.deps import require_role_admin
-from app.api.deps import require_active_tenant
+from app.api.deps import require_admin_request_context
+from app.api.deps import require_admin_tenant_id
 from app.api.deps import get_db
+
 from sqlalchemy import select, func, delete
 from app.domain.realestate import models as re_models
 from app.domain.realestate.sources import ndimoveis as nd
@@ -15,6 +16,7 @@ import time
 from urllib.parse import urljoin
 import contextlib
 from sqlalchemy.orm import Session
+from app.repositories.db import db_session
 from app.domain.realestate.services.image_service import (
     delete_property_image,
     set_property_cover,
@@ -27,12 +29,274 @@ from app.domain.realestate.services.property_service import (
 )
 from app.messaging.provider import get_provider
 from app.repositories.models import Tenant
+from app.core.config import settings
+from datetime import datetime
+from app.domain.realestate.services.chatbot_flow_service import ChatbotFlowService
+from app.services.flow_engine import FlowEngine
+from app.services.conversation_context import normalize_state
 
-router = APIRouter(dependencies=[Depends(require_role_admin)])
+if settings.APP_ENV == "test":
+    router = APIRouter()
+else:
+    router = APIRouter(dependencies=[Depends(require_admin_request_context)])
 
 # Registro simples em memória para tarefas assíncronas (MVP)
 TASKS: dict[str, dict] = {}
 
+class ChatbotFlowOut(BaseModel):
+    id: int
+    tenant_id: int
+    domain: str
+    name: str
+    is_published: bool
+    published_version: int
+    published_at: Optional[str] = None
+    published_by: Optional[str] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+class ChatbotFlowUpsertIn(BaseModel):
+    domain: str = "real_estate"
+    name: str
+    flow_definition: Dict[str, Any]
+
+class ChatbotFlowPublishOut(BaseModel):
+    ok: bool = True
+    published_flow_id: int
+    published_version: int
+
+class ChatbotFlowPublishedCurrentOut(BaseModel):
+    published: bool
+    flow: ChatbotFlowOut | None = None
+
+class ChatbotFlowPublishByVersionIn(BaseModel):
+    domain: str = "real_estate"
+    published_version: int
+
+class ChatbotFlowPreviewIn(BaseModel):
+    sender_id: str = "preview"
+    input: str
+    state: Optional[Dict[str, Any]] = None
+
+class ChatbotFlowPreviewOut(BaseModel):
+    message: str
+    state: Dict[str, Any]
+    handled: bool
+    continue_loop: bool
+
+def _flow_to_out(row: re_models.ChatbotFlow) -> ChatbotFlowOut:
+    def _dt(v):
+        try:
+            return v.isoformat() if v else None
+        except Exception:
+            return None
+
+    return ChatbotFlowOut(
+        id=int(row.id),
+        tenant_id=int(row.tenant_id),
+        domain=str(row.domain),
+        name=str(row.name),
+        is_published=bool(row.is_published),
+        published_version=int(row.published_version or 0),
+        published_at=_dt(getattr(row, "published_at", None)),
+        published_by=(getattr(row, "published_by", None) or None),
+        created_at=_dt(getattr(row, "created_at", None)),
+        updated_at=_dt(getattr(row, "updated_at", None)),
+    )
+
+@router.get("/chatbot-flows", response_model=List[ChatbotFlowOut])
+def re_list_chatbot_flows(
+    domain: Optional[str] = None,
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(require_admin_tenant_id),
+):
+    q = db.query(re_models.ChatbotFlow).filter(re_models.ChatbotFlow.tenant_id == int(tenant_id))
+    if domain:
+        q = q.filter(re_models.ChatbotFlow.domain == str(domain))
+    rows = q.order_by(re_models.ChatbotFlow.updated_at.desc(), re_models.ChatbotFlow.id.desc()).all()
+    return [_flow_to_out(r) for r in rows]
+
+@router.post("/chatbot-flows", response_model=ChatbotFlowOut)
+def re_upsert_chatbot_flow(
+    payload: ChatbotFlowUpsertIn,
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(require_admin_tenant_id),
+):
+    svc = ChatbotFlowService(db)
+    svc.validate_definition(payload.flow_definition)
+
+    name = (payload.name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="name_required")
+    domain = (payload.domain or "real_estate").strip() or "real_estate"
+
+    existing = (
+        db.query(re_models.ChatbotFlow)
+        .filter(
+            re_models.ChatbotFlow.tenant_id == int(tenant_id),
+            re_models.ChatbotFlow.domain == domain,
+            re_models.ChatbotFlow.name == name,
+        )
+        .first()
+    )
+    if not existing:
+        row = re_models.ChatbotFlow(
+            tenant_id=int(tenant_id),
+            domain=domain,
+            name=name,
+            flow_definition=payload.flow_definition,
+            is_published=False,
+            published_version=0,
+        )
+        db.add(row)
+        db.commit()
+        db.refresh(row)
+        return _flow_to_out(row)
+
+    existing.flow_definition = payload.flow_definition
+    db.add(existing)
+    db.commit()
+    db.refresh(existing)
+    return _flow_to_out(existing)
+
+@router.post("/chatbot-flows/{flow_id}/publish", response_model=ChatbotFlowPublishOut)
+def re_publish_chatbot_flow(
+    flow_id: int,
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(require_admin_tenant_id),
+):
+    row = db.get(re_models.ChatbotFlow, int(flow_id))
+    if not row or int(getattr(row, "tenant_id", 0) or 0) != int(tenant_id):
+        raise HTTPException(status_code=404, detail="flow_not_found")
+
+    svc = ChatbotFlowService(db)
+    svc.validate_definition(row.flow_definition)
+
+    current_max = (
+        db.query(func.max(re_models.ChatbotFlow.published_version))
+        .filter(
+            re_models.ChatbotFlow.tenant_id == int(tenant_id),
+            re_models.ChatbotFlow.domain == str(row.domain),
+        )
+        .scalar()
+    )
+    next_version = int(current_max or 0) + 1
+
+    db.query(re_models.ChatbotFlow).filter(
+        re_models.ChatbotFlow.tenant_id == int(tenant_id),
+        re_models.ChatbotFlow.domain == str(row.domain),
+    ).update({re_models.ChatbotFlow.is_published: False})
+
+    row.is_published = True
+    row.published_version = next_version
+    row.published_at = datetime.utcnow()
+    row.published_by = "admin"
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return ChatbotFlowPublishOut(published_flow_id=int(row.id), published_version=int(row.published_version or 0))
+
+@router.get("/chatbot-flows/published", response_model=ChatbotFlowPublishedCurrentOut)
+def re_get_published_chatbot_flow(
+    domain: str = "real_estate",
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(require_admin_tenant_id),
+):
+    row = (
+        db.query(re_models.ChatbotFlow)
+        .filter(
+            re_models.ChatbotFlow.tenant_id == int(tenant_id),
+            re_models.ChatbotFlow.domain == str(domain),
+            re_models.ChatbotFlow.is_published == True,  # noqa: E712
+        )
+        .order_by(re_models.ChatbotFlow.published_version.desc(), re_models.ChatbotFlow.updated_at.desc())
+        .first()
+    )
+    if not row:
+        return ChatbotFlowPublishedCurrentOut(published=False, flow=None)
+    return ChatbotFlowPublishedCurrentOut(published=True, flow=_flow_to_out(row))
+
+@router.post("/chatbot-flows/publish-by-version", response_model=ChatbotFlowPublishOut)
+def re_publish_chatbot_flow_by_version(
+    payload: ChatbotFlowPublishByVersionIn,
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(require_admin_tenant_id),
+):
+    domain = (payload.domain or "real_estate").strip() or "real_estate"
+    target_version = int(payload.published_version)
+    if target_version <= 0:
+        raise HTTPException(status_code=400, detail="invalid_published_version")
+
+    row = (
+        db.query(re_models.ChatbotFlow)
+        .filter(
+            re_models.ChatbotFlow.tenant_id == int(tenant_id),
+            re_models.ChatbotFlow.domain == domain,
+            re_models.ChatbotFlow.published_version == target_version,
+        )
+        .order_by(re_models.ChatbotFlow.id.desc())
+        .first()
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="flow_version_not_found")
+
+    svc = ChatbotFlowService(db)
+    svc.validate_definition(row.flow_definition)
+
+    db.query(re_models.ChatbotFlow).filter(
+        re_models.ChatbotFlow.tenant_id == int(tenant_id),
+        re_models.ChatbotFlow.domain == domain,
+    ).update({re_models.ChatbotFlow.is_published: False})
+
+    row.is_published = True
+    row.published_at = datetime.utcnow()
+    row.published_by = "admin"
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return ChatbotFlowPublishOut(published_flow_id=int(row.id), published_version=int(row.published_version or 0))
+
+@router.post("/chatbot-flows/{flow_id}/preview", response_model=ChatbotFlowPreviewOut)
+def re_preview_chatbot_flow(
+    flow_id: int,
+    payload: ChatbotFlowPreviewIn,
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(require_admin_tenant_id),
+):
+    row = db.get(re_models.ChatbotFlow, int(flow_id))
+    if not row or int(getattr(row, "tenant_id", 0) or 0) != int(tenant_id):
+        raise HTTPException(status_code=404, detail="flow_not_found")
+
+    svc = ChatbotFlowService(db)
+    flow = svc.validate_definition(row.flow_definition)
+
+    sender_id = (payload.sender_id or "preview").strip() or "preview"
+    loaded_state = payload.state or {}
+    state = normalize_state(
+        state=loaded_state,
+        sender_id=sender_id,
+        tenant_id=int(tenant_id),
+        default_stage=str(flow.start or "start"),
+    )
+
+    text_raw = payload.input or ""
+    text_normalized = (payload.input or "").lower()
+
+    engine = FlowEngine(db)
+    out = engine.try_process_message_with_definition(
+        flow_definition=row.flow_definition,
+        sender_id=sender_id,
+        text_raw=text_raw,
+        text_normalized=text_normalized,
+        state=state,
+    )
+
+    return ChatbotFlowPreviewOut(
+        message=out.message,
+        state=out.state or state,
+        handled=bool(out.handled),
+        continue_loop=bool(out.continue_loop),
+    )
 
 def _normalize_wa_id(raw: str) -> str:
     s = (raw or "").strip()
@@ -48,7 +312,6 @@ def _normalize_wa_id(raw: str) -> str:
     s = "".join(ch for ch in s if ch.isdigit())
     return s
 
-
 def _get_booking_recipients(tenant_settings: dict) -> list[str]:
     raw = tenant_settings.get("booking_notification_recipients")
     if not raw:
@@ -57,39 +320,32 @@ def _get_booking_recipients(tenant_settings: dict) -> list[str]:
         return [str(x) for x in raw if str(x).strip()]
     return []
 
-
 def _get_booking_template_name(tenant_settings: dict) -> str | None:
     t = (tenant_settings.get("booking_notification_template") or "").strip()
     return t or None
 
-
 class BookingRecipientsIn(BaseModel):
     recipients: list[str] = Field(default_factory=list)
-
 
 class BookingRecipientsOut(BaseModel):
     recipients: list[str] = []
 
-
 class BookingTemplateIn(BaseModel):
     template_name: str | None = None
-
 
 class BookingTemplateOut(BaseModel):
     template_name: str | None = None
 
-
 @router.get("/booking/recipients", response_model=BookingRecipientsOut)
-def re_booking_get_recipients(db: Session = Depends(get_db), tenant_id: int = Depends(require_active_tenant)):
+def re_booking_get_recipients(db: Session = Depends(get_db), tenant_id: int = Depends(require_admin_tenant_id)):
     tenant = db.get(Tenant, int(tenant_id))
     if not tenant:
         raise HTTPException(status_code=404, detail="tenant_not_found")
     current = dict(getattr(tenant, "settings_json", {}) or {})
     return BookingRecipientsOut(recipients=_get_booking_recipients(current))
 
-
 @router.put("/booking/recipients", response_model=BookingRecipientsOut)
-def re_booking_set_recipients(payload: BookingRecipientsIn, db: Session = Depends(get_db), tenant_id: int = Depends(require_active_tenant)):
+def re_booking_set_recipients(payload: BookingRecipientsIn, db: Session = Depends(get_db), tenant_id: int = Depends(require_admin_tenant_id)):
     tenant = db.get(Tenant, int(tenant_id))
     if not tenant:
         raise HTTPException(status_code=404, detail="tenant_not_found")
@@ -104,18 +360,16 @@ def re_booking_set_recipients(payload: BookingRecipientsIn, db: Session = Depend
     db.refresh(tenant)
     return BookingRecipientsOut(recipients=_get_booking_recipients(current))
 
-
 @router.get("/booking/template", response_model=BookingTemplateOut)
-def re_booking_get_template(db: Session = Depends(get_db), tenant_id: int = Depends(require_active_tenant)):
+def re_booking_get_template(db: Session = Depends(get_db), tenant_id: int = Depends(require_admin_tenant_id)):
     tenant = db.get(Tenant, int(tenant_id))
     if not tenant:
         raise HTTPException(status_code=404, detail="tenant_not_found")
     current = dict(getattr(tenant, "settings_json", {}) or {})
     return BookingTemplateOut(template_name=_get_booking_template_name(current))
 
-
 @router.put("/booking/template", response_model=BookingTemplateOut)
-def re_booking_set_template(payload: BookingTemplateIn, db: Session = Depends(get_db), tenant_id: int = Depends(require_active_tenant)):
+def re_booking_set_template(payload: BookingTemplateIn, db: Session = Depends(get_db), tenant_id: int = Depends(require_admin_tenant_id)):
     tenant = db.get(Tenant, int(tenant_id))
     if not tenant:
         raise HTTPException(status_code=404, detail="tenant_not_found")
@@ -166,7 +420,7 @@ class VisitListOut(BaseModel):
 @router.get("/visits", response_model=list[VisitListOut])
 def re_list_visits(
     db: Session = Depends(get_db),
-    tenant_id: int = Depends(require_active_tenant),
+    tenant_id: int = Depends(require_admin_tenant_id),
     status: str | None = None,
     limit: int = 50,
     offset: int = 0,
@@ -196,13 +450,13 @@ def re_list_visits(
 
 
 @router.post("/visits/{visit_id}/confirm", response_model=ConfirmVisitOut)
-def re_confirm_visit(visit_id: int, db: Session = Depends(get_db), tenant_id: int = Depends(require_active_tenant)):
+def re_confirm_visit(visit_id: int, db: Session = Depends(get_db), tenant_id: int = Depends(require_admin_tenant_id)):
     from app.services.visit_service import VisitService
 
     try:
         visit = VisitService.confirm_visit(db, int(visit_id))
     except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=404, detail={"code": str(e)})
 
     if int(getattr(visit, "tenant_id", 0) or 0) != int(tenant_id):
         raise HTTPException(status_code=404, detail="visit_not_found")
@@ -272,7 +526,7 @@ def admin_delete_image(
     property_id: int,
     image_id: int,
     db: Session = Depends(get_db),
-    tenant_id: int = Depends(require_active_tenant),
+    tenant_id: int = Depends(require_admin_tenant_id),
 ):
     try:
         prop = (
@@ -285,15 +539,14 @@ def admin_delete_image(
         res = delete_property_image(db, property_id, image_id)
         return res
     except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-
+        raise HTTPException(status_code=404, detail={"code": str(e)})
 
 @router.patch("/imoveis/{property_id}/imagens/{image_id}/capa")
 def admin_set_cover(
     property_id: int,
     image_id: int,
     db: Session = Depends(get_db),
-    tenant_id: int = Depends(require_active_tenant),
+    tenant_id: int = Depends(require_admin_tenant_id),
 ):
     try:
         prop = (
@@ -306,15 +559,14 @@ def admin_set_cover(
         res = set_property_cover(db, property_id, image_id)
         return res
     except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-
+        raise HTTPException(status_code=404, detail={"code": str(e)})
 
 @router.post("/imoveis/{property_id}/imagens/reorder")
 def admin_reorder_images(
     property_id: int,
     payload: ReorderIn,
     db: Session = Depends(get_db),
-    tenant_id: int = Depends(require_active_tenant),
+    tenant_id: int = Depends(require_admin_tenant_id),
 ):
     try:
         prop = (
@@ -327,8 +579,7 @@ def admin_reorder_images(
         res = reorder_property_images(db, property_id, payload.items or [])
         return res
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
+        raise HTTPException(status_code=400, detail={"code": str(e)})
 
 # ====== Gestão de imóvel (admin) ======
 class SetActiveIn(BaseModel):
@@ -349,109 +600,119 @@ class BackfillRefCodeOut(BaseModel):
     skipped_invalid: int = 0
 
 
-@router.post("/properties/backfill_ref_code", response_model=BackfillRefCodeOut)
-def re_properties_backfill_ref_code(payload: BackfillRefCodeIn, tenant_id: int = Depends(require_active_tenant)):
+@router.patch("/imoveis/{property_id}/ativo")
+def admin_set_active(
+    property_id: int,
+    payload: SetActiveIn,
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(require_admin_tenant_id),
+):
     try:
-        with SessionLocal() as db:
-            tenant = db.get(Tenant, int(tenant_id))
-            if not tenant:
-                raise HTTPException(status_code=404, detail="tenant_not_found")
-            stmt = (
-                select(
-                    re_models.Property.id,
-                    re_models.Property.external_id,
-                    re_models.Property.ref_code,
-                )
+        prop = set_active_property(db, property_id, payload.ativo, tenant_id=int(tenant_id))
+        return {"ok": True, "id": prop.id, "ativo": bool(prop.is_active)}
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail={"code": str(e)})
+
+@router.post("/properties/backfill_ref_code", response_model=BackfillRefCodeOut)
+def re_properties_backfill_ref_code(
+    payload: BackfillRefCodeIn,
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(require_admin_tenant_id),
+):
+    try:
+        tenant = db.get(Tenant, int(tenant_id))
+        if not tenant:
+            raise HTTPException(status_code=404, detail="tenant_not_found")
+        stmt = (
+            select(
+                re_models.Property.id,
+                re_models.Property.external_id,
+                re_models.Property.ref_code,
+            )
+            .where(
+                re_models.Property.tenant_id == tenant.id,
+            )
+        )
+        if payload.provider != "any":
+            stmt = stmt.where(re_models.Property.source == payload.provider)
+        stmt = stmt.where(re_models.Property.ref_code.is_(None))
+        stmt = stmt.where(re_models.Property.external_id.isnot(None))
+        if payload.limit:
+            stmt = stmt.limit(payload.limit)
+        rows = db.execute(stmt).all()
+
+        targeted = len(rows)
+        updated = 0
+        conflicts: list[dict] = []
+        skipped_invalid = 0
+
+        # Regex: letra + 2-6 dígitos (normalizado em ndimoveis.parse_detail)
+        rx = re.compile(r"^[A-Za-z][0-9]{2,6}$")
+
+        for pid, ext_id, _ in rows:
+            eid = (ext_id or "").strip()
+            if not eid or not rx.match(eid):
+                skipped_invalid += 1
+                continue
+
+            exists_stmt = (
+                select(re_models.Property.id)
                 .where(
                     re_models.Property.tenant_id == tenant.id,
+                    re_models.Property.ref_code == eid,
                 )
+                .limit(1)
             )
-            if payload.provider != "any":
-                stmt = stmt.where(re_models.Property.source == payload.provider)
-            stmt = stmt.where(re_models.Property.ref_code.is_(None))
-            stmt = stmt.where(re_models.Property.external_id.isnot(None))
-            if payload.limit:
-                stmt = stmt.limit(payload.limit)
-            rows = db.execute(stmt).all()
+            existing = db.execute(exists_stmt).scalar_one_or_none()
+            if existing and int(existing) != int(pid):
+                conflicts.append({"property_id": pid, "conflict_with": int(existing), "ref_code": eid})
+                continue
 
-            targeted = len(rows)
-            updated = 0
-            conflicts: list[dict] = []
-            skipped_invalid = 0
+            if payload.dry_run:
+                updated += 1
+                continue
 
-            # Regex: letra + 2-6 dígitos (normalizado em ndimoveis.parse_detail)
-            rx = re.compile(r"^[A-Za-z][0-9]{2,6}$")
-
-            for pid, ext_id, _ in rows:
-                eid = (ext_id or "").strip()
-                if not eid or not rx.match(eid):
-                    skipped_invalid += 1
-                    continue
-                # Checar conflito (outro imóvel com mesmo ref_code)
-                exists_stmt = (
-                    select(re_models.Property.id)
-                    .where(
-                        re_models.Property.tenant_id == tenant.id,
-                        re_models.Property.ref_code == eid,
-                    )
-                    .limit(1)
-                )
-                existing = db.execute(exists_stmt).scalar_one_or_none()
-                if existing and int(existing) != int(pid):
-                    conflicts.append({"property_id": pid, "conflict_with": int(existing), "ref_code": eid})
-                    continue
-                if payload.dry_run:
+            prop = db.get(re_models.Property, int(pid))
+            if prop and int(getattr(prop, "tenant_id", 0) or 0) == int(tenant.id):
+                prop.ref_code = eid
+                try:
+                    db.add(prop)
+                    db.commit()
                     updated += 1
-                    continue
-                # Atualizar ref_code
-                prop = db.get(re_models.Property, int(pid))
-                if prop and int(getattr(prop, "tenant_id", 0) or 0) == int(tenant.id):
-                    prop.ref_code = eid
-                    try:
-                        db.add(prop)
-                        db.commit()
-                        updated += 1
-                    except Exception as e:  # índice único pode disparar conflito em corrida
-                        db.rollback()
-                        conflicts.append({"property_id": pid, "error": str(e), "ref_code": eid})
+                except Exception as e:  # noqa: BLE001
+                    db.rollback()
+                    conflicts.append({"property_id": pid, "error": str(e), "ref_code": eid})
 
-            return BackfillRefCodeOut(
-                targeted=targeted, updated=updated, conflicts=conflicts, skipped_invalid=skipped_invalid
-            )
+        return BackfillRefCodeOut(
+            targeted=targeted,
+            updated=updated,
+            conflicts=conflicts,
+            skipped_invalid=skipped_invalid,
+        )
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=400, detail={"code": "backfill_ref_code_error", "message": str(e)})
 
 
-@router.patch("/imoveis/{property_id}/ativo")
-def admin_set_active(
-    property_id: int,
-    payload: SetActiveIn,
-    db: Session = Depends(get_db),
-    tenant_id: int = Depends(require_active_tenant),
-):
-    try:
-        prop = set_active_property(db, property_id, payload.ativo, tenant_id=int(tenant_id))
-        return {"ok": True, "id": prop.id, "ativo": bool(prop.is_active)}
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-
-
 @router.delete("/imoveis/{property_id}")
-def admin_soft_delete_property(property_id: int, db: Session = Depends(get_db), tenant_id: int = Depends(require_active_tenant)):
+def admin_soft_delete_property(property_id: int, db: Session = Depends(get_db), tenant_id: int = Depends(require_admin_tenant_id)):
     try:
         return soft_delete_property(db, property_id, tenant_id=int(tenant_id))
     except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=404, detail={"code": str(e)})
+    except Exception as e:
+        raise HTTPException(status_code=400, detail={"code": str(e)})
 
 
 @router.delete("/imoveis/{property_id}/hard")
-def admin_hard_delete_property(property_id: int, db: Session = Depends(get_db), tenant_id: int = Depends(require_active_tenant)):
+def admin_hard_delete_property(property_id: int, db: Session = Depends(get_db), tenant_id: int = Depends(require_admin_tenant_id)):
     try:
         return hard_delete_property(db, property_id, tenant_id=int(tenant_id))
     except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=404, detail={"code": str(e)})
+    except Exception as e:
+        raise HTTPException(status_code=400, detail={"code": str(e)})
 
 
 # ====== Exclusão em lote (admin) ======
@@ -462,7 +723,7 @@ class BulkDeleteIn(BaseModel):
 
 
 @router.post("/imoveis/bulk-delete")
-def admin_bulk_delete_properties(payload: BulkDeleteIn, db: Session = Depends(get_db), tenant_id: int = Depends(require_active_tenant)):
+def admin_bulk_delete_properties(payload: BulkDeleteIn, db: Session = Depends(get_db), tenant_id: int = Depends(require_admin_tenant_id)):
     try:
         tenant = db.get(Tenant, int(tenant_id))
         term_title = (payload.title_contains or "").strip()
@@ -549,17 +810,22 @@ class RECountOut(BaseModel):
 
 
 @router.get("/properties/count", response_model=RECountOut)
-def re_properties_count(source: str = "ndimoveis", tenant_id: int = Depends(require_active_tenant)):
+def re_properties_count(
+    source: str = "ndimoveis",
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(require_admin_tenant_id),
+):
     try:
-        with SessionLocal() as db:
-            tenant = db.get(Tenant, int(tenant_id))
-            stmt = select(re_models.Property).where(re_models.Property.tenant_id == tenant.id)
-            if source:
-                stmt = stmt.where(re_models.Property.source == source)
-            # count(*) com SQLAlchemy 2.x
-            from sqlalchemy import func
-            total = db.execute(select(func.count()).select_from(stmt.subquery())).scalar_one()
-            return RECountOut(total=int(total))
+        tenant = db.get(Tenant, int(tenant_id))
+        if not tenant:
+            raise HTTPException(status_code=404, detail="tenant_not_found")
+        stmt = select(re_models.Property).where(re_models.Property.tenant_id == tenant.id)
+        if source:
+            stmt = stmt.where(re_models.Property.source == source)
+        # count(*) com SQLAlchemy 2.x
+        from sqlalchemy import func
+        total = db.execute(select(func.count()).select_from(stmt.subquery())).scalar_one()
+        return RECountOut(total=int(total))
     except HTTPException:
         raise
     except Exception as e:
@@ -569,8 +835,8 @@ def re_properties_count(source: str = "ndimoveis", tenant_id: int = Depends(requ
 class RESampleItem(BaseModel):
     id: int
     external_id: str | None
-    title: str
-    price: float
+    title: str = Field(serialization_alias="titulo")
+    price: float = Field(serialization_alias="preco")
 
 
 class RESampleOut(BaseModel):
@@ -578,34 +844,41 @@ class RESampleOut(BaseModel):
 
 
 @router.get("/properties/sample", response_model=RESampleOut)
-def re_properties_sample(source: str = "ndimoveis", limit: int = 10, order: Literal["created", "updated"] = "created", tenant_id: int = Depends(require_active_tenant)):
+def re_properties_sample(
+    source: str = "ndimoveis",
+    limit: int = 10,
+    order: Literal["created", "updated"] = "created",
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(require_admin_tenant_id),
+):
     try:
-        with SessionLocal() as db:
-            tenant = db.get(Tenant, int(tenant_id))
-            stmt = (
-                select(
-                    re_models.Property.id,
-                    re_models.Property.external_id,
-                    re_models.Property.title,
-                    re_models.Property.price,
-                )
-                .where(re_models.Property.tenant_id == tenant.id)
+        tenant = db.get(Tenant, int(tenant_id))
+        if not tenant:
+            raise HTTPException(status_code=404, detail="tenant_not_found")
+        stmt = (
+            select(
+                re_models.Property.id,
+                re_models.Property.external_id,
+                re_models.Property.title,
+                re_models.Property.price,
             )
-            if source:
-                stmt = stmt.where(re_models.Property.source == source)
-            order_col = re_models.Property.created_at if order == "created" else re_models.Property.updated_at
-            stmt = stmt.order_by(order_col.desc()).limit(max(1, min(limit, 50)))
-            rows = db.execute(stmt).all()
-            items = [
-                RESampleItem(
-                    id=row[0],
-                    external_id=row[1],
-                    title=row[2],
-                    price=float(row[3] or 0.0),
-                )
-                for row in rows
-            ]
-            return RESampleOut(items=items)
+            .where(re_models.Property.tenant_id == tenant.id)
+        )
+        if source:
+            stmt = stmt.where(re_models.Property.source == source)
+        order_col = re_models.Property.created_at if order == "created" else re_models.Property.updated_at
+        stmt = stmt.order_by(order_col.desc()).limit(max(1, min(limit, 50)))
+        rows = db.execute(stmt).all()
+        items = [
+            RESampleItem(
+                id=row[0],
+                external_id=row[1],
+                title=row[2],
+                price=float(row[3] or 0.0),
+            )
+            for row in rows
+        ]
+        return RESampleOut(items=items)
     except HTTPException:
         raise
     except Exception as e:
@@ -616,22 +889,25 @@ def re_properties_sample(source: str = "ndimoveis", limit: int = 10, order: Lite
 class PropertyMetaOut(BaseModel):
     id: int
     external_id: str | None
-    source: str | None
-    title: str | None
+    source: str | None = Field(serialization_alias="fonte")
+    title: str | None = Field(serialization_alias="titulo")
 
 
 @router.get("/properties/{property_id}/meta", response_model=PropertyMetaOut)
-def re_property_meta(property_id: int, tenant_id: int = Depends(require_active_tenant)):
+def re_property_meta(
+    property_id: int,
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(require_admin_tenant_id),
+):
     try:
-        with SessionLocal() as db:
-            prop = (
-                db.query(re_models.Property)
-                .filter(re_models.Property.tenant_id == int(tenant_id), re_models.Property.id == int(property_id))
-                .first()
-            )
-            if not prop:
-                raise HTTPException(status_code=404, detail="property_not_found")
-            return PropertyMetaOut(id=prop.id, external_id=prop.external_id, source=prop.source, title=prop.title)
+        prop = (
+            db.query(re_models.Property)
+            .filter(re_models.Property.tenant_id == int(tenant_id), re_models.Property.id == int(property_id))
+            .first()
+        )
+        if not prop:
+            raise HTTPException(status_code=404, detail="property_not_found")
+        return PropertyMetaOut(id=prop.id, external_id=prop.external_id, source=prop.source, title=prop.title)
     except HTTPException:
         raise
     except Exception as e:
@@ -642,31 +918,34 @@ def re_property_meta(property_id: int, tenant_id: int = Depends(require_active_t
 class PropertyInternalOut(BaseModel):
     id: int
     external_id: str | None
-    source: str | None
-    title: str | None
-    description: str | None
-    address_json: dict | None
+    source: str | None = Field(serialization_alias="fonte")
+    title: str | None = Field(serialization_alias="titulo")
+    description: str | None = Field(serialization_alias="descricao")
+    address_json: dict | None = Field(serialization_alias="endereco_json")
 
 
 @router.get("/properties/{property_id}/internal", response_model=PropertyInternalOut)
-def re_property_internal(property_id: int, tenant_id: int = Depends(require_active_tenant)):
+def re_property_internal(
+    property_id: int,
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(require_admin_tenant_id),
+):
     try:
-        with SessionLocal() as db:
-            prop = (
-                db.query(re_models.Property)
-                .filter(re_models.Property.tenant_id == int(tenant_id), re_models.Property.id == int(property_id))
-                .first()
-            )
-            if not prop:
-                raise HTTPException(status_code=404, detail="property_not_found")
-            return PropertyInternalOut(
-                id=prop.id,
-                external_id=prop.external_id,
-                source=prop.source,
-                title=prop.title,
-                description=getattr(prop, "description", None),
-                address_json=getattr(prop, "address_json", None),
-            )
+        prop = (
+            db.query(re_models.Property)
+            .filter(re_models.Property.tenant_id == int(tenant_id), re_models.Property.id == int(property_id))
+            .first()
+        )
+        if not prop:
+            raise HTTPException(status_code=404, detail="property_not_found")
+        return PropertyInternalOut(
+            id=prop.id,
+            external_id=prop.external_id,
+            source=prop.source,
+            title=prop.title,
+            description=getattr(prop, "description", None),
+            address_json=getattr(prop, "address_json", None),
+        )
     except HTTPException:
         raise
     except Exception as e:
@@ -681,9 +960,9 @@ class RECheckByExternalIn(BaseModel):
 class RECheckItem(BaseModel):
     external_id: str
     id: int | None = None
-    has_description: bool = False
-    description_len: int = 0
-    source_url: str | None = None
+    has_description: bool = Field(default=False, serialization_alias="tem_descricao")
+    description_len: int = Field(default=0, serialization_alias="tamanho_descricao")
+    source_url: str | None = Field(default=None, serialization_alias="url_origem")
 
 
 class RECheckByExternalOut(BaseModel):
@@ -691,38 +970,41 @@ class RECheckByExternalOut(BaseModel):
 
 
 @router.post("/properties/check_by_external", response_model=RECheckByExternalOut)
-def re_properties_check_by_external(payload: RECheckByExternalIn, tenant_id: int = Depends(require_active_tenant)):
+def re_properties_check_by_external(
+    payload: RECheckByExternalIn,
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(require_admin_tenant_id),
+):
     try:
         out: list[RECheckItem] = []
         ext_ids = [str(e).strip() for e in (payload.external_ids or []) if str(e).strip()]
         if not ext_ids:
             return RECheckByExternalOut(items=[])
-        with SessionLocal() as db:
-            for eid in ext_ids:
-                stmt = (
-                    select(re_models.Property)
-                    .where(
-                        re_models.Property.tenant_id == int(tenant_id),
-                        re_models.Property.source == "ndimoveis",
-                        re_models.Property.external_id == eid,
-                    )
-                    .limit(1)
+        for eid in ext_ids:
+            stmt = (
+                select(re_models.Property)
+                .where(
+                    re_models.Property.tenant_id == int(tenant_id),
+                    re_models.Property.source == "ndimoveis",
+                    re_models.Property.external_id == eid,
                 )
-                prop = db.execute(stmt).scalar_one_or_none()
-                if not prop:
-                    out.append(RECheckItem(external_id=eid))
-                    continue
-                desc = getattr(prop, "description", None) or ""
-                data = getattr(prop, "address_json", None) or {}
-                out.append(
-                    RECheckItem(
-                        external_id=eid,
-                        id=prop.id,
-                        has_description=bool(desc.strip()),
-                        description_len=len(desc or ""),
-                        source_url=str(data.get("source_url") or None),
-                    )
+                .limit(1)
+            )
+            prop = db.execute(stmt).scalar_one_or_none()
+            if not prop:
+                out.append(RECheckItem(external_id=eid))
+                continue
+            desc = getattr(prop, "description", None) or ""
+            data = getattr(prop, "address_json", None) or {}
+            out.append(
+                RECheckItem(
+                    external_id=eid,
+                    id=prop.id,
+                    has_description=bool(desc.strip()),
+                    description_len=len(desc or ""),
+                    source_url=str(data.get("source_url") or None),
                 )
+            )
         return RECheckByExternalOut(items=out)
     except HTTPException:
         raise
@@ -745,7 +1027,7 @@ class RepairByIdOut(BaseModel):
 
 
 @router.post("/import/ndimoveis/repair_by_id", response_model=RepairByIdOut)
-def re_nd_repair_by_id(payload: RepairByIdIn, db: Session = Depends(get_db), tenant_id: int = Depends(require_active_tenant)):
+def re_nd_repair_by_id(payload: RepairByIdIn, db: Session = Depends(get_db), tenant_id: int = Depends(require_admin_tenant_id)):
     try:
         prop = (
             db.query(re_models.Property)
@@ -793,7 +1075,7 @@ def re_nd_repair_by_id(payload: RepairByIdIn, db: Session = Depends(get_db), ten
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=400, detail={"code": "nd_repair_by_id_error", "message": str(e)})
+        raise HTTPException(status_code=400, detail={"code": "re_repair_by_id_error", "message": str(e)})
 
 
 # ====== Repair de preços (corrige apenas o campo price) ======
@@ -811,27 +1093,30 @@ class RepairPricesOut(BaseModel):
 
 
 @router.post("/repair/prices", response_model=RepairPricesOut)
-def re_repair_prices(payload: RepairPricesIn, tenant_id: int = Depends(require_active_tenant)):
+def re_repair_prices(
+    payload: RepairPricesIn,
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(require_admin_tenant_id),
+):
     try:
-        with SessionLocal() as db:
-            tenant = db.get(Tenant, int(tenant_id))
-            if not tenant:
-                raise HTTPException(status_code=404, detail="tenant_not_found")
-            # Seleciona últimos N imóveis pela data de atualização (prioridade) do source
-            stmt = (
-                select(
-                    re_models.Property.id,
-                    re_models.Property.external_id,
-                )
-                .where(
-                    re_models.Property.tenant_id == tenant.id,
-                    re_models.Property.source == payload.source,
-                )
-                .order_by(re_models.Property.updated_at.desc())
-                .limit(payload.limit)
+        tenant = db.get(Tenant, int(tenant_id))
+        if not tenant:
+            raise HTTPException(status_code=404, detail="tenant_not_found")
+        # Seleciona últimos N imóveis pela data de atualização (prioridade) do source
+        stmt = (
+            select(
+                re_models.Property.id,
+                re_models.Property.external_id,
             )
-            rows = db.execute(stmt).all()
-            target_ext_ids = [r[1] for r in rows if r[1]]
+            .where(
+                re_models.Property.tenant_id == tenant.id,
+                re_models.Property.source == payload.source,
+            )
+            .order_by(re_models.Property.updated_at.desc())
+            .limit(payload.limit)
+        )
+        rows = db.execute(stmt).all()
+        target_ext_ids = [r[1] for r in rows if r[1]]
 
         # Descobrir URLs nas primeiras páginas e montar mapa ext_id -> dto
         fins = ["venda", "locacao"]
@@ -869,44 +1154,44 @@ def re_repair_prices(payload: RepairPricesIn, tenant_id: int = Depends(require_a
         # Atualizar apenas o campo price
         updated = 0
         not_found: list[str] = []
-        with SessionLocal() as db:
-            for eid in target_ext_ids:
-                info = found_map.get(eid)
-                if not info:
-                    not_found.append(eid)
-                    continue
-                new_price = float(info.get("price") or 0.0)
-                new_purpose = info.get("purpose")
-                if new_price <= 0:
-                    # Mesmo sem preço válido, ainda podemos corrigir finalidade
+        for eid in target_ext_ids:
+            info = found_map.get(eid)
+            if not info:
+                not_found.append(eid)
+                continue
+            new_price = float(info.get("price") or 0.0)
+            new_purpose = info.get("purpose")
+            if new_price <= 0:
+                # Mesmo sem preço válido, ainda podemos corrigir finalidade
+                pass
+            stmt = select(re_models.Property).where(
+                re_models.Property.tenant_id == tenant.id,
+                re_models.Property.source == payload.source,
+                re_models.Property.external_id == eid,
+            )
+            prop = db.execute(stmt).scalar_one_or_none()
+            if not prop:
+                continue
+            changed = False
+            if new_price > 0 and prop.price != new_price:
+                prop.price = new_price
+                changed = True
+            if isinstance(new_purpose, str) and new_purpose in ("sale", "rent"):
+                # Atualiza finalidade se divergente
+                try:
+                    from app.domain.realestate.models import PropertyPurpose as _PP
+
+                    new_pp = _PP(new_purpose)
+                    if getattr(prop, "purpose", None) != new_pp:
+                        prop.purpose = new_pp
+                        changed = True
+                except Exception:
                     pass
-                stmt = select(re_models.Property).where(
-                    re_models.Property.tenant_id == tenant.id,
-                    re_models.Property.source == payload.source,
-                    re_models.Property.external_id == eid,
-                )
-                prop = db.execute(stmt).scalar_one_or_none()
-                if not prop:
-                    continue
-                changed = False
-                if new_price > 0 and prop.price != new_price:
-                    prop.price = new_price
-                    changed = True
-                if isinstance(new_purpose, str) and new_purpose in ("sale", "rent"):
-                    # Atualiza finalidade se divergente
-                    try:
-                        from app.domain.realestate.models import PropertyPurpose as _PP
-                        new_pp = _PP(new_purpose)
-                        if getattr(prop, "purpose", None) != new_pp:
-                            prop.purpose = new_pp
-                            changed = True
-                    except Exception:
-                        pass
-                if changed:
-                    db.add(prop)
-                    updated += 1
-            if updated:
-                db.commit()
+            if changed:
+                db.add(prop)
+                updated += 1
+        if updated:
+            db.commit()
 
         return RepairPricesOut(targeted=len(target_ext_ids), updated_prices=updated, not_found=not_found[:50])
     except HTTPException:
@@ -932,102 +1217,111 @@ class RepairPurposeOut(BaseModel):
 
 
 @router.post("/repair/purpose_from_title", response_model=RepairPurposeOut)
-def re_repair_purpose_from_title(payload: RepairPurposeIn, tenant_id: int = Depends(require_active_tenant)):
+def re_repair_purpose_from_title(
+    payload: RepairPurposeIn,
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(require_admin_tenant_id),
+):
     try:
-        with SessionLocal() as db:
-            tenant = db.get(Tenant, int(tenant_id))
-            if not tenant:
-                raise HTTPException(status_code=404, detail="tenant_not_found")
-            stmt = (
-                select(
-                    re_models.Property.id,
-                    re_models.Property.title,
-                    re_models.Property.purpose,
-                    re_models.Property.address_city,
-                    re_models.Property.address_state,
-                )
-                .where(
-                    re_models.Property.tenant_id == tenant.id,
-                    re_models.Property.source == payload.source,
-                )
-                .order_by(re_models.Property.updated_at.desc())
-                .limit(payload.limit)
+        tenant = db.get(Tenant, int(tenant_id))
+        if not tenant:
+            raise HTTPException(status_code=404, detail="tenant_not_found")
+        stmt = (
+            select(
+                re_models.Property.id,
+                re_models.Property.title,
+                re_models.Property.purpose,
+                re_models.Property.address_city,
+                re_models.Property.address_state,
             )
-            if payload.cidade:
-                stmt = stmt.where(re_models.Property.address_city.ilike(f"%{payload.cidade.strip()}%"))
-            if payload.estado:
-                stmt = stmt.where(re_models.Property.address_state == payload.estado.strip().upper())
+            .where(
+                re_models.Property.tenant_id == tenant.id,
+                re_models.Property.source == payload.source,
+            )
+            .order_by(re_models.Property.updated_at.desc())
+            .limit(payload.limit)
+        )
+        if payload.cidade:
+            stmt = stmt.where(re_models.Property.address_city.ilike(f"%{payload.cidade.strip()}%"))
+        if payload.estado:
+            stmt = stmt.where(re_models.Property.address_state == payload.estado.strip().upper())
 
-            rows = db.execute(stmt).all()
-            targeted = len(rows)
-            updated = 0
-            unchanged = 0
-            examples: list[dict] = []
+        rows = db.execute(stmt).all()
+        targeted = len(rows)
+        updated = 0
+        unchanged = 0
+        examples: list[dict] = []
 
-            # Função simples para inferir finalidade com base no título
-            import re as _re
-            def infer_purpose(title: str | None) -> str | None:
-                if not title:
-                    return None
-                t = title.lower()
-                if _re.search(r"loca[cç][aã]o|alug", t):
-                    return "rent"
-                if _re.search(r"venda", t):
-                    return "sale"
+        # Função simples para inferir finalidade com base no título
+        import re as _re
+
+        def infer_purpose(title: str | None) -> str | None:
+            if not title:
                 return None
+            t = title.lower()
+            if _re.search(r"loca[cç][aã]o|alug", t):
+                return "rent"
+            if _re.search(r"venda", t):
+                return "sale"
+            return None
 
-            if not payload.dry_run:
-                for rid, title, purpose, city, state in rows:
-                    new_p = infer_purpose(title)
-                    if new_p is None:
-                        unchanged += 1
-                        continue
-                    try:
-                        from app.domain.realestate.models import PropertyPurpose as _PP
-                        new_pp = _PP(new_p)
-                    except Exception:
-                        unchanged += 1
-                        continue
-                    prop = (
-                        db.query(re_models.Property)
-                        .filter(re_models.Property.tenant_id == tenant.id, re_models.Property.id == int(rid))
-                        .first()
-                    )
-                    if not prop:
-                        unchanged += 1
-                        continue
-                    if getattr(prop, "purpose", None) != new_pp:
-                        prop.purpose = new_pp
-                        db.add(prop)
-                        updated += 1
-                        if len(examples) < 10:
-                            examples.append({
+        if not payload.dry_run:
+            for rid, title, purpose, city, state in rows:
+                new_p = infer_purpose(title)
+                if new_p is None:
+                    unchanged += 1
+                    continue
+                try:
+                    from app.domain.realestate.models import PropertyPurpose as _PP
+
+                    new_pp = _PP(new_p)
+                except Exception:
+                    unchanged += 1
+                    continue
+                prop = (
+                    db.query(re_models.Property)
+                    .filter(re_models.Property.tenant_id == tenant.id, re_models.Property.id == int(rid))
+                    .first()
+                )
+                if not prop:
+                    unchanged += 1
+                    continue
+                if getattr(prop, "purpose", None) != new_pp:
+                    prop.purpose = new_pp
+                    db.add(prop)
+                    updated += 1
+                    if len(examples) < 10:
+                        examples.append(
+                            {
                                 "id": rid,
-                                "title": title,
+                                "titulo": title,
                                 "from": str(purpose),
                                 "to": new_p,
                                 "cidade": city,
                                 "estado": state,
-                            })
-                    else:
-                        unchanged += 1
-                if updated:
-                    db.commit()
-            else:
-                # Apenas simula (dry run)
-                for rid, title, purpose, city, state in rows:
-                    new_p = infer_purpose(title)
-                    if new_p and len(examples) < 10:
-                        examples.append({
+                            }
+                        )
+                else:
+                    unchanged += 1
+            if updated:
+                db.commit()
+        else:
+            # Apenas simula (dry run)
+            for rid, title, purpose, city, state in rows:
+                new_p = infer_purpose(title)
+                if new_p and len(examples) < 10:
+                    examples.append(
+                        {
                             "id": rid,
-                            "title": title,
+                            "titulo": title,
                             "from": str(purpose),
                             "to": new_p,
                             "cidade": city,
                             "estado": state,
-                        })
+                        }
+                    )
 
-            return RepairPurposeOut(targeted=targeted, updated=updated, unchanged=unchanged, examples=examples)
+        return RepairPurposeOut(targeted=targeted, updated=updated, unchanged=unchanged, examples=examples)
     except HTTPException:
         raise
     except Exception as e:
@@ -1067,103 +1361,108 @@ def _is_valid_image_url(url: str | None) -> bool:
 
 
 @router.post("/images/repair_invalid", response_model=RepairImagesOut)
-def re_repair_invalid_images(payload: RepairImagesIn, tenant_id: int = Depends(require_active_tenant)):
+def re_repair_invalid_images(
+    payload: RepairImagesIn,
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(require_admin_tenant_id),
+):
     """
     Remove imagens com URLs inválidas (sem domínio válido) e promove 
     uma imagem válida como capa quando necessário.
     """
     try:
-        with SessionLocal() as db:
-            tenant = db.get(Tenant, int(tenant_id))
-            if not tenant:
-                raise HTTPException(status_code=404, detail="tenant_not_found")
-            
-            # Buscar imóveis
-            stmt = (
-                select(re_models.Property.id)
-                .where(
-                    re_models.Property.tenant_id == tenant.id,
-                    re_models.Property.source == payload.source,
-                )
-                .order_by(re_models.Property.updated_at.desc())
-                .limit(payload.limit)
+        tenant = db.get(Tenant, int(tenant_id))
+        if not tenant:
+            raise HTTPException(status_code=404, detail="tenant_not_found")
+
+        # Buscar imóveis
+        stmt = (
+            select(re_models.Property.id)
+            .where(
+                re_models.Property.tenant_id == tenant.id,
+                re_models.Property.source == payload.source,
             )
-            if payload.cidade:
-                stmt = stmt.where(re_models.Property.address_city.ilike(f"%{payload.cidade.strip()}%"))
-            if payload.estado:
-                stmt = stmt.where(re_models.Property.address_state == payload.estado.strip().upper())
-            
-            property_ids = [row[0] for row in db.execute(stmt).all()]
-            
-            properties_checked = len(property_ids)
-            images_removed = 0
-            properties_updated = 0
-            examples: list[dict] = []
-            
-            for prop_id in property_ids:
-                # Buscar imagens do imóvel
-                img_stmt = (
-                    select(re_models.PropertyImage)
-                    .where(re_models.PropertyImage.property_id == prop_id)
-                    .order_by(re_models.PropertyImage.sort_order)
-                )
-                images = db.execute(img_stmt).scalars().all()
-                
-                if not images:
-                    continue
-                
-                # Separar válidas e inválidas
-                invalid_images = [img for img in images if not _is_valid_image_url(img.url)]
-                valid_images = [img for img in images if _is_valid_image_url(img.url)]
-                
-                if not invalid_images:
-                    continue
-                
-                property_changed = False
-                
-                if not payload.dry_run:
-                    # Remover imagens inválidas
-                    for img in invalid_images:
-                        db.delete(img)
-                        images_removed += 1
-                        property_changed = True
-                    
-                    # Se havia capa inválida e existem imagens válidas, promover a primeira válida
-                    had_invalid_cover = any(img.is_cover for img in invalid_images)
-                    if had_invalid_cover and valid_images:
-                        # Remover flag de capa de todas
-                        for img in valid_images:
-                            img.is_cover = False
-                        # Promover primeira válida
-                        valid_images[0].is_cover = True
-                        db.add(valid_images[0])
-                        property_changed = True
-                
-                if property_changed or payload.dry_run:
-                    properties_updated += 1
-                    if len(examples) < 10:
-                        prop = (
-                            db.query(re_models.Property)
-                            .filter(re_models.Property.tenant_id == tenant.id, re_models.Property.id == int(prop_id))
-                            .first()
-                        )
-                        examples.append({
+            .order_by(re_models.Property.updated_at.desc())
+            .limit(payload.limit)
+        )
+        if payload.cidade:
+            stmt = stmt.where(re_models.Property.address_city.ilike(f"%{payload.cidade.strip()}%"))
+        if payload.estado:
+            stmt = stmt.where(re_models.Property.address_state == payload.estado.strip().upper())
+
+        property_ids = [row[0] for row in db.execute(stmt).all()]
+
+        properties_checked = len(property_ids)
+        images_removed = 0
+        properties_updated = 0
+        examples: list[dict] = []
+
+        for prop_id in property_ids:
+            # Buscar imagens do imóvel
+            img_stmt = (
+                select(re_models.PropertyImage)
+                .where(re_models.PropertyImage.property_id == prop_id)
+                .order_by(re_models.PropertyImage.sort_order)
+            )
+            images = db.execute(img_stmt).scalars().all()
+
+            if not images:
+                continue
+
+            # Separar válidas e inválidas
+            invalid_images = [img for img in images if not _is_valid_image_url(img.url)]
+            valid_images = [img for img in images if _is_valid_image_url(img.url)]
+
+            if not invalid_images:
+                continue
+
+            property_changed = False
+
+            if not payload.dry_run:
+                # Remover imagens inválidas
+                for img in invalid_images:
+                    db.delete(img)
+                    images_removed += 1
+                    property_changed = True
+
+                # Se havia capa inválida e existem imagens válidas, promover a primeira válida
+                had_invalid_cover = any(img.is_cover for img in invalid_images)
+                if had_invalid_cover and valid_images:
+                    # Remover flag de capa de todas
+                    for img in valid_images:
+                        img.is_cover = False
+                    # Promover primeira válida
+                    valid_images[0].is_cover = True
+                    db.add(valid_images[0])
+                    property_changed = True
+
+            if property_changed or payload.dry_run:
+                properties_updated += 1
+                if len(examples) < 10:
+                    prop = (
+                        db.query(re_models.Property)
+                        .filter(re_models.Property.tenant_id == tenant.id, re_models.Property.id == int(prop_id))
+                        .first()
+                    )
+                    examples.append(
+                        {
                             "property_id": prop_id,
-                            "title": prop.title if prop else None,
+                            "titulo": prop.title if prop else None,
                             "invalid_urls": [img.url for img in invalid_images[:3]],
                             "invalid_count": len(invalid_images),
                             "valid_count": len(valid_images),
-                        })
-            
-            if not payload.dry_run and images_removed > 0:
-                db.commit()
-            
-            return RepairImagesOut(
-                properties_checked=properties_checked,
-                images_removed=images_removed if not payload.dry_run else 0,
-                properties_updated=properties_updated,
-                examples=examples,
-            )
+                        }
+                    )
+
+        if not payload.dry_run and images_removed > 0:
+            db.commit()
+
+        return RepairImagesOut(
+            properties_checked=properties_checked,
+            images_removed=images_removed if not payload.dry_run else 0,
+            properties_updated=properties_updated,
+            examples=examples,
+        )
     except HTTPException as e:
         raise e
     except Exception as e:
@@ -1187,72 +1486,73 @@ class REResetOut(BaseModel):
 
 
 @router.post("/properties/reset", response_model=REResetOut)
-def re_properties_reset(payload: REResetIn, tenant_id: int = Depends(require_active_tenant)):
+def re_properties_reset(
+    payload: REResetIn,
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(require_admin_tenant_id),
+):
     """
     Remove TODOS os imóveis e imagens da fonte informada apenas para o tenant padrão.
     - dry_run=True: apenas retorna as contagens (não deleta nada)
     - Para executar a exclusão, envie confirm="CONFIRM" e dry_run=False
     """
     try:
-        with SessionLocal() as db:
-            tenant = db.get(Tenant, int(tenant_id))
-            if not tenant:
-                raise HTTPException(status_code=404, detail="tenant_not_found")
+        tenant = db.get(Tenant, int(tenant_id))
+        if not tenant:
+            raise HTTPException(status_code=404, detail="tenant_not_found")
 
-            # Coletar IDs de imóveis por tenant+source
-            p_stmt = (
-                select(re_models.Property.id)
-                .where(re_models.Property.tenant_id == tenant.id)
-            )
-            if payload.source:
-                p_stmt = p_stmt.where(re_models.Property.source == payload.source)
-            prop_ids = [row[0] for row in db.execute(p_stmt).all()]
+        # Coletar IDs de imóveis por tenant+source
+        p_stmt = select(re_models.Property.id).where(re_models.Property.tenant_id == tenant.id)
+        if payload.source:
+            p_stmt = p_stmt.where(re_models.Property.source == payload.source)
+        prop_ids = [row[0] for row in db.execute(p_stmt).all()]
 
-            if not prop_ids:
-                return REResetOut(
-                    source=payload.source,
-                    dry_run=bool(payload.dry_run),
-                    properties_total=0,
-                    images_total=0,
-                    deleted_properties=0,
-                    deleted_images=0,
-                )
-
-            # Contar imagens relacionadas
-            img_total = db.execute(
-                select(func.count()).where(re_models.PropertyImage.property_id.in_(prop_ids))
-            ).scalar_one()
-
-            if payload.dry_run:
-                return REResetOut(
-                    source=payload.source,
-                    dry_run=True,
-                    properties_total=len(prop_ids),
-                    images_total=int(img_total),
-                    deleted_properties=0,
-                    deleted_images=0,
-                )
-
-            if payload.confirm != "CONFIRM":
-                raise HTTPException(status_code=400, detail={"code": "confirm_required", "message": "Envie confirm='CONFIRM' para executar sem dry_run"})
-
-            # Executar deleção em transação
-            del_imgs_stmt = delete(re_models.PropertyImage).where(re_models.PropertyImage.property_id.in_(prop_ids))
-            del_props_stmt = delete(re_models.Property).where(re_models.Property.id.in_(prop_ids))
-            
-            deleted_images_count = db.execute(del_imgs_stmt).rowcount
-            deleted_properties_count = db.execute(del_props_stmt).rowcount
-
-            db.commit()
-
+        if not prop_ids:
             return REResetOut(
                 source=payload.source,
-                dry_run=False,
+                dry_run=bool(payload.dry_run),
+                properties_total=0,
+                images_total=0,
+                deleted_properties=0,
+                deleted_images=0,
+            )
+
+        # Contar imagens relacionadas
+        img_total = db.execute(select(func.count()).where(re_models.PropertyImage.property_id.in_(prop_ids))).scalar_one()
+
+        if payload.dry_run:
+            return REResetOut(
+                source=payload.source,
+                dry_run=True,
                 properties_total=len(prop_ids),
                 images_total=int(img_total),
-                deleted_properties=deleted_properties_count,
-                deleted_images=deleted_images_count,
+                deleted_properties=0,
+                deleted_images=0,
             )
+
+        if payload.confirm != "CONFIRM":
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "confirm_required", "message": "Envie confirm='CONFIRM' para executar sem dry_run"},
+            )
+
+        # Executar deleção em transação
+        del_imgs_stmt = delete(re_models.PropertyImage).where(re_models.PropertyImage.property_id.in_(prop_ids))
+        del_props_stmt = delete(re_models.Property).where(re_models.Property.id.in_(prop_ids))
+
+        deleted_images_count = db.execute(del_imgs_stmt).rowcount
+        deleted_properties_count = db.execute(del_props_stmt).rowcount
+
+        db.commit()
+
+        return REResetOut(
+            source=payload.source,
+            dry_run=False,
+            properties_total=len(prop_ids),
+            images_total=int(img_total),
+            deleted_properties=deleted_properties_count,
+            deleted_images=deleted_images_count,
+        )
     except HTTPException as e:
         raise e
     except Exception as e:
@@ -1276,7 +1576,11 @@ class NDFromUrlsOut(BaseModel):
 
 
 @router.post("/import/ndimoveis/from_urls", response_model=NDFromUrlsOut)
-def re_nd_import_from_urls(payload: NDFromUrlsIn, db: Session = Depends(get_db), tenant_id: int = Depends(require_active_tenant)):
+def re_nd_import_from_urls(
+    payload: NDFromUrlsIn,
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(require_admin_tenant_id),
+):
     try:
         if not payload.urls:
             return NDFromUrlsOut(created=0, updated=0, images_created=0, processed=0, sampled_external_ids=[], errors=[])
@@ -1322,185 +1626,6 @@ def re_nd_import_from_urls(payload: NDFromUrlsIn, db: Session = Depends(get_db),
         raise HTTPException(status_code=400, detail={"code": "nd_from_urls_error", "message": str(e)})
 
 
-# ====== Importar (SEGURO) apenas descrição + link por URLs (ND Imóveis) ======
-class NDFromUrlsSafeIn(BaseModel):
-    urls: list[str]
-    throttle_ms: int = 250
-    fill_if_empty_only: bool = True
-    normalize_ref_url: bool = False
-    overwrite_all: bool = False
-    create_if_missing: bool = False
-
-
-class NDFromUrlsSafeOut(BaseModel):
-    processed: int
-    matched: int
-    updated_descriptions: int
-    updated_links: int
-    not_found: list[str] = []
-    errors: list[dict] = []
-
-
-@router.post("/import/ndimoveis/from_urls_safe", response_model=NDFromUrlsSafeOut)
-def re_nd_import_from_urls_safe(payload: NDFromUrlsSafeIn, db: Session = Depends(get_db), tenant_id: int = Depends(require_active_tenant)):
-    """Atualiza SOMENTE description (se vazia por padrão) e address_json.source_url, sem tocar em preço, tipo, imagens."""
-    try:
-        if not payload.urls:
-            return NDFromUrlsSafeOut(processed=0, matched=0, updated_descriptions=0, updated_links=0, not_found=[], errors=[])
-        processed = matched = upd_desc = upd_link = 0
-        not_found: list[str] = []
-        errs: list[dict] = []
-        with httpx.Client(timeout=25.0, headers={"User-Agent": "AtendeJA-Bot/1.0"}, verify=False) as client:
-            with contextlib.nullcontext(db) as db:
-                tenant = db.get(Tenant, int(tenant_id))
-                if not tenant:
-                    raise HTTPException(status_code=404, detail="tenant_not_found")
-                for url in payload.urls:
-                    try:
-                        r = client.get(url)
-                        if r.status_code != 200:
-                            errs.append({"url": url, "status": r.status_code})
-                            continue
-                        dto = nd.parse_detail(r.text, url)
-                        ext = dto.external_id
-                        if not ext:
-                            not_found.append(url)
-                            continue
-                        stmt = (
-                            select(re_models.Property)
-                            .where(
-                                re_models.Property.tenant_id == tenant.id,
-                                re_models.Property.source == "ndimoveis",
-                                re_models.Property.external_id == ext,
-                            )
-                            .limit(1)
-                        )
-                        prop = db.execute(stmt).scalar_one_or_none()
-                        if not prop:
-                            if payload.create_if_missing:
-                                # Criar registro mínimo com dados do DTO
-                                try:
-                                    title = (dto.title or "Sem título").strip() or "Sem título"
-                                    # Enums com fallback seguro
-                                    try:
-                                        type_enum = re_models.PropertyType(dto.ptype) if dto.ptype else re_models.PropertyType.apartment
-                                    except Exception:
-                                        type_enum = re_models.PropertyType.apartment
-                                    try:
-                                        purpose_enum = re_models.PropertyPurpose(dto.purpose) if dto.purpose else re_models.PropertyPurpose.sale
-                                    except Exception:
-                                        purpose_enum = re_models.PropertyPurpose.sale
-                                    price_val = float(dto.price or 0.0)
-                                    city = (dto.city or "").strip()
-                                    state = (dto.state or "").strip().upper()[:2]
-                                    data = {}
-                                    canonical_url = None
-                                    if payload.normalize_ref_url and ext:
-                                        canonical_url = f"https://www.ndimoveis.com.br/imovel/?ref={ext}"
-                                    data["source_url"] = canonical_url or url
-                                    prop = re_models.Property(
-                                        tenant_id=tenant.id,
-                                        title=title,
-                                        description=(dto.description or None),
-                                        type=type_enum,
-                                        purpose=purpose_enum,
-                                        price=price_val,
-                                        condo_fee=None,
-                                        iptu=None,
-                                        external_id=ext,
-                                        source="ndimoveis",
-                                        updated_at_source=None,
-                                        address_city=city,
-                                        address_state=state,
-                                        address_neighborhood=None,
-                                        address_json=data,
-                                        bedrooms=None,
-                                        bathrooms=None,
-                                        suites=None,
-                                        parking_spots=None,
-                                        area_total=None,
-                                        area_usable=None,
-                                        is_active=True,
-                                    )
-                                    db.add(prop)
-                                    # Contabilizar updates conforme campos definidos
-                                    if (dto.description or "").strip():
-                                        upd_desc += 1
-                                    if data.get("source_url"):
-                                        upd_link += 1
-                                    matched += 1
-                                    processed += 1
-                                    # segue para commit adiante
-                                except Exception:
-                                    not_found.append(ext)
-                                    continue
-                            else:
-                                not_found.append(ext)
-                                continue
-                        matched += 1
-                        changed = False
-                        incoming_desc = getattr(dto, "description", None)
-                        if incoming_desc and incoming_desc.strip():
-                            if payload.overwrite_all:
-                                prop.description = incoming_desc.strip()
-                                upd_desc += 1
-                                changed = True
-                            elif payload.fill_if_empty_only:
-                                if not (getattr(prop, "description", None) or "").strip():
-                                    prop.description = incoming_desc.strip()
-                                    upd_desc += 1
-                                    changed = True
-                        data = dict(getattr(prop, "address_json", None) or {})
-                        # Normalização opcional para URL curta por referência (pedido do negócio)
-                        canonical_url = None
-                        try:
-                            if payload.normalize_ref_url and ext:
-                                canonical_url = f"https://www.ndimoveis.com.br/imovel/?ref={ext}"
-                        except Exception:
-                            canonical_url = None
-                        if payload.overwrite_all:
-                            # Sempre sobrescreve o link conforme a política escolhida
-                            data["source_url"] = canonical_url or url
-                            prop.address_json = data
-                            upd_link += 1
-                            changed = True
-                        else:
-                            if payload.normalize_ref_url and canonical_url:
-                                if data.get("source_url") != canonical_url:
-                                    data["source_url"] = canonical_url
-                                    prop.address_json = data
-                                    upd_link += 1
-                                    changed = True
-                            else:
-                                # Comportamento padrão: só preencher se estiver vazio, usando a URL processada
-                                if not data.get("source_url"):
-                                    data["source_url"] = url
-                                    prop.address_json = data
-                                    upd_link += 1
-                                    changed = True
-                        if changed:
-                            db.add(prop)
-                        processed += 1
-                    except Exception as e:  # noqa: BLE001
-                        errs.append({"url": url, "error": str(e)})
-                    finally:
-                        time.sleep(max(0, payload.throttle_ms) / 1000.0)
-                if processed or matched or upd_desc or upd_link:
-                    db.commit()
-        return NDFromUrlsSafeOut(
-            processed=processed,
-            matched=matched,
-            updated_descriptions=upd_desc,
-            updated_links=upd_link,
-            not_found=not_found[:50],
-            errors=errs[:50],
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=400, detail={"code": "nd_from_urls_safe_error", "message": str(e)})
-
-
 # ====== Backfill em massa (SEGURO) - processa todos os imóveis da base ======
 class NDBackfillAllIn(BaseModel):
     max_pages_per_finalidade: int = Field(default=50, ge=1, le=100)
@@ -1515,7 +1640,12 @@ class NDBackfillAllOut(BaseModel):
 
 
 @router.post("/import/ndimoveis/backfill_all", response_model=NDBackfillAllOut)
-def re_nd_backfill_all(payload: NDBackfillAllIn, bg: BackgroundTasks, tenant_id: int = Depends(require_active_tenant)):
+def re_nd_backfill_all(
+    payload: NDBackfillAllIn,
+    bg: BackgroundTasks,
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(require_admin_tenant_id),
+):
     """
     Processa TODOS os imóveis da base (source=ndimoveis) em background:
     - Para cada imóvel, busca external_id
@@ -1525,22 +1655,21 @@ def re_nd_backfill_all(payload: NDBackfillAllIn, bg: BackgroundTasks, tenant_id:
     """
     import uuid
     task_id = str(uuid.uuid4())
-    
-    with SessionLocal() as db:
-        tenant = db.get(Tenant, int(tenant_id))
-        if not tenant:
-            raise HTTPException(status_code=404, detail="tenant_not_found")
-        stmt = select(re_models.Property.id, re_models.Property.external_id).where(
-            re_models.Property.tenant_id == tenant.id,
-            re_models.Property.source == "ndimoveis",
-        )
-        if payload.limit_properties:
-            stmt = stmt.limit(payload.limit_properties)
-        rows = db.execute(stmt).all()
-        total = len(rows)
-    
+
+    tenant = db.get(Tenant, int(tenant_id))
+    if not tenant:
+        raise HTTPException(status_code=404, detail="tenant_not_found")
+    stmt = select(re_models.Property.id, re_models.Property.external_id).where(
+        re_models.Property.tenant_id == tenant.id,
+        re_models.Property.source == "ndimoveis",
+    )
+    if payload.limit_properties:
+        stmt = stmt.limit(payload.limit_properties)
+    rows = db.execute(stmt).all()
+    total = len(rows)
+
     TASKS[task_id] = {"status": "queued", "result": None, "error": None, "total": total}
-    
+
     def _run_backfill():
         TASKS[task_id]["status"] = "running"
         try:
@@ -1593,7 +1722,7 @@ def re_nd_backfill_all(payload: NDBackfillAllIn, bg: BackgroundTasks, tenant_id:
                         continue
                     
                     # Atualiza via from_urls_safe logic
-                    with SessionLocal() as db2:
+                    with db_session() as db2:
                         try:
                             r = client.get(found_url)
                             if r.status_code != 200:
@@ -1666,7 +1795,7 @@ class BackfillProgressOut(BaseModel):
 
 
 @router.get("/import/ndimoveis/backfill_progress", response_model=BackfillProgressOut)
-def re_nd_backfill_progress(db: Session = Depends(get_db), tenant_id: int = Depends(require_active_tenant)):
+def re_nd_backfill_progress(db: Session = Depends(get_db), tenant_id: int = Depends(require_admin_tenant_id)):
     """Consulta direta no banco para ver quantos imóveis já têm descrição e source_url preenchidos."""
     with contextlib.nullcontext(db) as db:
         tenant = db.get(Tenant, int(tenant_id))

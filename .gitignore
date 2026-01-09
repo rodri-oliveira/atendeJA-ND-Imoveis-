@@ -84,3 +84,11 @@ get_*.py
 seed_*.py
 test_*.py
 dev.db-journal
+
+!/tests/
+!/tests/**
+
+# Re-ignore Python cache inside tests (tests folder is un-ignored above)
+/tests/__pycache__/
+/tests/**/*.pyc
+/tests/**/*.pyo

@@ -1,7 +1,6 @@
 from fastapi import APIRouter, HTTPException, UploadFile, File, Depends, Request
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
-from app.repositories.db import SessionLocal
 from app.repositories.models import (
     Conversation,
     ConversationStatus,
@@ -27,7 +26,8 @@ import csv
 import io
 import secrets
 from datetime import datetime, timedelta
-from app.api.deps import require_role_admin, get_db, require_active_tenant
+from app.api.deps import require_role_admin, get_db, require_admin_tenant_id
+from app.api.deps import require_admin_request_context
 from app.messaging.provider import get_provider
 
 # Definição do router e logger (precisa vir antes dos decoradores @router...)
@@ -36,7 +36,7 @@ from app.messaging.provider import get_provider
 if settings.APP_ENV == "test":
     router = APIRouter()
 else:
-    router = APIRouter(dependencies=[Depends(require_role_admin)])
+    router = APIRouter(dependencies=[Depends(require_admin_request_context)])
 log = structlog.get_logger()
 
 # Endpoint mínimo para conversas (suporta validação de auth nos testes)
@@ -92,7 +92,8 @@ def _to_dt(v: str | None):
 @router.post("/re/imoveis/import-csv", summary="Importa imóveis via CSV (upsert por external_id)")
 def import_imoveis_csv(
     file: UploadFile = File(...),
-    tenant_id: int = Depends(require_active_tenant),
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(require_admin_tenant_id),
 ):
     try:
         if settings.RE_READ_ONLY:
@@ -131,12 +132,11 @@ def import_imoveis_csv(
 
         created = updated = images_created = 0
 
-        with SessionLocal() as db:  # type: Session
-            tenant = db.get(Tenant, int(tenant_id))
-            if not tenant:
-                raise HTTPException(status_code=404, detail="tenant_not_found")
+        tenant = db.get(Tenant, int(tenant_id))
+        if not tenant:
+            raise HTTPException(status_code=404, detail="tenant_not_found")
 
-            for row in reader:
+        for row in reader:
                 ext_id = (row.get("external_id") or "").strip()
                 source = (row.get("source") or "").strip() or None
                 if not ext_id:
@@ -237,7 +237,7 @@ def import_imoveis_csv(
                         ord_ += 1
                         images_created += 1
 
-            db.commit()
+        db.commit()
 
         return {"created": created, "updated": updated, "images_created": images_created}
     except HTTPException:
@@ -308,28 +308,27 @@ def _issue_invite(db: Session, *, email: str, role: UserRole, tenant_id: int, ex
 
 
 @router.post("/users", response_model=UserOut)
-def create_user(payload: UserCreate, tenant_id: int = Depends(require_active_tenant)):
-    with SessionLocal() as db:  # type: Session
-        email = (payload.email or "").strip().lower()
-        if not email:
-            raise HTTPException(status_code=400, detail="email_required")
-        exists = db.query(User).filter(User.email == email).first()
-        if exists:
-            raise HTTPException(status_code=400, detail="email_already_exists")
-        from app.core.security import get_password_hash
+def create_user(payload: UserCreate, tenant_id: int = Depends(require_admin_tenant_id), db: Session = Depends(get_db)):
+    email = (payload.email or "").strip().lower()
+    if not email:
+        raise HTTPException(status_code=400, detail="email_required")
+    exists = db.query(User).filter(User.email == email).first()
+    if exists:
+        raise HTTPException(status_code=400, detail="email_already_exists")
+    from app.core.security import get_password_hash
 
-        user = User(
-            email=email,
-            full_name=payload.full_name,
-            hashed_password=get_password_hash(payload.password),
-            is_active=bool(payload.is_active),
-            role=payload.role,
-            tenant_id=int(tenant_id),
-        )
-        db.add(user)
-        db.commit()
-        db.refresh(user)
-        return user
+    user = User(
+        email=email,
+        full_name=payload.full_name,
+        hashed_password=get_password_hash(payload.password),
+        is_active=bool(payload.is_active),
+        role=payload.role,
+        tenant_id=int(tenant_id),
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return user
 
 
 # ------------------- Mensageria: Logs e Opt-out (Admin) -------------------
@@ -351,7 +350,7 @@ def list_message_logs(
     limit: int = 50,
     offset: int = 0,
     db: Session = Depends(get_db),
-    tenant_id: int = Depends(require_active_tenant),
+    tenant_id: int = Depends(require_admin_tenant_id),
 ):
     try:
         from datetime import datetime
@@ -398,7 +397,7 @@ def list_message_logs(
 
 
 @router.post("/messaging/suppress")
-def add_suppressed_contact(payload: SuppressIn, db: Session = Depends(get_db), tenant_id: int = Depends(require_active_tenant)):
+def add_suppressed_contact(payload: SuppressIn, db: Session = Depends(get_db), tenant_id: int = Depends(require_admin_tenant_id)):
     try:
         tenant = db.get(Tenant, int(tenant_id))
         if not tenant:
@@ -429,7 +428,7 @@ def add_suppressed_contact(payload: SuppressIn, db: Session = Depends(get_db), t
 
 
 @router.delete("/messaging/suppress")
-def remove_suppressed_contact(wa_id: str, db: Session = Depends(get_db), tenant_id: int = Depends(require_active_tenant)):
+def remove_suppressed_contact(wa_id: str, db: Session = Depends(get_db), tenant_id: int = Depends(require_admin_tenant_id)):
     try:
         tenant = db.get(Tenant, int(tenant_id))
         if not tenant:
@@ -452,7 +451,7 @@ def remove_suppressed_contact(wa_id: str, db: Session = Depends(get_db), tenant_
 
 
 @router.get("/messaging/window-status")
-def window_status(wa_id: str, db: Session = Depends(get_db), tenant_id: int = Depends(require_active_tenant)):
+def window_status(wa_id: str, db: Session = Depends(get_db), tenant_id: int = Depends(require_admin_tenant_id)):
     """Retorna se o contato está dentro da janela de 24h e quando foi a última inbound."""
     try:
         from datetime import datetime, timedelta, timezone
@@ -495,7 +494,7 @@ class TestTextIn(BaseModel):
 
 
 @router.post("/messaging/test-text")
-def messaging_test_text(payload: TestTextIn, db: Session = Depends(get_db), tenant_id: int = Depends(require_active_tenant)):
+def messaging_test_text(payload: TestTextIn, db: Session = Depends(get_db), tenant_id: int = Depends(require_admin_tenant_id)):
     try:
         tenant = db.get(Tenant, int(tenant_id))
         if not tenant:
@@ -524,7 +523,7 @@ class TestTemplateIn(BaseModel):
 
 
 @router.post("/messaging/test-template")
-def messaging_test_template(payload: TestTemplateIn, db: Session = Depends(get_db), tenant_id: int = Depends(require_active_tenant)):
+def messaging_test_template(payload: TestTemplateIn, db: Session = Depends(get_db), tenant_id: int = Depends(require_admin_tenant_id)):
     try:
         tenant = db.get(Tenant, int(tenant_id))
         if not tenant:
@@ -551,7 +550,7 @@ def messaging_test_template(payload: TestTemplateIn, db: Session = Depends(get_d
 
 
 @router.get("/users", response_model=list[UserOut])
-def list_users(role: UserRole | None = None, is_active: bool | None = None, limit: int = 50, offset: int = 0, db: Session = Depends(get_db), tenant_id: int = Depends(require_active_tenant)):
+def list_users(role: UserRole | None = None, is_active: bool | None = None, limit: int = 50, offset: int = 0, db: Session = Depends(get_db), tenant_id: int = Depends(require_admin_tenant_id)):
     q = db.query(User).filter(User.tenant_id == int(tenant_id))
     if role is not None:
         q = q.filter(User.role == role)
@@ -562,7 +561,7 @@ def list_users(role: UserRole | None = None, is_active: bool | None = None, limi
 
 
 @router.patch("/users/{user_id}", response_model=UserOut)
-def update_user(user_id: int, payload: UserUpdate, db: Session = Depends(get_db), tenant_id: int = Depends(require_active_tenant)):
+def update_user(user_id: int, payload: UserUpdate, db: Session = Depends(get_db), tenant_id: int = Depends(require_admin_tenant_id)):
     user = db.get(User, user_id)
     if not user or (user.tenant_id is not None and int(user.tenant_id) != int(tenant_id)):
         raise HTTPException(status_code=404, detail="user_not_found")
@@ -586,7 +585,7 @@ def update_user(user_id: int, payload: UserUpdate, db: Session = Depends(get_db)
 
 
 @router.post("/users/invite", response_model=InviteCreateOut)
-def invite_user(payload: InviteCreateIn, tenant_id: int = Depends(require_active_tenant), db: Session = Depends(get_db)):
+def invite_user(payload: InviteCreateIn, tenant_id: int = Depends(require_admin_tenant_id), db: Session = Depends(get_db)):
     email = (payload.email or "").strip().lower()
     if not email:
         raise HTTPException(status_code=400, detail="email_required")
@@ -605,7 +604,7 @@ def invite_user(payload: InviteCreateIn, tenant_id: int = Depends(require_active
 
 
 @router.post("/users/{user_id}/invite/resend", response_model=InviteResendOut)
-def resend_invite(user_id: int, tenant_id: int = Depends(require_active_tenant), db: Session = Depends(get_db)):
+def resend_invite(user_id: int, tenant_id: int = Depends(require_admin_tenant_id), db: Session = Depends(get_db)):
     user = db.get(User, user_id)
     if not user or (user.tenant_id is not None and int(user.tenant_id) != int(tenant_id)):
         raise HTTPException(status_code=404, detail="user_not_found")
@@ -614,7 +613,7 @@ def resend_invite(user_id: int, tenant_id: int = Depends(require_active_tenant),
 
 
 @router.post("/users/{user_id}/reset", response_model=InviteResendOut)
-def reset_user_password(user_id: int, tenant_id: int = Depends(require_active_tenant), db: Session = Depends(get_db)):
+def reset_user_password(user_id: int, tenant_id: int = Depends(require_admin_tenant_id), db: Session = Depends(get_db)):
     user = db.get(User, user_id)
     if not user or (user.tenant_id is not None and int(user.tenant_id) != int(tenant_id)):
         raise HTTPException(status_code=404, detail="user_not_found")
@@ -623,7 +622,11 @@ def reset_user_password(user_id: int, tenant_id: int = Depends(require_active_te
 
 
 @router.post("/re/imoveis/import-csv-raw", summary="Importa imóveis via CSV bruto no corpo (text/csv)")
-async def import_imoveis_csv_raw(request: Request, tenant_id: int = Depends(require_active_tenant)):
+async def import_imoveis_csv_raw(
+    request: Request,
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(require_admin_tenant_id),
+):
     try:
         if settings.RE_READ_ONLY:
             raise HTTPException(status_code=403, detail="read_only_mode")
@@ -658,109 +661,108 @@ async def import_imoveis_csv_raw(request: Request, tenant_id: int = Depends(requ
             )
 
         created = updated = images_created = 0
-        with SessionLocal() as db:  # type: Session
-            tenant = db.get(Tenant, int(tenant_id))
-            if not tenant:
-                raise HTTPException(status_code=404, detail="tenant_not_found")
+        tenant = db.get(Tenant, int(tenant_id))
+        if not tenant:
+            raise HTTPException(status_code=404, detail="tenant_not_found")
 
-            for row in reader:
-                ext_id = (row.get("external_id") or "").strip()
-                source = (row.get("source") or "").strip() or None
-                if not ext_id:
-                    log.warning("csv_row_skipped_no_external_id", row=row)
-                    continue
-                stmt = select(re_models.Property).where(
-                    re_models.Property.tenant_id == tenant.id,
-                    re_models.Property.external_id == ext_id,
+        for row in reader:
+            ext_id = (row.get("external_id") or "").strip()
+            source = (row.get("source") or "").strip() or None
+            if not ext_id:
+                log.warning("csv_row_skipped_no_external_id", row=row)
+                continue
+            stmt = select(re_models.Property).where(
+                re_models.Property.tenant_id == tenant.id,
+                re_models.Property.external_id == ext_id,
+            )
+            prop = db.execute(stmt).scalar_one_or_none()
+
+            tipo = (row.get("tipo") or "").strip().lower()
+            finalidade = (row.get("finalidade") or "").strip().lower()
+            try:
+                type_enum = re_models.PropertyType(tipo)
+            except Exception:
+                type_enum = re_models.PropertyType.apartment if "ap" in tipo else re_models.PropertyType.house
+            try:
+                purpose_enum = re_models.PropertyPurpose(finalidade)
+            except Exception:
+                purpose_enum = re_models.PropertyPurpose.rent if "alug" in finalidade or "rent" in finalidade else re_models.PropertyPurpose.sale
+
+            preco = _to_float(row.get("preco")) or 0.0
+            condominio = _to_float(row.get("condominio"))
+            iptu = _to_float(row.get("iptu"))
+            bedrooms = _to_int(row.get("dormitorios"))
+            bathrooms = _to_int(row.get("banheiros"))
+            suites = _to_int(row.get("suites"))
+            vagas = _to_int(row.get("vagas"))
+            area_total = _to_float(row.get("area_total"))
+            area_util = _to_float(row.get("area_util"))
+            img_urls = [u.strip() for u in (row.get("imagens_urls") or "").split(";") if u.strip()]
+            updated_at_source = _to_dt(row.get("updated_at_source"))
+
+            if prop is None:
+                prop = re_models.Property(
+                    tenant_id=tenant.id,
+                    title=(row.get("titulo") or "").strip() or "Sem título",
+                    description=(row.get("descricao") or None),
+                    type=type_enum,
+                    purpose=purpose_enum,
+                    price=preco,
+                    condo_fee=condominio,
+                    iptu=iptu,
+                    external_id=ext_id,
+                    source=source,
+                    updated_at_source=updated_at_source,
+                    address_city=(row.get("cidade") or "").strip(),
+                    address_state=(row.get("estado") or "").strip().upper(),
+                    address_neighborhood=(row.get("bairro") or None),
+                    bedrooms=bedrooms,
+                    bathrooms=bathrooms,
+                    suites=suites,
+                    parking_spots=vagas,
+                    area_total=area_total,
+                    area_usable=area_util,
+                    is_active=True,
                 )
-                prop = db.execute(stmt).scalar_one_or_none()
+                db.add(prop)
+                db.flush()
+                created += 1
+            else:
+                prop.title = (row.get("titulo") or prop.title)
+                prop.description = (row.get("descricao") or prop.description)
+                prop.type = type_enum
+                prop.purpose = purpose_enum
+                prop.price = preco or prop.price
+                prop.condo_fee = condominio
+                prop.iptu = iptu
+                prop.source = source
+                prop.updated_at_source = updated_at_source
+                prop.address_city = (row.get("cidade") or prop.address_city)
+                prop.address_state = (row.get("estado") or prop.address_state)
+                prop.address_neighborhood = (row.get("bairro") or prop.address_neighborhood)
+                prop.bedrooms = bedrooms
+                prop.bathrooms = bathrooms
+                prop.suites = suites
+                prop.parking_spots = vagas
+                prop.area_total = area_total
+                prop.area_usable = area_util
+                updated += 1
 
-                tipo = (row.get("tipo") or "").strip().lower()
-                finalidade = (row.get("finalidade") or "").strip().lower()
-                try:
-                    type_enum = re_models.PropertyType(tipo)
-                except Exception:
-                    type_enum = re_models.PropertyType.apartment if "ap" in tipo else re_models.PropertyType.house
-                try:
-                    purpose_enum = re_models.PropertyPurpose(finalidade)
-                except Exception:
-                    purpose_enum = re_models.PropertyPurpose.rent if "alug" in finalidade or "rent" in finalidade else re_models.PropertyPurpose.sale
-
-                preco = _to_float(row.get("preco")) or 0.0
-                condominio = _to_float(row.get("condominio"))
-                iptu = _to_float(row.get("iptu"))
-                bedrooms = _to_int(row.get("dormitorios"))
-                bathrooms = _to_int(row.get("banheiros"))
-                suites = _to_int(row.get("suites"))
-                vagas = _to_int(row.get("vagas"))
-                area_total = _to_float(row.get("area_total"))
-                area_util = _to_float(row.get("area_util"))
-                img_urls = [u.strip() for u in (row.get("imagens_urls") or "").split(";") if u.strip()]
-                updated_at_source = _to_dt(row.get("updated_at_source"))
-
-                if prop is None:
-                    prop = re_models.Property(
-                        tenant_id=tenant.id,
-                        title=(row.get("titulo") or "").strip() or "Sem título",
-                        description=(row.get("descricao") or None),
-                        type=type_enum,
-                        purpose=purpose_enum,
-                        price=preco,
-                        condo_fee=condominio,
-                        iptu=iptu,
-                        external_id=ext_id,
-                        source=source,
-                        updated_at_source=updated_at_source,
-                        address_city=(row.get("cidade") or "").strip(),
-                        address_state=(row.get("estado") or "").strip().upper(),
-                        address_neighborhood=(row.get("bairro") or None),
-                        bedrooms=bedrooms,
-                        bathrooms=bathrooms,
-                        suites=suites,
-                        parking_spots=vagas,
-                        area_total=area_total,
-                        area_usable=area_util,
-                        is_active=True,
+            if img_urls:
+                db.execute(delete(re_models.PropertyImage).where(re_models.PropertyImage.property_id == prop.id))
+                ord_ = 0
+                for idx, url in enumerate(img_urls):
+                    img = re_models.PropertyImage(
+                        property_id=prop.id,
+                        url=url,
+                        is_cover=(idx == 0),
+                        sort_order=ord_,
                     )
-                    db.add(prop)
-                    db.flush()
-                    created += 1
-                else:
-                    prop.title = (row.get("titulo") or prop.title)
-                    prop.description = (row.get("descricao") or prop.description)
-                    prop.type = type_enum
-                    prop.purpose = purpose_enum
-                    prop.price = preco or prop.price
-                    prop.condo_fee = condominio
-                    prop.iptu = iptu
-                    prop.source = source
-                    prop.updated_at_source = updated_at_source
-                    prop.address_city = (row.get("cidade") or prop.address_city)
-                    prop.address_state = (row.get("estado") or prop.address_state)
-                    prop.address_neighborhood = (row.get("bairro") or prop.address_neighborhood)
-                    prop.bedrooms = bedrooms
-                    prop.bathrooms = bathrooms
-                    prop.suites = suites
-                    prop.parking_spots = vagas
-                    prop.area_total = area_total
-                    prop.area_usable = area_util
-                    updated += 1
+                    db.add(img)
+                    ord_ += 1
+                    images_created += 1
 
-                if img_urls:
-                    db.execute(delete(re_models.PropertyImage).where(re_models.PropertyImage.property_id == prop.id))
-                    ord_ = 0
-                    for idx, url in enumerate(img_urls):
-                        img = re_models.PropertyImage(
-                            property_id=prop.id,
-                            url=url,
-                            is_cover=(idx == 0),
-                            sort_order=ord_,
-                        )
-                        db.add(img)
-                        ord_ += 1
-                        images_created += 1
-
-            db.commit()
+        db.commit()
 
         return {"created": created, "updated": updated, "images_created": images_created}
     except HTTPException:

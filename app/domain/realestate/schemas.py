@@ -1,6 +1,6 @@
 from __future__ import annotations
 from typing import List, Optional
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, AliasChoices
 from pydantic.functional_validators import field_validator
 from datetime import datetime
 from app.domain.realestate.models import PropertyType, PropertyPurpose
@@ -8,24 +8,24 @@ from app.domain.realestate.models import PropertyType, PropertyPurpose
 
 # ===== Imóvel =====
 class ImovelCriar(BaseModel):
-    titulo: str
-    descricao: Optional[str] = None
-    tipo: PropertyType
-    finalidade: PropertyPurpose
-    preco: float = Field(gt=0)
-    condominio: Optional[float] = Field(default=None, ge=0)
+    titulo: str = Field(validation_alias=AliasChoices("titulo", "title"))
+    descricao: Optional[str] = Field(default=None, validation_alias=AliasChoices("descricao", "description"))
+    tipo: PropertyType = Field(validation_alias=AliasChoices("tipo", "type"))
+    finalidade: PropertyPurpose = Field(validation_alias=AliasChoices("finalidade", "purpose"))
+    preco: float = Field(gt=0, validation_alias=AliasChoices("preco", "price"))
+    condominio: Optional[float] = Field(default=None, ge=0, validation_alias=AliasChoices("condominio", "condominium"))
     iptu: Optional[float] = Field(default=None, ge=0)
-    cidade: str
-    estado: str
-    bairro: Optional[str] = None
-    endereco_json: Optional[dict] = None
-    dormitorios: Optional[int] = Field(default=None, ge=0)
-    banheiros: Optional[int] = Field(default=None, ge=0)
+    cidade: str = Field(validation_alias=AliasChoices("cidade", "city"))
+    estado: str = Field(validation_alias=AliasChoices("estado", "state"))
+    bairro: Optional[str] = Field(default=None, validation_alias=AliasChoices("bairro", "neighborhood"))
+    endereco_json: Optional[dict] = Field(default=None, validation_alias=AliasChoices("endereco_json", "address_json"))
+    dormitorios: Optional[int] = Field(default=None, ge=0, validation_alias=AliasChoices("dormitorios", "bedrooms"))
+    banheiros: Optional[int] = Field(default=None, ge=0, validation_alias=AliasChoices("banheiros", "bathrooms"))
     suites: Optional[int] = Field(default=None, ge=0)
-    vagas: Optional[int] = Field(default=None, ge=0)
-    area_total: Optional[float] = Field(default=None, ge=0)
-    area_util: Optional[float] = Field(default=None, ge=0)
-    ano_construcao: Optional[int] = None
+    vagas: Optional[int] = Field(default=None, ge=0, validation_alias=AliasChoices("vagas", "parking_spots"))
+    area_total: Optional[float] = Field(default=None, ge=0, validation_alias=AliasChoices("area_total", "area_total"))
+    area_util: Optional[float] = Field(default=None, ge=0, validation_alias=AliasChoices("area_util", "area_usable"))
+    ano_construcao: Optional[int] = Field(default=None, validation_alias=AliasChoices("ano_construcao", "year_built"))
 
     model_config = {
         "json_schema_extra": {
@@ -105,28 +105,28 @@ class ImovelSaida(BaseModel):
     suites: Optional[int] = None
     vagas: Optional[int] = None
     ativo: bool
-    cover_image_url: Optional[str] = None
+    cover_image_url: Optional[str] = Field(default=None, serialization_alias="url_capa")
 
-    model_config = ConfigDict(from_attributes=True)
+    model_config = ConfigDict(from_attributes=True, populate_by_name=True)
 
 
 class ImovelAtualizar(BaseModel):
-    titulo: Optional[str] = None
-    descricao: Optional[str] = None
-    preco: Optional[float] = Field(default=None, gt=0)
-    condominio: Optional[float] = Field(default=None, ge=0)
+    titulo: Optional[str] = Field(default=None, validation_alias=AliasChoices("titulo", "title"))
+    descricao: Optional[str] = Field(default=None, validation_alias=AliasChoices("descricao", "description"))
+    preco: Optional[float] = Field(default=None, gt=0, validation_alias=AliasChoices("preco", "price"))
+    condominio: Optional[float] = Field(default=None, ge=0, validation_alias=AliasChoices("condominio", "condominium"))
     iptu: Optional[float] = Field(default=None, ge=0)
-    cidade: Optional[str] = None
-    estado: Optional[str] = None
-    bairro: Optional[str] = None
-    endereco_json: Optional[dict] = None
-    dormitorios: Optional[int] = Field(default=None, ge=0)
-    banheiros: Optional[int] = Field(default=None, ge=0)
+    cidade: Optional[str] = Field(default=None, validation_alias=AliasChoices("cidade", "city"))
+    estado: Optional[str] = Field(default=None, validation_alias=AliasChoices("estado", "state"))
+    bairro: Optional[str] = Field(default=None, validation_alias=AliasChoices("bairro", "neighborhood"))
+    endereco_json: Optional[dict] = Field(default=None, validation_alias=AliasChoices("endereco_json", "address_json"))
+    dormitorios: Optional[int] = Field(default=None, ge=0, validation_alias=AliasChoices("dormitorios", "bedrooms"))
+    banheiros: Optional[int] = Field(default=None, ge=0, validation_alias=AliasChoices("banheiros", "bathrooms"))
     suites: Optional[int] = Field(default=None, ge=0)
-    vagas: Optional[int] = Field(default=None, ge=0)
-    area_total: Optional[float] = Field(default=None, ge=0)
-    area_util: Optional[float] = Field(default=None, ge=0)
-    ano_construcao: Optional[int] = None
+    vagas: Optional[int] = Field(default=None, ge=0, validation_alias=AliasChoices("vagas", "parking_spots"))
+    area_total: Optional[float] = Field(default=None, ge=0, validation_alias=AliasChoices("area_total", "area_total"))
+    area_util: Optional[float] = Field(default=None, ge=0, validation_alias=AliasChoices("area_util", "area_usable"))
+    ano_construcao: Optional[int] = Field(default=None, validation_alias=AliasChoices("ano_construcao", "year_built"))
     ativo: Optional[bool] = None
 
     model_config = {
@@ -141,12 +141,13 @@ class ImovelAtualizar(BaseModel):
 # ===== Imagem =====
 class ImagemCriar(BaseModel):
     url: str
-    is_capa: Optional[bool] = False
-    ordem: Optional[int] = 0
-    storage_key: Optional[str] = None
+    is_capa: Optional[bool] = Field(default=False, validation_alias=AliasChoices("is_capa", "is_cover"))
+    ordem: Optional[int] = Field(default=0, validation_alias=AliasChoices("ordem", "sort_order"))
+    storage_key: Optional[str] = Field(default=None, validation_alias=AliasChoices("storage_key", "storageKey"))
 
-    model_config = {
-        "json_schema_extra": {
+    model_config = ConfigDict(
+        populate_by_name=True,
+        json_schema_extra={
             "examples": [
                 {
                     "url": "https://exemplo-cdn.com/imoveis/1/capa.jpg",
@@ -155,8 +156,8 @@ class ImagemCriar(BaseModel):
                     "storage_key": "imoveis/1/capa.jpg",
                 }
             ]
-        }
-    }
+        },
+    )
 
 
 class ImagemSaida(BaseModel):
@@ -241,12 +242,12 @@ class LeadCreate(BaseModel):
 
 class LeadOut(BaseModel):
     id: int
-    name: Optional[str] = None
-    phone: Optional[str] = None
+    nome: Optional[str] = Field(default=None, validation_alias=AliasChoices("nome", "name"))
+    telefone: Optional[str] = Field(default=None, validation_alias=AliasChoices("telefone", "phone"))
     email: Optional[str] = None
-    source: Optional[str] = None
-    preferences: Optional[dict] = None
-    consent_lgpd: Optional[bool] = None
+    origem: Optional[str] = Field(default=None, validation_alias=AliasChoices("origem", "source"))
+    preferencias: Optional[dict] = Field(default=None, validation_alias=AliasChoices("preferencias", "preferences"))
+    consentimento_lgpd: Optional[bool] = Field(default=None, validation_alias=AliasChoices("consentimento_lgpd", "consent_lgpd"))
     # Status e timestamps
     status: Optional[str] = None
     last_inbound_at: Optional[datetime] = None
@@ -289,13 +290,16 @@ class LeadOut(BaseModel):
 
 
 class LeadStagingIn(BaseModel):
-    external_lead_id: Optional[str] = None
-    source: Optional[str] = None
-    name: Optional[str] = None
-    phone: Optional[str] = None
+    external_lead_id: Optional[str] = Field(default=None, validation_alias=AliasChoices("external_lead_id", "id_lead_externo"))
+    source: Optional[str] = Field(default=None, validation_alias=AliasChoices("source", "origem"))
+    name: Optional[str] = Field(default=None, validation_alias=AliasChoices("name", "nome"))
+    phone: Optional[str] = Field(default=None, validation_alias=AliasChoices("phone", "telefone"))
     email: Optional[str] = None
-    preferences: Optional[dict] = None
-    updated_at_source: Optional[str] = None  # ISO-8601 string
+    preferences: Optional[dict] = Field(default=None, validation_alias=AliasChoices("preferences", "preferencias"))
+    updated_at_source: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("updated_at_source", "atualizado_em_origem"),
+    )  # ISO-8601 string
 
 
 class LeadStagingOut(BaseModel):

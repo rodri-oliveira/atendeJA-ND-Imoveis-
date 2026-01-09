@@ -44,7 +44,7 @@ from app.domain.realestate.models import (
     LeadStatus,
 )
 from pydantic import BaseModel
-from app.api.deps import require_active_tenant
+from app.api.deps import RequestContext, require_active_tenant_context
 
 router = APIRouter()
 log = structlog.get_logger()
@@ -72,12 +72,12 @@ log = structlog.get_logger()
 def create_property(
     payload: ImovelCriar,
     db: Session = Depends(get_db),
-    tenant_id: int = Depends(require_active_tenant),
+    ctx: RequestContext = Depends(require_active_tenant_context),
 ):
     if settings.RE_READ_ONLY:
         raise HTTPException(status_code=403, detail="read_only_mode")
     data = payload.model_dump()
-    data["tenant_id"] = int(tenant_id)
+    data["tenant_id"] = int(ctx.tenant_id)
     prop = svc_create_property(db, data)
     return ImovelSaida(**to_imovel_dict(prop))
 
@@ -92,7 +92,7 @@ def list_properties(
     request: Request,
     response: Response,
     db: Session = Depends(get_db),
-    tenant_id: int = Depends(require_active_tenant),
+    ctx: RequestContext = Depends(require_active_tenant_context),
     finalidade: Optional[PropertyPurpose] = Query(None),
     tipo: Optional[PropertyType] = Query(None),
     cidade: Optional[str] = Query(None),
@@ -106,7 +106,7 @@ def list_properties(
 ):
     items, total = svc_list_properties(
         db,
-        tenant_id=int(tenant_id),
+        tenant_id=int(ctx.tenant_id),
         finalidade=finalidade,
         tipo=tipo,
         cidade=cidade,
@@ -144,7 +144,7 @@ def list_properties(
 )
 def list_property_type_counts(
     db: Session = Depends(get_db),
-    tenant_id: int = Depends(require_active_tenant),
+    ctx: RequestContext = Depends(require_active_tenant_context),
 ):
     rows = db.execute(
         text(
@@ -156,9 +156,9 @@ def list_property_type_counts(
             order by 2 desc
             """
         ),
-        {"tenant_id": int(tenant_id)},
+        {"tenant_id": int(ctx.tenant_id)},
     ).fetchall()
-    return {"tenant_id": int(tenant_id), "type_counts": [dict(r._mapping) for r in rows]}
+    return {"tenant_id": int(ctx.tenant_id), "type_counts": [dict(r._mapping) for r in rows]}
 
 
 @router.post(
@@ -175,7 +175,7 @@ def upload_imagens(
     request: Request,
     files: List[UploadFile] = File(..., description="Arquivos de imagem"),
     db: Session = Depends(get_db),
-    tenant_id: int = Depends(require_active_tenant),
+    ctx: RequestContext = Depends(require_active_tenant_context),
 ):
     """Upload local (MVP). Encaminha para o service e retorna DTOs de imagem."""
     if settings.RE_READ_ONLY:
@@ -184,16 +184,16 @@ def upload_imagens(
     base_url = str(request.base_url).rstrip("/")
     try:
         # Ensure property belongs to tenant (service validates by tenant_id via header)
-        _ = svc_get_property(db, property_id, tenant_id=int(tenant_id))
+        _ = svc_get_property(db, property_id, tenant_id=int(ctx.tenant_id))
         created = upload_property_images(db, property_id, files, base_url)
         return [ImagemSaida(id=i["id"], url=i["url"], is_capa=bool(i["is_capa"]), ordem=int(i["ordem"])) for i in created]
     except ValueError as e:
         # Erros de regra do domínio traduzidos para HTTP 400
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail={"code": "re_rule_error", "message": str(e)})
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"upload_internal_error:{str(e)}")
+        raise HTTPException(status_code=500, detail={"code": "upload_internal_error", "message": str(e)})
 
 @router.delete(
     "/admin/re/imoveis/{property_id}",
@@ -202,12 +202,12 @@ def upload_imagens(
 def admin_soft_delete_property(
     property_id: int,
     db: Session = Depends(get_db),
-    tenant_id: int = Depends(require_active_tenant),
+    ctx: RequestContext = Depends(require_active_tenant_context),
 ):
     if settings.RE_READ_ONLY:
         raise HTTPException(status_code=403, detail="read_only_mode")
     try:
-        res = svc_soft_delete_property(db, property_id, tenant_id=int(tenant_id))
+        res = svc_soft_delete_property(db, property_id, tenant_id=int(ctx.tenant_id))
         return res
     except ValueError:
         raise HTTPException(status_code=404, detail="property_not_found")
@@ -220,12 +220,12 @@ def admin_soft_delete_property(
 def admin_hard_delete_property(
     property_id: int,
     db: Session = Depends(get_db),
-    tenant_id: int = Depends(require_active_tenant),
+    ctx: RequestContext = Depends(require_active_tenant_context),
 ):
     if settings.RE_READ_ONLY:
         raise HTTPException(status_code=403, detail="read_only_mode")
     try:
-        res = svc_hard_delete_property(db, property_id, tenant_id=int(tenant_id))
+        res = svc_hard_delete_property(db, property_id, tenant_id=int(ctx.tenant_id))
         return res
     except ValueError:
         raise HTTPException(status_code=404, detail="property_not_found")
@@ -244,7 +244,7 @@ class BulkDeleteIn(BaseModel):
 def admin_bulk_delete_properties(
     payload: BulkDeleteIn,
     db: Session = Depends(get_db),
-    tenant_id: int = Depends(require_active_tenant),
+    ctx: RequestContext = Depends(require_active_tenant_context),
 ):
     if settings.RE_READ_ONLY:
         raise HTTPException(status_code=403, detail="read_only_mode")
@@ -252,7 +252,7 @@ def admin_bulk_delete_properties(
     term_desc = (payload.description_contains or "").strip()
     if not term_title and not term_desc:
         raise HTTPException(status_code=400, detail="missing_filters")
-    q = db.query(Property).filter(Property.tenant_id == tenant_id)
+    q = db.query(Property).filter(Property.tenant_id == ctx.tenant_id)
     if term_title:
         q = q.filter(Property.title.ilike(f"%{term_title}%"))
     if term_desc:
@@ -262,9 +262,9 @@ def admin_bulk_delete_properties(
     for r in rows:
         try:
             if (payload.mode or "soft").lower() == "hard":
-                svc_hard_delete_property(db, int(r.id), tenant_id=int(tenant_id))
+                svc_hard_delete_property(db, int(r.id), tenant_id=int(ctx.tenant_id))
             else:
-                svc_soft_delete_property(db, int(r.id), tenant_id=int(tenant_id))
+                svc_soft_delete_property(db, int(r.id), tenant_id=int(ctx.tenant_id))
             count += 1
         except Exception:
             continue
@@ -279,10 +279,10 @@ def admin_bulk_delete_properties(
 def get_property(
     property_id: int,
     db: Session = Depends(get_db),
-    tenant_id: int = Depends(require_active_tenant),
+    ctx: RequestContext = Depends(require_active_tenant_context),
 ):
     try:
-        prop = svc_get_property(db, property_id, tenant_id=int(tenant_id))
+        prop = svc_get_property(db, property_id, tenant_id=int(ctx.tenant_id))
         return ImovelSaida(**to_imovel_dict(prop))
     except ValueError:
         raise HTTPException(status_code=404, detail="property_not_found")
@@ -298,12 +298,12 @@ def update_property(
     property_id: int,
     payload: ImovelAtualizar,
     db: Session = Depends(get_db),
-    tenant_id: int = Depends(require_active_tenant),
+    ctx: RequestContext = Depends(require_active_tenant_context),
 ):
     if settings.RE_READ_ONLY:
         raise HTTPException(status_code=403, detail="read_only_mode")
     try:
-        prop = svc_update_property(db, property_id, payload.model_dump(exclude_unset=True), tenant_id=int(tenant_id))
+        prop = svc_update_property(db, property_id, payload.model_dump(exclude_unset=True), tenant_id=int(ctx.tenant_id))
         return ImovelSaida(**to_imovel_dict(prop))
     except ValueError:
         raise HTTPException(status_code=404, detail="property_not_found")
@@ -322,11 +322,11 @@ def update_property(
 def create_lead(
     payload: LeadCreate,
     db: Session = Depends(get_db),
-    tenant_id: int = Depends(require_active_tenant),
+    ctx: RequestContext = Depends(require_active_tenant_context),
 ):
     data = payload.model_dump(exclude_unset=True)
     lead = Lead(
-        tenant_id=tenant_id,
+        tenant_id=ctx.tenant_id,
         name=data.get("nome"),
         phone=data.get("telefone"),
         email=data.get("email"),
@@ -394,7 +394,7 @@ def create_lead(
 )
 def list_leads(
     db: Session = Depends(get_db),
-    tenant_id: int = Depends(require_active_tenant),
+    ctx: RequestContext = Depends(require_active_tenant_context),
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
     status: Optional[str] = Query(None),
@@ -409,7 +409,7 @@ def list_leads(
     direcionado: Optional[bool] = Query(None, description="Se True, apenas leads com property_interest_id"),
     campaign_source: Optional[str] = Query(None, description="Origem de campanha (ex.: facebook, chavesnamao)"),
 ):
-    q = db.query(Lead).filter(Lead.tenant_id == int(tenant_id))
+    q = db.query(Lead).filter(Lead.tenant_id == int(ctx.tenant_id))
     if status:
         q = q.filter(Lead.status == status)
     if finalidade:
@@ -446,12 +446,12 @@ def list_leads(
     return [
         LeadOut(
             id=r.id,
-            name=r.name,
-            phone=r.phone,
+            nome=r.name,
+            telefone=r.phone,
             email=r.email,
-            source=r.source,
-            preferences=r.preferences,
-            consent_lgpd=r.consent_lgpd,
+            origem=r.source,
+            preferencias=r.preferences,
+            consentimento_lgpd=r.consent_lgpd,
             status=r.status,
             last_inbound_at=r.last_inbound_at,
             last_outbound_at=r.last_outbound_at,
@@ -484,9 +484,9 @@ def update_lead_status(
     lead_id: int,
     payload: LeadStatusUpdate,
     db: Session = Depends(get_db),
-    tenant_id: int = Depends(require_active_tenant),
+    ctx: RequestContext = Depends(require_active_tenant_context),
 ):
-    lead = db.query(Lead).filter(Lead.id == lead_id, Lead.tenant_id == tenant_id).first()
+    lead = db.query(Lead).filter(Lead.id == lead_id, Lead.tenant_id == ctx.tenant_id).first()
     if not lead:
         raise HTTPException(status_code=404, detail="lead_not_found")
 
@@ -497,7 +497,7 @@ def update_lead_status(
         db.refresh(lead)
         return lead
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail={"code": str(e)})
 
 # --- Staging de Leads (MVP sem tabela dedicada) ---
  # --
@@ -515,7 +515,7 @@ def update_lead_status(
 def upsert_lead_from_staging(
     payload: LeadStagingIn,
     db: Session = Depends(get_db),
-    tenant_id: int = Depends(require_active_tenant),
+    ctx: RequestContext = Depends(require_active_tenant_context),
 ):
     data = payload.model_dump(exclude_unset=True)
 
@@ -524,13 +524,13 @@ def upsert_lead_from_staging(
     if data.get("phone"):
         lead = (
             db.query(Lead)
-            .filter(Lead.tenant_id == tenant_id, Lead.phone == data["phone"])  # type: ignore
+            .filter(Lead.tenant_id == ctx.tenant_id, Lead.phone == data["phone"])  # type: ignore
             .first()
         )
     if not lead and data.get("email"):
         lead = (
             db.query(Lead)
-            .filter(Lead.tenant_id == tenant_id, Lead.email == data["email"])  # type: ignore
+            .filter(Lead.tenant_id == ctx.tenant_id, Lead.email == data["email"])  # type: ignore
             .first()
         )
 
@@ -540,7 +540,7 @@ def upsert_lead_from_staging(
     if not lead:
         # cria
         lead = Lead(
-            tenant_id=tenant_id,
+            tenant_id=ctx.tenant_id,
             name=data.get("name"),
             phone=data.get("phone"),
             email=data.get("email"),
@@ -591,6 +591,7 @@ def upsert_lead_from_staging(
             email=lead.email,
             origem=lead.source,
             preferencias=lead.preferences,
+            consentimento_lgpd=lead.consent_lgpd,
         ),
     )
 
@@ -607,9 +608,9 @@ def add_imagem(
     property_id: int,
     payload: ImagemCriar,
     db: Session = Depends(get_db),
-    tenant_id: int = Depends(require_active_tenant),
+    ctx: RequestContext = Depends(require_active_tenant_context),
 ):
-    prop = svc_get_property(db, property_id, tenant_id=int(tenant_id))
+    prop = svc_get_property(db, property_id, tenant_id=int(ctx.tenant_id))
     if not prop:
         raise HTTPException(status_code=404, detail="property_not_found")
     img = PropertyImage(
@@ -633,9 +634,9 @@ def add_imagem(
 def list_imagens(
     property_id: int,
     db: Session = Depends(get_db),
-    tenant_id: int = Depends(require_active_tenant),
+    ctx: RequestContext = Depends(require_active_tenant_context),
 ):
-    prop = svc_get_property(db, property_id, tenant_id=int(tenant_id))
+    prop = svc_get_property(db, property_id, tenant_id=int(ctx.tenant_id))
     if not prop:
         raise HTTPException(status_code=404, detail="property_not_found")
     stmt = (
@@ -664,10 +665,10 @@ def list_imagens(
 def get_imovel_detalhes(
     property_id: int,
     db: Session = Depends(get_db),
-    tenant_id: int = Depends(require_active_tenant),
+    ctx: RequestContext = Depends(require_active_tenant_context),
 ):
     try:
-        d = svc_get_property_details(db, property_id, tenant_id=int(tenant_id))
+        d = svc_get_property_details(db, property_id, tenant_id=int(ctx.tenant_id))
         d_out = ImovelDetalhes(
             id=d["id"],
             titulo=d["titulo"],
@@ -691,8 +692,6 @@ def get_imovel_detalhes(
         raise HTTPException(status_code=404, detail="property_not_found")
 
 
-# helpers removidos: mapeamento agora em mappers/service
-
 
 @router.get("/images/proxy")
 async def proxy_image(url: str = Query(..., description="URL da imagem para fazer proxy")):
@@ -703,12 +702,12 @@ async def proxy_image(url: str = Query(..., description="URL da imagem para faze
     # Log estruturado da requisição de proxy
     log.info("img_proxy_enter", url=url)
     if not url:
-        raise HTTPException(status_code=400, detail="URL é obrigatória")
+        raise HTTPException(status_code=400, detail={"code": "url_required", "message": "URL é obrigatória"})
     
     # Validar URL
     normalized = normalize_image_url(url)
     if not normalized:
-        raise HTTPException(status_code=400, detail="URL inválida")
+        raise HTTPException(status_code=400, detail={"code": "invalid_url", "message": "URL inválida"})
     # Allowlist de hosts para mitigar SSRF
     try:
         from urllib.parse import urlparse
@@ -742,13 +741,24 @@ async def proxy_image(url: str = Query(..., description="URL da imagem para faze
                 log.warning("img_proxy_retry_verify_false", reason=repr(e))
         except httpx.HTTPError as e2:
             log.warning("img_proxy_http_error", error=repr(e2))
-            raise HTTPException(status_code=502, detail=f"Erro ao buscar imagem: {e2.__class__.__name__}")
+            raise HTTPException(
+                status_code=502,
+                detail={
+                    "code": "image_fetch_error",
+                    "message": "Erro ao buscar imagem.",
+                    "details": {"error": e2.__class__.__name__},
+                },
+            )
 
     if response.status_code != 200:
         log.warning("img_proxy_upstream_non_200", status=response.status_code)
         raise HTTPException(
             status_code=response.status_code,
-            detail=f"Erro ao buscar imagem: {response.status_code}",
+            detail={
+                "code": "image_upstream_error",
+                "message": "Erro ao buscar imagem.",
+                "details": {"status_code": int(response.status_code)},
+            },
         )
 
     # Determinar content-type

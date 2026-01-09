@@ -16,11 +16,14 @@ from app.api.routes.metrics import router as metrics_router
 from app.api.routes.llm import router as llm_router
 from app.api.routes.auth import router as auth_router
 from app.api.routes.super_admin import router as super_admin_router
-from app.repositories.db import SessionLocal, engine
+from app.repositories.db import db_session, engine
 from app.api.deps import get_db
 
 from app.repositories.models import Base, User, UserRole, Tenant
 import app.domain.realestate.models  # noqa: F401 - importa modelos para registrar no metadata
+from app.domain.realestate.models import ChatbotFlow
+from app.domain.realestate.services.chatbot_flow_service import ChatbotFlowService
+from app.domain.realestate.default_flow import get_default_flow_nodes
 from contextlib import asynccontextmanager
 import structlog
 import traceback
@@ -50,7 +53,7 @@ async def lifespan(app: FastAPI):
         Base.metadata.create_all(bind=engine)
         # Garante que exista tenant_id=1 em dev/test (evita 404 quando o front usa tenantId=1)
         try:
-            with SessionLocal() as db:  # type: Session
+            with db_session() as db:  # type: Session
                 env = (settings.APP_ENV or "").lower()
                 if env in {"dev", "test"}:
                     t1 = db.get(Tenant, 1)
@@ -92,6 +95,151 @@ async def lifespan(app: FastAPI):
                     except Exception:
                         # tabela pode não existir em instalações novas
                         db.rollback()
+
+                    # Seed do flow default (Flow as Data) em dev/test
+                    try:
+                        existing = (
+                            db.query(ChatbotFlow)
+                            .filter(
+                                ChatbotFlow.tenant_id == int(t1.id),
+                                ChatbotFlow.domain == "real_estate",
+                                ChatbotFlow.is_published == True,  # noqa: E712
+                            )
+                            .first()
+                        )
+                        flow_definition = {
+                            "version": 1,
+                            "start": "start",
+                            "nodes": get_default_flow_nodes(),
+                        }
+
+                        flow_service = ChatbotFlowService(db=db)
+                        flow_service.validate_definition(flow_definition)
+
+                        if not existing:
+                            f = ChatbotFlow(
+                                tenant_id=int(t1.id),
+                                domain="real_estate",
+                                name="default",
+                                flow_definition=flow_definition,
+                                is_published=True,
+                                published_version=1,
+                                published_by="bootstrap",
+                            )
+                            db.add(f)
+                            db.commit()
+                            log.info("chatbot_flow_seeded", tenant_id=int(t1.id), name=f.name)
+                        else:
+                            is_bootstrap_flow = (
+                                (getattr(existing, "published_by", None) == "bootstrap")
+                                or (getattr(existing, "name", None) == "default")
+                            )
+                            if is_bootstrap_flow:
+                                try:
+                                    nodes = (existing.flow_definition or {}).get("nodes") or []
+                                    node_by_id = {n.get("id"): n for n in nodes if isinstance(n, dict)}
+
+                                    def _node_type(node_id: str) -> str:
+                                        raw = (node_by_id.get(node_id) or {}).get("type") or ""
+                                        try:
+                                            s = str(raw).strip()
+                                        except Exception:
+                                            return ""
+                                        if "." in s:
+                                            return s.split(".")[-1]
+                                        return s
+
+                                    has_new_node_has_property = (
+                                        _node_type("awaiting_has_property_in_mind") == "prompt_and_branch"
+                                    )
+                                    has_new_node_search_choice = (
+                                        _node_type("awaiting_search_choice") == "prompt_and_branch"
+                                    )
+                                    has_new_node_schedule_visit = (
+                                        _node_type("awaiting_schedule_visit_question") == "prompt_and_branch"
+                                    )
+                                    has_new_node_phone_confirmation = (
+                                        _node_type("awaiting_phone_confirmation") == "prompt_and_branch"
+                                    )
+                                    has_new_node_phone_input = (
+                                        _node_type("awaiting_phone_input") == "capture_phone"
+                                    )
+                                    has_new_node_visit_date = (
+                                        _node_type("awaiting_visit_date") == "capture_date"
+                                    )
+                                    has_new_node_visit_time = (
+                                        _node_type("awaiting_visit_time") == "capture_time"
+                                    )
+                                    has_new_node_purpose = (
+                                        _node_type("awaiting_purpose") == "capture_purpose"
+                                    )
+                                    has_new_node_type = (
+                                        _node_type("awaiting_type") == "capture_property_type"
+                                    )
+                                    has_new_node_price_min = (
+                                        _node_type("awaiting_price_min") == "capture_price_min"
+                                    )
+                                    has_new_node_price_max = (
+                                        _node_type("awaiting_price_max") == "capture_price_max"
+                                    )
+                                    has_new_node_bedrooms = (
+                                        _node_type("awaiting_bedrooms") == "capture_bedrooms"
+                                    )
+                                    has_new_node_city = (
+                                        _node_type("awaiting_city") == "capture_city"
+                                    )
+                                    has_new_node_neighborhood = (
+                                        _node_type("awaiting_neighborhood") == "capture_neighborhood"
+                                    )
+                                    has_new_node_searching = (
+                                        _node_type("searching") == "execute_search"
+                                    )
+                                    has_new_node_showing_property = (
+                                        _node_type("showing_property") == "show_property_card"
+                                    )
+                                    has_new_node_property_feedback = (
+                                        _node_type("awaiting_property_feedback") == "property_feedback_decision"
+                                    )
+                                    has_new_node_refinement = (
+                                        _node_type("awaiting_refinement") == "refinement_decision"
+                                    )
+                                    has_new_nodes = bool(
+                                        has_new_node_has_property
+                                        and has_new_node_search_choice
+                                        and has_new_node_schedule_visit
+                                        and has_new_node_phone_confirmation
+                                        and has_new_node_phone_input
+                                        and has_new_node_visit_date
+                                        and has_new_node_visit_time
+                                        and has_new_node_purpose
+                                        and has_new_node_type
+                                        and has_new_node_price_min
+                                        and has_new_node_price_max
+                                        and has_new_node_bedrooms
+                                        and has_new_node_city
+                                        and has_new_node_neighborhood
+                                        and has_new_node_searching
+                                        and has_new_node_showing_property
+                                        and has_new_node_property_feedback
+                                        and has_new_node_refinement
+                                    )
+                                except Exception:
+                                    has_new_nodes = False
+
+                                if not has_new_nodes:
+                                    existing.flow_definition = flow_definition
+                                    existing.published_version = int(getattr(existing, "published_version", 1) or 1) + 1
+                                    existing.published_by = "bootstrap"
+                                    db.add(existing)
+                                    db.commit()
+                                    log.info(
+                                        "chatbot_flow_seed_migrated",
+                                        tenant_id=int(t1.id),
+                                        name=getattr(existing, "name", None),
+                                        published_version=int(getattr(existing, "published_version", 0) or 0),
+                                    )
+                    except Exception as e:
+                        log.warning("chatbot_flow_seed_error", error=str(e))
                 else:
                     first_tenant = db.query(Tenant).order_by(Tenant.id.asc()).first()
                     if not first_tenant:
@@ -100,13 +248,12 @@ async def lifespan(app: FastAPI):
                         db.commit()
         except Exception as e:
             log.error("tenant_bootstrap_error", error=str(e))
-
         # Seed do usuário admin, se configurado
         try:
             seed_email = (settings.AUTH_SEED_ADMIN_EMAIL or "").strip().lower()
             seed_password = (settings.AUTH_SEED_ADMIN_PASSWORD or "").strip()
             if seed_email and seed_password:
-                with SessionLocal() as db:  # type: Session
+                with db_session() as db:  # type: Session
                     tenant = db.query(Tenant).order_by(Tenant.id.asc()).first()
                     if not tenant:
                         tenant = Tenant(name="Default")
@@ -227,6 +374,7 @@ except Exception as e:
 
 # Global error handlers (uniform error payloads)
 app.add_exception_handler(HTTPException, http_exception_handler)
+app.add_exception_handler(RequestValidationError, validation_exception_handler)
 app.add_exception_handler(Exception, generic_exception_handler)
 
 @app.get("/")

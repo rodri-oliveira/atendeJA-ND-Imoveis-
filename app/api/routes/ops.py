@@ -62,7 +62,7 @@ def tenants_debug(db: Session = Depends(get_db)):
     Prod: disabled.
     """
     if (settings.APP_ENV or "").lower() == "prod":
-        return {"error": "disabled_in_prod"}
+        raise HTTPException(status_code=403, detail="disabled_in_prod")
     # Tenants
     tenants = db.execute(text("select id, name, coalesce(is_active, true) as is_active from tenants order by id"))
     tenants_rows = [dict(r._mapping) for r in tenants]
@@ -95,7 +95,7 @@ def re_properties_type_counts(tenant_id: int, db: Session = Depends(get_db)):
     de Tipo na UI parece não funcionar.
     """
     if (settings.APP_ENV or "").lower() == "prod":
-        return {"error": "disabled_in_prod"}
+        raise HTTPException(status_code=403, detail="disabled_in_prod")
     try:
         rows = db.execute(
             text(
@@ -111,7 +111,7 @@ def re_properties_type_counts(tenant_id: int, db: Session = Depends(get_db)):
         ).fetchall()
         return {"tenant_id": int(tenant_id), "type_counts": [dict(r._mapping) for r in rows]}
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail={"code": "ops_type_counts_error", "message": str(e)})
 
 class ChatbotTestIn(BaseModel):
     tenant_id: int
@@ -122,7 +122,7 @@ class ChatbotTestIn(BaseModel):
 def chatbot_test(payload: ChatbotTestIn, db: Session = Depends(get_db)):
     """Simulates an inbound message to test the chatbot funnel logic."""
     if (settings.APP_ENV or "").lower() == "prod":
-        return {"error": "disabled_in_prod"}
+        raise HTTPException(status_code=403, detail="disabled_in_prod")
 
     try:
         funnel_service = FunnelService(db=db)
@@ -133,4 +133,4 @@ def chatbot_test(payload: ChatbotTestIn, db: Session = Depends(get_db)):
         )
         return {"response": response_text}
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail={"code": "ops_chatbot_test_error", "message": str(e)})

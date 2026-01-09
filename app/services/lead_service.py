@@ -30,14 +30,38 @@ class LeadService:
         except Exception:
             tenant_id_int = 1
 
+        name = lead_data.get("nome")
+        if name is None:
+            name = lead_data.get("name")
+
+        phone = lead_data.get("telefone")
+        if phone is None:
+            phone = lead_data.get("phone")
+
+        source = lead_data.get("origem")
+        if source is None:
+            source = lead_data.get("source")
+        if not source:
+            source = "whatsapp"
+
+        preferences = lead_data.get("preferencias")
+        if preferences is None:
+            preferences = lead_data.get("preferences")
+
+        consent_val = lead_data.get("consentimento_lgpd")
+        if consent_val is None:
+            consent_val = lead_data.get("consent_lgpd")
+        if consent_val is None:
+            consent_val = lead_data.get("consentimentoLGPD")
+
         lead = Lead(
             tenant_id=tenant_id_int,
-            name=lead_data.get("nome"),
-            phone=lead_data.get("telefone"),
+            name=name,
+            phone=phone,
             email=lead_data.get("email"),
-            source=lead_data.get("origem", "whatsapp"),
-            preferences=lead_data.get("preferencias"),
-            consent_lgpd=bool(lead_data.get("consentimento_lgpd", False)),
+            source=source,
+            preferences=preferences,
+            consent_lgpd=bool(consent_val or False),
             property_interest_id=lead_data.get("property_interest_id"),
             contact_id=lead_data.get("contact_id"),
             external_property_id=lead_data.get("external_property_id"),

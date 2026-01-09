@@ -38,6 +38,31 @@ class LeadStatus(str, Enum):
     sem_resposta_24h = "sem_resposta_24h"
 
 
+class ChatbotFlow(Base):
+    __tablename__ = "re_chatbot_flows"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[int] = mapped_column(Integer, index=True)
+
+    domain: Mapped[str] = mapped_column(String(64), default="real_estate", index=True)
+    name: Mapped[str] = mapped_column(String(160))
+
+    flow_definition: Mapped[dict] = mapped_column(JSON)
+
+    is_published: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    published_version: Mapped[int] = mapped_column(Integer, default=0)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    published_by: Mapped[str | None] = mapped_column(String(180), nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        Index("uix_re_chatbot_flow_tenant_name", "tenant_id", "name", unique=True),
+        Index("idx_re_chatbot_flow_tenant_domain_published", "tenant_id", "domain", "is_published"),
+    )
+
+
 class Property(Base):
     __tablename__ = "re_properties"
 

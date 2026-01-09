@@ -173,30 +173,26 @@ def detect_consent(text: str) -> bool:
     """Detecta consentimento LGPD via LLM."""
     # 1) Heurística local (mais confiável e imediata)
     text_lower = text.lower().strip()
+    if any(kw in text_lower for kw in ["não", "nao", "negativo", "não autorizo", "nao autorizo"]):
+        return False
     if any(kw in text_lower for kw in ["sim", "autorizo", "aceito", "ok", "concordo"]):
         return True
-    # 2) LLM como confirmação adicional
-    llm = get_llm_service()
-    try:
-        result = llm.extract_intent_and_entities_sync(text)
-        return result.get("intent") == "responder_lgpd"
-    except:
-        return False
+    return False
 
 
 def detect_purpose(text: str) -> Optional[str]:
     """Detecta finalidade (rent/sale) via LLM."""
+    text_lower = text.lower()
+    if any(kw in text_lower for kw in ["alugar", "aluguel", "locação", "locar"]):
+        return "rent"
+    if any(kw in text_lower for kw in ["comprar", "compra", "venda", "vender"]):
+        return "sale"
+
     llm = get_llm_service()
     try:
         result = llm.extract_intent_and_entities_sync(text)
         return result.get("entities", {}).get("finalidade")
-    except:
-        # Fallback para regex
-        text_lower = text.lower()
-        if any(kw in text_lower for kw in ["alugar", "aluguel", "locação", "locar"]):
-            return "rent"
-        if any(kw in text_lower for kw in ["comprar", "compra", "venda", "vender"]):
-            return "sale"
+    except Exception:
         return None
 
 
@@ -274,16 +270,15 @@ def extract_price(text: str) -> Optional[float]:
             log.info("extract_price_EXTENSO_MATCH", key=key, value=value, text_lower=text_lower)
             return float(value)
     
-    # PRIORIDADE 2: Regex para números puros (sem "mil" ou "milhão")
-    # Ex: "250000", "1500000"
-    text_clean = text.replace(".", "").replace(",", "").replace(" ", "")
-    match = re.search(r'\d{5,}', text_clean)  # Mínimo 5 dígitos (10k+)
-    if match:
+    # PRIORIDADE 2: Regex para números (aceita 3+ dígitos para casos como "até 2000")
+    text_clean = text.replace(".", "").replace(",", " ")
+    nums = re.findall(r"\d{3,}", text_clean)
+    if nums:
         try:
-            price = float(match.group())
+            price = float(nums[-1])
             log.info("extract_price_REGEX_MATCH", text_clean=text_clean, price=price)
             return price
-        except:
+        except Exception:
             pass
     
     # PRIORIDADE 3: LLM (último recurso)

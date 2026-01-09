@@ -13,6 +13,7 @@ import Login from './pages/Login'
 import UsersAdmin from './pages/UsersAdmin'
 import AcceptInvite from './pages/AcceptInvite'
 import SuperTenants from './pages/SuperTenants'
+import ChatbotFlowsAdmin from './pages/ChatbotFlowsAdmin'
 import RequireAuth from './components/RequireAuth'
 import Reports from './pages/Reports'
 
@@ -33,7 +34,8 @@ export default function App() {
           <Route path="leads" element={<LeadsList />} />
           <Route path="ops" element={<OpsDashboard />} />
           <Route path="reports" element={<RequireAuth><Reports /></RequireAuth>} />
-          <Route path="users" element={<RequireAuth><UsersAdmin /></RequireAuth>} />
+                    <Route path="users" element={<RequireAuth><UsersAdmin /></RequireAuth>} />
+          <Route path="flows" element={<RequireAuth><ChatbotFlowsAdmin /></RequireAuth>} />
           <Route path="super/tenants" element={<RequireAuth><SuperTenants /></RequireAuth>} />
           <Route path="sobre" element={<About />} />
           <Route path="*" element={<Navigate to="/imoveis" replace />} />

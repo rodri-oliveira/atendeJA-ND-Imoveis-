@@ -2,7 +2,7 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.repositories.db import engine, SessionLocal
-from app.repositories.models import Base, User, UserRole
+from app.repositories.models import Base, User, UserRole, Tenant
 from app.core.security import get_password_hash
 
 client = TestClient(app)
@@ -11,6 +11,10 @@ client = TestClient(app)
 def setup_module(module):
     # Como APP_ENV=test não cria tabelas no startup, garantimos aqui
     Base.metadata.create_all(bind=engine)
+    with SessionLocal() as db:
+        if db.get(Tenant, 1) is None:
+            db.add(Tenant(id=1, name="tenant-1"))
+            db.commit()
 
 
 def _ensure_admin(email: str = "admin@test.local", password: str = "pass123"):
@@ -23,6 +27,7 @@ def _ensure_admin(email: str = "admin@test.local", password: str = "pass123"):
                 hashed_password=get_password_hash(password),
                 is_active=True,
                 role=UserRole.admin,
+                tenant_id=1,
             )
             db.add(admin)
             db.commit()
@@ -46,7 +51,7 @@ def test_admin_user_crud_flow():
     # Arrange: admin
     email, password = _ensure_admin()
     token = _login(email, password)
-    headers = {"Authorization": f"Bearer {token}"}
+    headers = {"Authorization": f"Bearer {token}", "X-Tenant-Id": "1"}
 
     # Create collaborator
     create_payload = {

@@ -6,7 +6,7 @@ import structlog
 import os
 import hmac
 import hashlib
-from app.repositories.db import SessionLocal
+from app.repositories.db import db_session
 from datetime import datetime
 import re
 from urllib.parse import urlparse
@@ -16,43 +16,33 @@ from sqlalchemy import select
 from app.repositories import models as core_models
 from app.domain.realestate import models as re_models
 from app.domain.realestate.services.funnel_service import FunnelService
+from app.services.conversation_state import ConversationStateService
+from app.services.flow_message_orchestrator import try_process_via_flow_engine
+from app.services.conversation_context import normalize_state
+from app.services.llm_preprocessor import enrich_state_with_llm
+from app.services.tenant_resolver import resolve_tenant_from_phone_number_id, TenantResolutionError
 
 from pydantic import BaseModel
 from typing import Literal
  
-
+ 
 router = APIRouter()
 log = structlog.get_logger()
 _r: redis.Redis | None = None
 # Compatibilidade com testes antigos: tarefa opcional de buffer
 buffer_incoming_message = None  # type: ignore
 
+# Compatibilidade com testes antigos e monkeypatch:
+# historicamente o webhook usava `with SessionLocal() as db:`.
+# Mantemos o símbolo `SessionLocal` apontando para o context manager `db_session`.
+SessionLocal = db_session
+
 
 def _resolve_tenant_from_phone_number_id(db: Session, phone_number_id: str | None) -> core_models.Tenant:
-    pnid = (phone_number_id or "").strip()
-    if not pnid:
-        # In prod we fail closed; in dev/test we fall back to default tenant name.
-        raise HTTPException(status_code=400, detail="missing_phone_number_id")
-
-    acct = (
-        db.query(core_models.WhatsAppAccount)
-        .filter(
-            core_models.WhatsAppAccount.phone_number_id == pnid,
-            core_models.WhatsAppAccount.is_active == True,  # noqa: E712
-        )
-        .order_by(core_models.WhatsAppAccount.id.desc())
-        .first()
-    )
-    if not acct:
-        raise HTTPException(status_code=404, detail="tenant_not_mapped_for_phone_number_id")
-
-    tenant = db.get(core_models.Tenant, int(acct.tenant_id))
-    if not tenant:
-        raise HTTPException(status_code=404, detail="tenant_not_found_for_whatsapp_account")
-
-    if not bool(getattr(tenant, "is_active", True)):
-        raise HTTPException(status_code=403, detail="tenant_suspended")
-    return tenant
+    try:
+        return resolve_tenant_from_phone_number_id(db, phone_number_id)
+    except TenantResolutionError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
 
 
 def _redis() -> redis.Redis:
@@ -61,6 +51,66 @@ def _redis() -> redis.Redis:
         # Usa REDIS_URL das settings
         _r = redis.from_url(settings.REDIS_URL, decode_responses=True)
     return _r
+
+
+def _ensure_contact(db: Session, tenant_id: int, wa_id: str) -> core_models.Contact:
+    stmt = select(core_models.Contact).where(
+        core_models.Contact.tenant_id == int(tenant_id),
+        core_models.Contact.wa_id == str(wa_id),
+    )
+    c = db.execute(stmt).scalar_one_or_none()
+    if not c:
+        c = core_models.Contact(tenant_id=int(tenant_id), wa_id=str(wa_id))
+        db.add(c)
+        db.commit()
+        db.refresh(c)
+    return c
+
+
+def _ensure_conversation(db: Session, tenant_id: int, contact_id: int) -> core_models.Conversation:
+    stmt = (
+        select(core_models.Conversation)
+        .where(
+            core_models.Conversation.tenant_id == int(tenant_id),
+            core_models.Conversation.contact_id == int(contact_id),
+            core_models.Conversation.status == core_models.ConversationStatus.active_bot,
+        )
+        .order_by(core_models.Conversation.id.desc())
+        .limit(1)
+    )
+    conv = db.execute(stmt).scalars().first()
+    if not conv:
+        conv = core_models.Conversation(
+            tenant_id=int(tenant_id),
+            contact_id=int(contact_id),
+            status=core_models.ConversationStatus.active_bot,
+        )
+        db.add(conv)
+        db.commit()
+        db.refresh(conv)
+    return conv
+
+
+def _get_latest_lead_for_contact(db: Session, tenant_id: int, contact_id: int) -> re_models.Lead | None:
+    stmt = (
+        select(re_models.Lead)
+        .where(re_models.Lead.tenant_id == int(tenant_id), re_models.Lead.contact_id == int(contact_id))
+        .order_by(re_models.Lead.id.desc())
+        .limit(1)
+    )
+    return db.execute(stmt).scalars().first()
+
+
+def _record_event(db: Session, conversation_id: int, type_: str, payload: dict) -> None:
+    db.add(core_models.ConversationEvent(conversation_id=int(conversation_id), type=type_, payload=payload))
+    db.commit()
+
+
+def _parse_campaign_and_property(db: Session, tenant_id: int, text: str) -> dict | None:
+    _ = db
+    _ = tenant_id
+    _ = text
+    return None
 
 
 @router.get("")
@@ -185,7 +235,9 @@ async def receive(request: Request):
                                 wa_id=wa_id or "unknown",
                                 text=text_in,
                             )
-                            # Tenant is resolved below; buffer tasks accept string for compatibility
+                            buffer_incoming_message.delay(settings.DEFAULT_TENANT_ID, wa_id or "unknown", text_in)
+                            # Compatibilidade: quando buffer está habilitado, não processa sincronamente.
+                            continue
                     except Exception as e:  # noqa: BLE001
                         log.error("buffer_enqueue_error", error=str(e))
 
@@ -219,8 +271,44 @@ async def receive(request: Request):
                         except Exception as e:
                             log.warning("campaign_parse_error", error=str(e))
 
-                        funnel_service = FunnelService(db=db)
-                        resp_text = funnel_service.process_message(tenant_id=tenant.id, wa_id=wa_id or "unknown", user_text=text_in)
+                        resp_text = ""
+                        try:
+                            state_service = ConversationStateService(redis_client=_redis())
+                            sender_id = wa_id or "unknown"
+                            state = normalize_state(
+                                state=(state_service.get_state(sender_id, tenant_id=int(tenant.id)) or {}),
+                                sender_id=sender_id,
+                                tenant_id=int(tenant.id),
+                                default_stage="start",
+                            )
+                            state = await enrich_state_with_llm(
+                                sender_id=sender_id,
+                                text_raw=text_in,
+                                state=state,
+                                log=log,
+                            )
+                            flow_out = try_process_via_flow_engine(
+                                db=db,
+                                state_service=state_service,
+                                sender_id=sender_id,
+                                tenant_id=int(tenant.id),
+                                domain="real_estate",
+                                text_raw=text_in,
+                                text_normalized=text_in,
+                                initial_state=state,
+                            )
+                            if flow_out.handled and flow_out.message:
+                                resp_text = flow_out.message
+                        except Exception as e:  # noqa: BLE001
+                            log.info("webhook_flow_engine_skipped", error=str(e))
+
+                        if not resp_text:
+                            funnel_service = FunnelService(db=db)
+                            resp_text = funnel_service.process_message(
+                                tenant_id=tenant.id,
+                                wa_id=wa_id or "unknown",
+                                user_text=text_in,
+                            )
                         # Enviar resposta via provider configurado (Meta Cloud por padrão)
                         try:
                             provider = get_provider()

@@ -80,7 +80,8 @@ export default function AppShell() {
               >
                 Admin
               </NavLink>
-              <Item to="/users" label="Usuários" />
+                            <Item to="/users" label="Usuários" />
+              <Item to="/flows" label="Flows" />
               {showSuper && <Item to="/super/tenants" label="Tenants" />}
             </>
           )}

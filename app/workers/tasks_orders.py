@@ -2,7 +2,7 @@ from __future__ import annotations
 from celery import Task
 from app.workers.celery_app import celery
 import structlog
-from app.repositories.db import SessionLocal
+from app.repositories.db import db_session
 from app.repositories import models
 from app.workers.tasks_outbound import send_text as task_send_text
 from app.workers.tasks_outbound import send_template as task_send_template
@@ -16,7 +16,7 @@ def set_status_task(self: Task, order_id: int, target_status: str):
     """Altera status de pedido de forma assíncrona e envia notificação.
     Usa a mesma matriz de transição da API e respeita allow_direct_paid quando relevante.
     """
-    with SessionLocal() as db:
+    with db_session() as db:
         order = db.get(models.Order, order_id)
         if not order:
             log.error("order_not_found", order_id=order_id)
@@ -108,7 +108,7 @@ def check_sla_alerts(self: Task):
     """
     now = datetime.utcnow()
     alerted = []
-    with SessionLocal() as db:
+    with db_session() as db:
         tenants = db.query(models.Tenant).all()
         for t in tenants:
             cfg = (t.settings_json or {})

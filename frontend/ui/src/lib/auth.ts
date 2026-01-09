@@ -32,7 +32,7 @@ export async function apiFetch(input: string, init: RequestInit = {}): Promise<R
   const headers = new Headers(init.headers || {})
 
   // Adiciona Authorization automaticamente para qualquer rota da API quando houver token
-  if (url.startsWith('/api/')) {
+  if (url.startsWith('/api/') || url.startsWith('/admin/')) {
     const token = getToken()
     if (token) headers.set('Authorization', `Bearer ${token}`)
 

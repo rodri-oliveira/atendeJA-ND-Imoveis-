@@ -4,7 +4,7 @@ from typing import Optional, Dict, Any, List
 import time
 
 from app.messaging.limits import RateLimiter
-from app.repositories.db import SessionLocal
+from app.repositories.db import db_session
 from app.repositories.models import (
     SuppressedContact,
     MessageLog,
@@ -48,7 +48,7 @@ class MetaCloudProvider:
             return token, phone_number_id
 
         try:
-            with SessionLocal() as db:
+            with db_session() as db:
                 acct = (
                     db.query(WhatsAppAccount)
                     .filter(
@@ -95,7 +95,7 @@ class MetaCloudProvider:
         )
         if not limiter.allow(to):
             raise RuntimeError("rate_limited_or_global_limit")
-        with SessionLocal() as db:
+        with db_session() as db:
             # Guard da janela 24h (somente para texto livre)
             if settings.WINDOW_24H_ENABLED:
                 contact = (
@@ -159,7 +159,7 @@ class MetaCloudProvider:
                 provider_id = data.get("messages", [{}])[0].get("id")
             except Exception:
                 provider_id = None
-            with SessionLocal() as db:
+            with db_session() as db:
                 last = (
                     db.query(MessageLog)
                     .filter(
@@ -177,7 +177,7 @@ class MetaCloudProvider:
                     db.commit()
             return data
         except Exception as exc:
-            with SessionLocal() as db:
+            with db_session() as db:
                 last = (
                     db.query(MessageLog)
                     .filter(
@@ -212,7 +212,7 @@ class MetaCloudProvider:
         )
         if not limiter.allow(to):
             raise RuntimeError("rate_limited_or_global_limit")
-        with SessionLocal() as db:
+        with db_session() as db:
             sup = db.query(SuppressedContact).filter(
                 SuppressedContact.tenant_id == int(tenant),
                 SuppressedContact.wa_id == to,
@@ -256,7 +256,7 @@ class MetaCloudProvider:
                 provider_id = data.get("messages", [{}])[0].get("id")
             except Exception:
                 provider_id = None
-            with SessionLocal() as db:
+            with db_session() as db:
                 last = (
                     db.query(MessageLog)
                     .filter(
@@ -274,7 +274,7 @@ class MetaCloudProvider:
                     db.commit()
             return data
         except Exception as exc:
-            with SessionLocal() as db:
+            with db_session() as db:
                 last = (
                     db.query(MessageLog)
                     .filter(

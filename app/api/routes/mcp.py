@@ -13,8 +13,12 @@ from app.core.config import settings
 from app.domain.realestate.models import Property, PropertyImage, PropertyType, PropertyPurpose
 from app.domain.realestate.conversation_handlers import ConversationHandler
 from app.services.lead_service import LeadService
-from app.services.llm_service import get_llm_service
+from app.services.flow_message_orchestrator import try_process_via_flow_engine
+from app.services.llm_preprocessor import enrich_state_with_llm
+from app.services.conversation_context import normalize_state
+from app.services.tenant_resolver import resolve_tenant_id_from_input
 from app.domain.realestate import detection_utils as detect
+from app.domain.realestate.default_flow import LEGACY_STAGE_TO_HANDLER_MAP
 import json
 from fastapi import WebSocket
 
@@ -161,7 +165,7 @@ def t_detalhar_imovel(db: Session, imovel_id: int) -> Dict[str, Any]:
         "area_total": p.area_total,
         "area_util": p.area_usable,
         "imagens": [
-            {"id": i.id, "url": i.url, "is_capa": i.is_cover, "ordem": i.sort_order} for i in imgs
+            {"id": int(i.id), "url": i.url, "is_capa": bool(i.is_cover), "ordem": int(i.sort_order)} for i in imgs
         ],
     }
 
@@ -225,18 +229,12 @@ async def execute_mcp(
     # Modo auto (stateful) - Arquitetura Modular
     text_raw = body.input or ""
     text = text_raw.lower()
-    state = state_service.get_state(body.sender_id) or {}
-    # Garantir que sender_id esteja no state para uso posterior (persistência de leads)
-    state["sender_id"] = body.sender_id
-
     # Persistir tenant_id resolvido no state (evita salvar Lead no tenant errado)
-    try:
-        state["tenant_id"] = int(str(body.tenant_id).strip())
-    except Exception:
-        try:
-            state["tenant_id"] = int(str(settings.DEFAULT_TENANT_ID).strip())
-        except Exception:
-            state["tenant_id"] = 1
+    resolved_tenant_id = resolve_tenant_id_from_input(body.tenant_id)
+
+    raw_state = state_service.get_state(body.sender_id, tenant_id=resolved_tenant_id) or {}
+
+    state = normalize_state(state=raw_state, sender_id=body.sender_id, tenant_id=resolved_tenant_id, default_stage="start")
     
     # DEBUG: Log do estado atual
     import structlog
@@ -250,53 +248,7 @@ async def execute_mcp(
     # ===== PRÉ-PROCESSAMENTO LLM (UMA VEZ, ANTES DO LOOP) =====
     # Extrai intenção e entidades da mensagem do usuário
     # Armazena no state para uso pelos handlers
-    if text_raw.strip():
-        try:
-            log.info("llm_extraction_start", 
-                    sender_id=body.sender_id, 
-                    user_input=text_raw, 
-                    input_length=len(text_raw),
-                    current_stage=state.get("stage", "start"))
-            
-            llm = get_llm_service()
-            llm_result = await llm.extract_intent_and_entities(text_raw)
-            
-            log.info("llm_extraction_raw", 
-                    sender_id=body.sender_id, 
-                    raw_intent=llm_result.get("intent"), 
-                    raw_entities=llm_result.get("entities", {}))
-            
-            if isinstance(llm_result, dict):
-                # Sanitizar resultado do LLM para evitar alucinações
-                from app.domain.realestate.validation_utils import sanitize_llm_result
-                current_stage = state.get("stage", "start")
-                sanitized_result = sanitize_llm_result(llm_result, text_raw, current_stage)
-                
-                # Log da sanitização se houve mudanças
-                if llm_result != sanitized_result:
-                    log.warning("llm_result_changed_by_sanitization",
-                               sender_id=body.sender_id,
-                               original_intent=llm_result.get("intent"),
-                               sanitized_intent=sanitized_result.get("intent"),
-                               original_entities=llm_result.get("entities", {}),
-                               sanitized_entities=sanitized_result.get("entities", {}))
-                else:
-                    log.debug("llm_result_unchanged_by_sanitization", sender_id=body.sender_id)
-                
-                state["llm_intent"] = sanitized_result.get("intent")
-                state["llm_entities"] = sanitized_result.get("entities") or {}
-                state["llm_original"] = llm_result  # Para debug/análise
-                
-                log.info("llm_extraction_final", 
-                        sender_id=body.sender_id,
-                        final_intent=state.get("llm_intent"), 
-                        final_entities=state.get("llm_entities"))
-        except Exception as e:
-            log.error("llm_extraction_failed", 
-                     sender_id=body.sender_id, 
-                     error=str(e), 
-                     user_input=text_raw)
-            # Continua sem LLM - handlers usarão fallback regex
+    state = await enrich_state_with_llm(sender_id=body.sender_id, text_raw=text_raw, state=state, log=log)
     
     # ===== LOOP DE CONVERSAÇÃO =====
     # Permite transições de estado internas sem reprocessar LLM
@@ -323,92 +275,77 @@ async def execute_mcp(
                     "Continue de onde parou!"
                 )
                 return MCPResponse(message=msg, tool_calls=tool_calls)
-        
+
         # Roteamento para handlers específicos
-        log.info("mcp_routing_handler", 
-                 stage=stage, 
-                 text_preview=text[:50] + "..." if len(text) > 50 else text,
-                 text_raw_preview=text_raw[:50] + "..." if len(text_raw) > 50 else text_raw,
-                 state_keys=list(state.keys()))
-        
-        if stage == "start":
-            log.info("mcp_calling_handler", handler="handle_start")
-            msg, state, continue_loop = handler.handle_start(text_raw, state)
-        elif stage == "awaiting_lgpd_consent":
-            log.info("mcp_calling_handler", handler="handle_lgpd_consent")
-            msg, state, continue_loop = handler.handle_lgpd_consent(text, state)
-        elif stage == "awaiting_name":
-            log.info("mcp_calling_handler", handler="handle_name")
-            msg, state, continue_loop = handler.handle_name(text, state)
-        # FLUXO DIRECIONADO
-        elif stage == "awaiting_has_property_in_mind":
-            log.info("mcp_calling_handler", handler="handle_has_property_in_mind")
-            msg, state, continue_loop = handler.handle_has_property_in_mind(text, state)
-        elif stage == "awaiting_property_code":
-            log.info("mcp_calling_handler", handler="handle_property_code")
-            msg, state, continue_loop = handler.handle_property_code(text, state)
-        elif stage == "awaiting_property_questions":
-            log.info("mcp_calling_handler", handler="handle_property_questions")
-            msg, state, continue_loop = handler.handle_property_questions(text, state)
-        elif stage == "awaiting_search_choice":
-            log.info("mcp_calling_handler", handler="handle_search_choice")
-            msg, state, continue_loop = handler.handle_search_choice(text, state)
-        elif stage == "awaiting_schedule_visit_question":
-            log.info("mcp_calling_handler", handler="handle_schedule_visit_question")
-            msg, state, continue_loop = handler.handle_schedule_visit_question(text, state)
-        elif stage == "awaiting_phone_confirmation":
-            log.info("mcp_calling_handler", handler="handle_phone_confirmation")
-            msg, state, continue_loop = handler.handle_phone_confirmation(text, state)
-        elif stage == "awaiting_phone_input":
-            log.info("mcp_calling_handler", handler="handle_phone_input")
-            msg, state, continue_loop = handler.handle_phone_input(text, state)
-        elif stage == "awaiting_visit_date":
-            log.info("mcp_calling_handler", handler="handle_visit_date")
-            msg, state, continue_loop = handler.handle_visit_date(text, state)
-        elif stage == "awaiting_visit_time":
-            log.info("mcp_calling_handler", handler="handle_visit_time")
-            msg, state, continue_loop = handler.handle_visit_time(text, body.sender_id, state)
-        # FLUXO QUALIFICAÇÃO
-        elif stage == "awaiting_purpose":
-            log.info("mcp_calling_handler", handler="handle_purpose")
-            msg, state, continue_loop = handler.handle_purpose(text, state)
-        elif stage == "awaiting_city":
-            log.info("mcp_calling_handler", handler="handle_city")
-            msg, state, continue_loop = handler.handle_city(text_raw, state)
-        elif stage == "awaiting_type":
-            log.info("mcp_calling_handler", handler="handle_type")
-            msg, state, continue_loop = handler.handle_type(text, state)
-        elif stage == "awaiting_price_min":
-            log.info("mcp_calling_handler", handler="handle_price_min")
-            msg, state, continue_loop = handler.handle_price_min(text, state)
-        elif stage == "awaiting_price_max":
-            log.info("mcp_calling_handler", handler="handle_price_max")
-            msg, state, continue_loop = handler.handle_price_max(text, state)
-        elif stage == "awaiting_bedrooms":
-            log.info("mcp_calling_handler", handler="handle_bedrooms")
-            msg, state, continue_loop = handler.handle_bedrooms(text, state)
-        elif stage == "awaiting_neighborhood":
-            log.info("mcp_calling_handler", handler="handle_neighborhood")
-            msg, state, continue_loop = handler.handle_neighborhood(text_raw, state)
-        elif stage == "searching":
-            log.info("mcp_calling_handler", handler="handle_searching")
-            msg, state, continue_loop = handler.handle_searching(body.sender_id, state)
-        elif stage == "showing_property":
-            log.info("mcp_calling_handler", handler="handle_showing_property")
-            msg, state, continue_loop = handler.handle_showing_property(state)
-        elif stage == "awaiting_property_feedback":
-            log.info("mcp_calling_handler", handler="handle_property_feedback")
-            msg, state, continue_loop = handler.handle_property_feedback(text, state)
-        elif stage == "awaiting_visit_decision":
-            log.info("mcp_calling_handler", handler="handle_visit_decision")
-            msg, state, continue_loop = handler.handle_visit_decision(text, body.sender_id, state)
-        elif stage == "awaiting_refinement":
-            log.info("mcp_calling_handler", handler="handle_refinement")
-            msg, state, continue_loop = handler.handle_refinement(text, state)
-        else:
-            # Estágio desconhecido - fallback
-            log.warning("mcp_unknown_stage", stage=stage)
-            break
+        log.info(
+            "mcp_routing_handler",
+            stage=stage,
+            text_preview=text[:50] + "..." if len(text) > 50 else text,
+            text_raw_preview=text_raw[:50] + "..." if len(text_raw) > 50 else text_raw,
+            state_keys=list(state.keys()),
+        )
+
+        # ===== Flow-as-Data (multi-tenant) =====
+        # Tenta executar pelo flow publicado do tenant. Se não houver flow/nó válido, cai no roteamento hardcoded.
+        msg = ""
+        continue_loop = False
+        try:
+            flow_out = try_process_via_flow_engine(
+                db=db,
+                state_service=state_service,
+                sender_id=body.sender_id,
+                tenant_id=int(state.get("tenant_id") or 1),
+                domain="real_estate",
+                text_raw=text_raw,
+                text_normalized=text,
+                initial_state=state,
+                persist_state=False,
+            )
+            if flow_out.handled:
+                msg = flow_out.message
+                state = flow_out.state
+                continue_loop = bool(flow_out.continue_loop)
+                log.info(
+                    "mcp_flow_engine_result",
+                    handled=True,
+                    has_message=bool(msg),
+                    continue_loop=bool(continue_loop),
+                    new_stage=(state.get("stage") if state else None),
+                )
+            else:
+                log.info("mcp_flow_engine_result", handled=False)
+        except Exception:
+            log.info("mcp_flow_engine_result", handled=False)
+
+        # Fallback legado (compacto): só roda se o Flow Engine não tratar.
+        if not (msg or continue_loop):
+            handler_name = LEGACY_STAGE_TO_HANDLER_MAP.get(stage)
+            if not handler_name:
+                log.warning("mcp_unknown_stage", stage=stage)
+                break
+
+            fn = getattr(handler, f"handle_{handler_name}", None)
+            if not fn:
+                log.warning("mcp_unknown_handler", handler=handler_name, stage=stage)
+                break
+
+            log.info("mcp_calling_handler", handler=f"handle_{handler_name}")
+
+            raw_handlers = {"start", "city", "neighborhood"}
+            sender_only_handlers = {"searching"}
+            state_only_handlers = {"showing_property"}
+            text_sender_handlers = {"visit_time", "visit_decision"}
+
+            if handler_name in raw_handlers:
+                msg, state, continue_loop = fn(text_raw, state)
+            elif handler_name in sender_only_handlers:
+                msg, state, continue_loop = fn(body.sender_id, state)
+            elif handler_name in state_only_handlers:
+                msg, state, continue_loop = fn(state)
+            elif handler_name in text_sender_handlers:
+                msg, state, continue_loop = fn(text, body.sender_id, state)
+            else:
+                msg, state, continue_loop = fn(text, state)
         
         log.info("mcp_handler_result", 
                  handler=f"handle_{stage.replace('awaiting_', '')}", 
@@ -426,9 +363,9 @@ async def execute_mcp(
                      has_purpose=bool(state.get("purpose")),
                      has_type=bool(state.get("type")),
                      has_city=bool(state.get("city")))
-            state_service.set_state(body.sender_id, state)
+            state_service.set_state(body.sender_id, state, tenant_id=int(state.get("tenant_id") or resolved_tenant_id))
         else:
-            state_service.clear_state(body.sender_id)
+            state_service.clear_state(body.sender_id, tenant_id=resolved_tenant_id)
         
         # Se há mensagem, retornar
         if msg:
@@ -437,7 +374,7 @@ async def execute_mcp(
             if media_urls:
                 # Limpar imagens do state após extrair (para não reenviar)
                 state.pop("property_detail_images", None)
-                state_service.set_state(body.sender_id, state)
+                state_service.set_state(body.sender_id, state, tenant_id=int(state.get("tenant_id") or resolved_tenant_id))
             return MCPResponse(message=msg, tool_calls=tool_calls, media=media_urls)
         
         # Se não deve continuar loop, sair
@@ -449,7 +386,7 @@ async def execute_mcp(
         text_raw = ""
 
     # Fallback: se chegou aqui, algo não foi tratado
-    state_service.clear_state(body.sender_id)
+    state_service.clear_state(body.sender_id, tenant_id=resolved_tenant_id)
     msg_fallback = "Desculpe, não entendi. Para começar, me diga: você quer *comprar* ou *alugar* um imóvel?"
     return MCPResponse(message=msg_fallback, tool_calls=tool_calls)
 
@@ -457,6 +394,7 @@ async def execute_mcp(
 # ===== Admin: limpar estado de conversas (DEV only) =====
 class ClearStateIn(BaseModel):
     sender_ids: List[str]
+    tenant_id: Optional[int] = None
 
 
 @router.post("/admin/state/clear")
@@ -470,10 +408,14 @@ def mcp_admin_clear_state(
     """
     _check_auth(Authorization)
     sender_ids = [s for s in (payload.sender_ids or []) if str(s).strip()]
+    tenant_id = payload.tenant_id
     cleared = 0
     for sid in sender_ids:
         try:
-            state_service.clear_state(sid)
+            if tenant_id is not None:
+                state_service.clear_state(sid, tenant_id=int(tenant_id))
+            # Sempre limpar chave legada também (evita rehidratar via migração lazy)
+            state_service.clear_state(sid, tenant_id=None)
             cleared += 1
         except Exception:
             # ignora erros por sender_id inexistente
