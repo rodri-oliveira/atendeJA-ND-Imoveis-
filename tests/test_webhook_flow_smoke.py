@@ -50,6 +50,12 @@ def test_webhook_uses_flow_engine_and_persists_state(client, db_session, monkeyp
         db_session.add(core_models.Tenant(id=1, name="tenant-1"))
         db_session.commit()
 
+    tenant = db_session.get(core_models.Tenant, 1)
+    assert tenant is not None
+    tenant.settings_json = {"chatbot_domain": "car_dealer"}
+    db_session.add(tenant)
+    db_session.commit()
+
     acct = core_models.WhatsAppAccount(tenant_id=1, phone_number_id="pnid-1", is_active=True)
     db_session.add(acct)
     db_session.commit()
@@ -76,7 +82,7 @@ def test_webhook_uses_flow_engine_and_persists_state(client, db_session, monkeyp
     db_session.add(
         ChatbotFlow(
             tenant_id=1,
-            domain="real_estate",
+            domain="car_dealer",
             name="default-test-webhook",
             flow_definition=flow_definition,
             is_published=True,

@@ -14,6 +14,7 @@ from app.domain.realestate.models import Property, PropertyImage, PropertyType, 
 from app.domain.realestate.conversation_handlers import ConversationHandler
 from app.services.lead_service import LeadService
 from app.services.flow_message_orchestrator import try_process_via_flow_engine
+from app.services.tenant_resolver import resolve_chatbot_domain_for_tenant
 from app.services.llm_preprocessor import enrich_state_with_llm
 from app.services.conversation_context import normalize_state
 from app.services.tenant_resolver import resolve_tenant_id_from_input
@@ -289,13 +290,15 @@ async def execute_mcp(
         # Tenta executar pelo flow publicado do tenant. Se não houver flow/nó válido, cai no roteamento hardcoded.
         msg = ""
         continue_loop = False
+        tenant_id = int(state.get("tenant_id") or 1)
+        domain = resolve_chatbot_domain_for_tenant(db, tenant_id)
         try:
             flow_out = try_process_via_flow_engine(
                 db=db,
                 state_service=state_service,
                 sender_id=body.sender_id,
-                tenant_id=int(state.get("tenant_id") or 1),
-                domain="real_estate",
+                tenant_id=tenant_id,
+                domain=domain,
                 text_raw=text_raw,
                 text_normalized=text,
                 initial_state=state,
@@ -414,9 +417,11 @@ def mcp_admin_clear_state(
         try:
             if tenant_id is not None:
                 state_service.clear_state(sid, tenant_id=int(tenant_id))
-            # Sempre limpar chave legada também (evita rehidratar via migração lazy)
-            state_service.clear_state(sid, tenant_id=None)
-            cleared += 1
+                # Sempre limpar chave legada também (evita rehidratar via migração lazy)
+                state_service.clear_state(sid, tenant_id=None)
+                cleared += 1
+            else:
+                cleared += int(state_service.clear_all_states(sid) > 0)
         except Exception:
             # ignora erros por sender_id inexistente
             pass

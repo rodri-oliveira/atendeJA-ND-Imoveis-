@@ -3,6 +3,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 import React from 'react'
 import { render, screen, within } from '@testing-library/react'
 import KanbanPage from '../src/pages/KanbanPage'
+import { ConfigProvider } from '../src/config/provider'
 
 const g: any = globalThis as any
 
@@ -14,6 +15,20 @@ describe('KanbanPage - agrupamento por coluna', () => {
     document.body.appendChild(root)
 
     g.fetch = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith('/config.json')) {
+        return new Response(
+          JSON.stringify({
+            branding: { appTitle: 'Painel Operacional' },
+            kanban: {
+              columns: [
+                { status: 'draft', title: 'Rascunho' },
+                { status: 'in_kitchen', title: 'Em preparo' },
+              ],
+            },
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        )
+      }
       if (url.includes('/orders') && (!init || init.method === 'GET')) {
         return new Response(
           JSON.stringify([
@@ -33,7 +48,12 @@ describe('KanbanPage - agrupamento por coluna', () => {
 
   it('renderiza cards nas colunas corretas', async () => {
     const container = document.getElementById('root') as HTMLElement
-    render(<KanbanPage />, { container })
+    render(
+      <ConfigProvider>
+        <KanbanPage />
+      </ConfigProvider>,
+      { container }
+    )
 
     // Coluna de rascunho com pedido #10
     const colDraft = await screen.findByTestId('col-draft')

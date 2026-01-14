@@ -34,6 +34,12 @@ from datetime import datetime
 from app.domain.realestate.services.chatbot_flow_service import ChatbotFlowService
 from app.services.flow_engine import FlowEngine
 from app.services.conversation_context import normalize_state
+from app.api.schemas.chatbot_templates import (
+    ChatbotFlowTemplateApplyIn,
+    ChatbotFlowTemplateApplyOut,
+    ChatbotFlowTemplateOut,
+)
+from app.services.chatbot_template_service import apply_chatbot_flow_template, list_chatbot_flow_templates
 
 if settings.APP_ENV == "test":
     router = APIRouter()
@@ -255,6 +261,21 @@ def re_publish_chatbot_flow_by_version(
     db.commit()
     db.refresh(row)
     return ChatbotFlowPublishOut(published_flow_id=int(row.id), published_version=int(row.published_version or 0))
+
+@router.get("/chatbot-templates", response_model=List[ChatbotFlowTemplateOut])
+def re_list_chatbot_flow_templates(
+    tenant_id: int = Depends(require_admin_tenant_id),
+):
+    _ = tenant_id
+    return list_chatbot_flow_templates()
+
+@router.post("/chatbot-templates/apply", response_model=ChatbotFlowTemplateApplyOut)
+def re_apply_chatbot_flow_template(
+    payload: ChatbotFlowTemplateApplyIn,
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(require_admin_tenant_id),
+):
+    return apply_chatbot_flow_template(db=db, tenant_id=int(tenant_id), payload=payload)
 
 @router.post("/chatbot-flows/{flow_id}/preview", response_model=ChatbotFlowPreviewOut)
 def re_preview_chatbot_flow(

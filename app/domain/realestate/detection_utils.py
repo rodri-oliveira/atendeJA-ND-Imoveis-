@@ -43,17 +43,7 @@ def detect_yes_no(text: str) -> Optional[str]:
     for keyword in no_keywords:
         if keyword in text_lower:
             return "no"
-    
-    # 2) LLM como fallback
-    llm = get_llm_service()
-    try:
-        result = llm.extract_intent_and_entities_sync(text)
-        intent = result.get("intent")
-        if intent == "responder_lgpd":  # LLM interpreta "sim" como responder_lgpd
-            return "yes"
-    except:
-        pass
-    
+
     return None
 
 
@@ -299,36 +289,42 @@ def extract_price(text: str) -> Optional[float]:
 
 def extract_bedrooms(text: str) -> Optional[int]:
     """Extrai número de dormitórios via LLM (com fallback para regex)."""
+    import re
+
+    text_lower = (text or "").lower()
+
+    # PRIORIDADE 1: atalhos semânticos (evita chamada ao LLM)
+    if "tanto faz" in text_lower or "qualquer" in text_lower or "não importa" in text_lower or "nao importa" in text_lower:
+        return None
+
+    # PRIORIDADE 2: regex (rápido)
+    match = re.search(r"(\d+)\s*(?:quarto|dorm|quartos|dormitório)", text_lower)
+    if match:
+        try:
+            return int(match.group(1))
+        except Exception:
+            pass
+
+    # Tentar extrair número isolado
+    match = re.search(r"\b(\d+)\b", text)
+    if match:
+        try:
+            num = int(match.group(1))
+            if 0 <= num <= 10:
+                return num
+        except Exception:
+            pass
+
+    # PRIORIDADE 3: LLM (último recurso)
     llm = get_llm_service()
     try:
         result = llm.extract_intent_and_entities_sync(text)
         dorm = result.get("entities", {}).get("dormitorios")
         if dorm is not None:
             return int(dorm)
-    except:
-        # Ignorar erro e seguir para regex
+    except Exception:
         pass
 
-    # Fallback para regex quando LLM não retorna valor
-    import re
-    text_lower = text.lower()
-    if "tanto faz" in text_lower or "qualquer" in text_lower:
-        return None
-    match = re.search(r'(\d+)\s*(?:quarto|dorm|quartos|dormitório)', text_lower)
-    if match:
-        try:
-            return int(match.group(1))
-        except:
-            pass
-    # Tentar extrair número isolado
-    match = re.search(r'\b(\d+)\b', text)
-    if match:
-        try:
-            num = int(match.group(1))
-            if 0 <= num <= 10:
-                return num
-        except:
-            pass
     return None
 
 
@@ -348,6 +344,26 @@ def is_skip_neighborhood(text: str) -> bool:
 def detect_interest(text: str) -> bool:
     """Detecta interesse no imóvel apresentado (hardcode + LLM)."""
     text_lower = text.lower().strip()
+
+    if (
+        text_lower in {"não", "nao"}
+        or text_lower.startswith("não ")
+        or text_lower.startswith("nao ")
+        or any(
+            kw in text_lower
+            for kw in [
+                "não quero",
+                "nao quero",
+                "não gostei",
+                "nao gostei",
+                "não curti",
+                "nao curti",
+                "não tenho interesse",
+                "nao tenho interesse",
+            ]
+        )
+    ):
+        return False
     
     # 1) Hardcode (rápido e confiável)
     interest_keywords = [
@@ -361,22 +377,6 @@ def detect_interest(text: str) -> bool:
     
     if any(kw in text_lower for kw in interest_keywords):
         return True
-    
-    # 2) LLM como fallback para capturar expressões mais naturais
-    llm = get_llm_service()
-    try:
-        result = llm.extract_intent_and_entities_sync(text)
-        intent = result.get("intent", "")
-        
-        # Considerar intenções que indicam interesse
-        if intent in ["interesse_imovel", "agendar_visita", "buscar_imovel"]:
-            # Verificar se não é uma negação ou pedido de próximo
-            if not any(neg in text_lower for neg in ["não", "nao", "próximo", "proximo", "outro"]):
-                log.info("llm_detected_interest", text=text, intent=intent)
-                return True
-    except Exception as e:
-        log.warning("llm_interest_detection_failed", error=str(e), text=text)
-    
     return False
 
 
@@ -384,7 +384,25 @@ def detect_next_property(text: str) -> bool:
     """Detecta pedido para próximo imóvel (hardcode + LLM)."""
     text_lower = text.lower().strip()
     # 1) Hardcode
-    if any(kw in text_lower for kw in ["próximo", "proximo", "outro", "next", "passa", "outras opções", "mais", "outro imovel"]):
+    if any(
+        kw in text_lower
+        for kw in [
+            "próximo",
+            "proximo",
+            "outro",
+            "next",
+            "passa",
+            "outras opções",
+            "mais",
+            "outro imovel",
+            "não quero",
+            "nao quero",
+            "não gostei",
+            "nao gostei",
+            "não curti",
+            "nao curti",
+        ]
+    ):
         return True
     # 2) LLM
     llm = get_llm_service()

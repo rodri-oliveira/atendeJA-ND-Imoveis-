@@ -20,7 +20,11 @@ from app.services.conversation_state import ConversationStateService
 from app.services.flow_message_orchestrator import try_process_via_flow_engine
 from app.services.conversation_context import normalize_state
 from app.services.llm_preprocessor import enrich_state_with_llm
-from app.services.tenant_resolver import resolve_tenant_from_phone_number_id, TenantResolutionError
+from app.services.tenant_resolver import (
+    resolve_tenant_from_phone_number_id,
+    resolve_chatbot_domain_for_tenant,
+    TenantResolutionError,
+)
 
 from pydantic import BaseModel
 from typing import Literal
@@ -229,13 +233,22 @@ async def receive(request: Request):
                     # Compat: se existir tarefa de buffer, enfileira e segue
                     try:
                         if buffer_incoming_message is not None:
+                            tenant_id_to_enqueue = settings.DEFAULT_TENANT_ID
+                            try:
+                                with SessionLocal() as db:
+                                    tenant = _resolve_tenant_from_phone_number_id(db, phone_number_id)
+                                tenant_id_to_enqueue = int(tenant.id)
+                            except Exception as e:  # noqa: BLE001
+                                if settings.APP_ENV == "prod":
+                                    raise
+                                log.info("buffer_tenant_resolution_failed", error=str(e), phone_number_id=phone_number_id)
                             log.info(
                                 "buffer_enqueue_call",
                                 phone_number_id=phone_number_id,
                                 wa_id=wa_id or "unknown",
                                 text=text_in,
                             )
-                            buffer_incoming_message.delay(settings.DEFAULT_TENANT_ID, wa_id or "unknown", text_in)
+                            buffer_incoming_message.delay(tenant_id_to_enqueue, wa_id or "unknown", text_in, payload)
                             # Compatibilidade: quando buffer está habilitado, não processa sincronamente.
                             continue
                     except Exception as e:  # noqa: BLE001
@@ -292,7 +305,7 @@ async def receive(request: Request):
                                 state_service=state_service,
                                 sender_id=sender_id,
                                 tenant_id=int(tenant.id),
-                                domain="real_estate",
+                                domain=resolve_chatbot_domain_for_tenant(db, int(tenant.id)),
                                 text_raw=text_in,
                                 text_normalized=text_in,
                                 initial_state=state,

@@ -49,3 +49,10 @@ def resolve_tenant_from_phone_number_id(db: Session, phone_number_id: str | None
         raise TenantResolutionError(status_code=403, detail="tenant_suspended")
 
     return tenant
+
+
+def resolve_chatbot_domain_for_tenant(db: Session, tenant_id: int) -> str:
+    tenant = db.get(core_models.Tenant, int(tenant_id))
+    settings_json = dict(getattr(tenant, "settings_json", {}) or {}) if tenant else {}
+    domain = (settings_json.get("chatbot_domain") or "").strip()
+    return domain or "real_estate"

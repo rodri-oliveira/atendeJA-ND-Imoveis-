@@ -14,6 +14,8 @@ interface Imovel {
   dormitorios?: number | null
   ativo: boolean
   cover_image_url?: string | null
+  // Alias retornado pelo backend (schemas.py usa serialization_alias="url_capa")
+  url_capa?: string | null
 }
 
 export default function ImoveisList() {
@@ -172,15 +174,24 @@ export default function ImoveisList() {
         const url = `/api/re/imoveis${queryString ? `?${queryString}` : ''}`
         const res = await apiFetch(url, { cache: 'no-store' })
         if (!res.ok) throw new Error(`HTTP ${res.status}`)
-        const js = await res.json()
+        const js: unknown = await res.json()
+        const arr = Array.isArray(js) ? (js as unknown[]) : []
+        const items: Imovel[] = arr.map((row: unknown) => {
+          const r = (row ?? {}) as Record<string, unknown>
+          return {
+            ...(r as unknown as Imovel),
+            cover_image_url: (r["cover_image_url"] ?? r["url_capa"] ?? null) as string | null,
+          }
+        })
         const hdr = res.headers.get('X-Total-Count')
-        const totalCount = hdr ? Number(hdr) : (Array.isArray(js) ? js.length : 0)
+        const totalCount = hdr ? Number(hdr) : items.length
         if (alive) {
-          setData(js)
+          setData(items)
           setTotal(Number.isFinite(totalCount) ? totalCount : 0)
         }
-      } catch (e: any) {
-        if (alive) setError(e?.message || 'erro')
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : 'erro'
+        if (alive) setError(msg)
       } finally {
         if (alive) setLoading(false)
       }
@@ -324,11 +335,11 @@ export default function ImoveisList() {
                       alt={p.titulo}
                       className="absolute inset-0 w-full h-full object-cover"
                       onError={(e) => {
-                        try { console.error('[IMG_ERROR] list', { id: p.id, url: src, original: direct }) } catch {}
+                        console.error('[IMG_ERROR] list', { id: p.id, url: src, original: direct })
                         const el = e.currentTarget as HTMLImageElement
                         el.style.display = 'none'
                       }}
-                      onLoad={() => { try { console.debug('[IMG_OK] list', { id: p.id, url: src }) } catch {} }}
+                      onLoad={() => { console.debug('[IMG_OK] list', { id: p.id, url: src }) }}
                     />
                   ) : null
                 })() : null}

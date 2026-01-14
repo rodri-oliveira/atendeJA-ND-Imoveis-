@@ -26,7 +26,7 @@ import csv
 import io
 import secrets
 from datetime import datetime, timedelta
-from app.api.deps import require_role_admin, get_db, require_admin_tenant_id
+from app.api.deps import require_role_admin, get_db, require_admin_tenant_id, get_current_user
 from app.api.deps import require_admin_request_context
 from app.messaging.provider import get_provider
 
@@ -289,7 +289,15 @@ class InviteResendOut(InviteCreateOut):
     pass
 
 
-def _issue_invite(db: Session, *, email: str, role: UserRole, tenant_id: int, expires_hours: int = 72) -> InviteCreateOut:
+def _issue_invite(
+    db: Session,
+    *,
+    email: str,
+    role: UserRole,
+    tenant_id: int,
+    expires_hours: int = 72,
+    commit: bool = True,
+) -> InviteCreateOut:
     token = secrets.token_urlsafe(32)
     expires_at = datetime.utcnow() + timedelta(hours=max(1, expires_hours))
     # Opcional: invalidar convites anteriores do mesmo email+tenant
@@ -302,8 +310,11 @@ def _issue_invite(db: Session, *, email: str, role: UserRole, tenant_id: int, ex
         expires_at=expires_at,
     )
     db.add(inv)
-    db.commit()
-    db.refresh(inv)
+    if commit:
+        db.commit()
+        db.refresh(inv)
+    else:
+        db.flush()
     return InviteCreateOut(token=token, email=email, role=role, expires_at=inv.expires_at)
 
 
@@ -561,11 +572,37 @@ def list_users(role: UserRole | None = None, is_active: bool | None = None, limi
 
 
 @router.patch("/users/{user_id}", response_model=UserOut)
-def update_user(user_id: int, payload: UserUpdate, db: Session = Depends(get_db), tenant_id: int = Depends(require_admin_tenant_id)):
+def update_user(
+    user_id: int,
+    payload: UserUpdate,
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(require_admin_tenant_id),
+    current_user: User = Depends(get_current_user),
+):
     user = db.get(User, user_id)
     if not user or (user.tenant_id is not None and int(user.tenant_id) != int(tenant_id)):
         raise HTTPException(status_code=404, detail="user_not_found")
     data = payload.model_dump(exclude_unset=True)
+
+    will_change_role = ("role" in data and data["role"] is not None and data["role"] != user.role)
+    will_deactivate = ("is_active" in data and data["is_active"] is not None and bool(data["is_active"]) is False)
+    is_self_update = (int(current_user.id) == int(user.id))
+
+    if is_self_update and (will_change_role or will_deactivate):
+        raise HTTPException(status_code=400, detail="cannot_modify_own_admin_access")
+
+    if (will_change_role and data.get("role") != UserRole.admin) or will_deactivate:
+        admin_count = (
+            db.query(User)
+            .filter(
+                User.tenant_id == int(tenant_id),
+                User.is_active == True,  # noqa: E712
+                User.role == UserRole.admin,
+            )
+            .count()
+        )
+        if admin_count <= 1 and user.role == UserRole.admin and bool(user.is_active):
+            raise HTTPException(status_code=400, detail="cannot_remove_last_admin")
     if "full_name" in data:
         user.full_name = data["full_name"]
     if "role" in data and data["role"] is not None:

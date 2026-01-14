@@ -3,6 +3,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 import React from 'react'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import KanbanPage from '../src/pages/KanbanPage'
+import { ConfigProvider } from '../src/config/provider'
 
 const g: any = globalThis as any
 
@@ -16,6 +17,23 @@ describe('KanbanPage - ação de mudar status', () => {
     // Após PATCH, GET subsequente retorna o mesmo pedido em in_kitchen
     let calls = 0
     g.fetch = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith('/config.json')) {
+        return new Response(
+          JSON.stringify({
+            branding: { appTitle: 'Painel Operacional' },
+            kanban: {
+              columns: [
+                { status: 'paid', title: 'Pago' },
+                { status: 'in_kitchen', title: 'Em preparo' },
+              ],
+              actions: {
+                paid: [{ label: 'Marcar em preparo', next: 'in_kitchen' }],
+              },
+            },
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        )
+      }
       if (url.includes('/orders') && (!init || init.method === 'GET')) {
         calls++
         if (calls === 1) {
@@ -35,7 +53,12 @@ describe('KanbanPage - ação de mudar status', () => {
 
   it('dispara PATCH (paid -> in_kitchen) e atualiza a coluna', async () => {
     const container = document.getElementById('root') as HTMLElement
-    render(<KanbanPage />, { container })
+    render(
+      <ConfigProvider>
+        <KanbanPage />
+      </ConfigProvider>,
+      { container }
+    )
 
     // Botão de ação aparece no card do status paid
     const button = await screen.findByRole('button', { name: /Marcar em preparo/i })

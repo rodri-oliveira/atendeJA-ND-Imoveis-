@@ -25,6 +25,7 @@ dev_auth.db
 dev_test.db
 
 # Frontend (Vite/React)
+curriculo/
 frontend/ui/node_modules/
 frontend/ui/dist/
 frontend/ui/.vite/
@@ -54,6 +55,10 @@ cliente/
 # Arquivos temporários de testes de API
 body.json
 chat_body.json
+
+# Scripts temporários locais (não versionar)
+temp_*.py
+_temp_*.py
 
 # WhatsApp adapter artifacts
 adapter-wa/.wwebjs_auth/

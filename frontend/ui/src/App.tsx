@@ -14,15 +14,20 @@ import UsersAdmin from './pages/UsersAdmin'
 import AcceptInvite from './pages/AcceptInvite'
 import SuperTenants from './pages/SuperTenants'
 import ChatbotFlowsAdmin from './pages/ChatbotFlowsAdmin'
+import CatalogList from './pages/CatalogList'
+import CatalogAdmin from './pages/CatalogAdmin'
 import RequireAuth from './components/RequireAuth'
+import RequireAdmin from './components/RequireAdmin'
 import Reports from './pages/Reports'
+import { TenantProvider } from './contexts/TenantContext'
 
 // NOTE: legacy Kanban/Orders module intentionally not routed in this SaaS (real estate domain)
 
 export default function App() {
   return (
-    <BrowserRouter>
-      <Routes>
+    <TenantProvider>
+      <BrowserRouter>
+        <Routes>
         <Route path="/" element={<AppShell />}> 
           <Route index element={<Navigate to="/imoveis" replace />} />
           {/* ND Imóveis */}
@@ -34,9 +39,13 @@ export default function App() {
           <Route path="leads" element={<LeadsList />} />
           <Route path="ops" element={<OpsDashboard />} />
           <Route path="reports" element={<RequireAuth><Reports /></RequireAuth>} />
-                    <Route path="users" element={<RequireAuth><UsersAdmin /></RequireAuth>} />
-          <Route path="flows" element={<RequireAuth><ChatbotFlowsAdmin /></RequireAuth>} />
-          <Route path="super/tenants" element={<RequireAuth><SuperTenants /></RequireAuth>} />
+
+          {/* Catálogo Genérico */}
+          <Route path="catalog/vehicles" element={<RequireAuth><CatalogList /></RequireAuth>} />
+          <Route path="catalog/admin" element={<RequireAdmin><CatalogAdmin /></RequireAdmin>} />
+          <Route path="users" element={<RequireAdmin><UsersAdmin /></RequireAdmin>} />
+          <Route path="flows" element={<RequireAdmin><ChatbotFlowsAdmin /></RequireAdmin>} />
+          <Route path="super/tenants" element={<RequireAdmin><SuperTenants /></RequireAdmin>} />
           <Route path="sobre" element={<About />} />
           <Route path="*" element={<Navigate to="/imoveis" replace />} />
         </Route>
@@ -44,5 +53,6 @@ export default function App() {
         <Route path="/accept-invite" element={<AcceptInvite />} />
       </Routes>
     </BrowserRouter>
+  </TenantProvider>
   )
 }

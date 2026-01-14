@@ -41,7 +41,7 @@ class ConversationStateService:
         return None
 
     def set_state(self, sender_id: str, state: Dict[str, Any], expiration_secs: int = 3600, tenant_id: int | None = None):
-        """Define o estado da conversa.
+        """Defines o estado da conversa.
 
         - Se tenant_id é fornecido, persiste na chave tenant-aware.
         - Caso contrário, usa a chave legada.
@@ -58,3 +58,22 @@ class ConversationStateService:
         """
         key = self._get_key(sender_id, tenant_id)
         self.redis_client.delete(key)
+
+    def clear_all_states(self, sender_id: str) -> int:
+        """Remove todas as chaves de estado para um sender, incluindo tenant-aware e legada."""
+        deleted = 0
+        # Tenant-aware: conversation_state:<tenant_id>:<sender_id>
+        pattern = f"conversation_state:*:{sender_id}"
+        try:
+            keys = list(self.redis_client.scan_iter(match=pattern))
+            if keys:
+                deleted += int(self.redis_client.delete(*keys) or 0)
+        except Exception:
+            # Em ambientes com Redis restrito, fallback é limpar apenas a chave legada
+            pass
+        # Legacy
+        try:
+            deleted += int(self.redis_client.delete(self._get_key(sender_id, None)) or 0)
+        except Exception:
+            pass
+        return deleted

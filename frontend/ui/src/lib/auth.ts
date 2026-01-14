@@ -30,15 +30,26 @@ export function isAuthenticated(): boolean {
 export async function apiFetch(input: string, init: RequestInit = {}): Promise<Response> {
   const url = input
   const headers = new Headers(init.headers || {})
+  let sentBearer = false
 
   // Adiciona Authorization automaticamente para qualquer rota da API quando houver token
   if (url.startsWith('/api/') || url.startsWith('/admin/')) {
     const token = getToken()
-    if (token) headers.set('Authorization', `Bearer ${token}`)
+    if (token) {
+      headers.set('Authorization', `Bearer ${token}`)
+      sentBearer = true
+    }
+
+    try {
+      const key = localStorage.getItem('ui_super_admin_key')
+      if (key) headers.set('X-Super-Admin-Key', key)
+    } catch {
+      // ignore
+    }
 
     try {
       const tid = localStorage.getItem('ui_tenant_id')
-      if (tid) headers.set('X-Tenant-Id', tid)
+      if (tid && !headers.has('X-Tenant-Id')) headers.set('X-Tenant-Id', tid)
     } catch {
       // ignore
     }
@@ -53,5 +64,16 @@ export async function apiFetch(input: string, init: RequestInit = {}): Promise<R
     }
   }
 
-  return fetch(url, { ...init, headers })
+  const res = await fetch(url, { ...init, headers })
+
+  if ((url.startsWith('/api/') || url.startsWith('/admin/')) && res.status === 401 && sentBearer) {
+    try {
+      clearToken()
+      window.dispatchEvent(new Event('auth:invalid_token'))
+    } catch {
+      // ignore
+    }
+  }
+
+  return res
 }

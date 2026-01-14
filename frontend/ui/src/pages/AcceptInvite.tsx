@@ -18,7 +18,7 @@ export default function AcceptInvite() {
     setError(null)
     setSuccess(null)
     try {
-      const res = await apiFetch('/auth/accept_invite', {
+      const res = await apiFetch('/api/auth/accept_invite', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ token: tokenParam, password, full_name: fullName || undefined }),
@@ -33,10 +33,14 @@ export default function AcceptInvite() {
         }
         throw new Error(msg)
       }
-      await res.json()
+      const out = (await res.json()) as { email?: string }
       setSuccess('Convite aceito com sucesso. Você já pode fazer login.')
       // Redireciona para login após breve intervalo
-      setTimeout(() => navigate('/login'), 1200)
+      setTimeout(() => {
+        const email = (out?.email || '').trim()
+        if (email) navigate(`/login?email=${encodeURIComponent(email)}`)
+        else navigate('/login')
+      }, 1200)
     } catch (e) {
       const err = e as Error
       setError(err?.message || 'falha ao aceitar convite')
@@ -58,6 +62,8 @@ export default function AcceptInvite() {
           <div>
             <label className="block text-sm font-medium text-slate-700 mb-1">Token</label>
             <input
+              name="token"
+              autoComplete="off"
               className="input"
               value={tokenParam}
               disabled
@@ -66,6 +72,8 @@ export default function AcceptInvite() {
           <div>
             <label className="block text-sm font-medium text-slate-700 mb-1">Nome</label>
             <input
+              name="full_name"
+              autoComplete="off"
               className="input"
               value={fullName}
               onChange={e => setFullName(e.target.value)}
@@ -75,6 +83,8 @@ export default function AcceptInvite() {
           <div>
             <label className="block text-sm font-medium text-slate-700 mb-1">Senha</label>
             <input
+              name="new_password"
+              autoComplete="new-password"
               className="input"
               type="password"
               value={password}

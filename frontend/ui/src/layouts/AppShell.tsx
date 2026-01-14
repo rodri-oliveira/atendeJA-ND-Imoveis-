@@ -4,13 +4,29 @@ import ErrorBoundary from '../components/ErrorBoundary'
 import { isAuthenticated, clearToken } from '../lib/auth'
 import { apiFetch } from '../lib/auth'
 import { useUIConfig } from '../config/provider'
+import { useTenant } from '../contexts/TenantContext'
 
 export default function AppShell() {
   const authed = isAuthenticated()
-  const [me, setMe] = useState<{ email?: string; tenant_id?: number | null } | null>(null)
+  const { tenantId } = useTenant()
+  const [me, setMe] = useState<{ email?: string; tenant_id?: number | null; role?: string; tenant_name?: string | null } | null>(null)
+  const [tenantDomain, setTenantDomain] = useState<string>('real_estate')
+  const [activeTenantName, setActiveTenantName] = useState<string | null>(null)
   const navigate = useNavigate()
   const cfg = useUIConfig()
   const [showSuper, setShowSuper] = useState(false)
+  const [catalogOpen, setCatalogOpen] = useState(false)
+  const [adminOpen, setAdminOpen] = useState(false)
+
+  useEffect(() => {
+    function onInvalidToken() {
+      setMe(null)
+      navigate('/login', { replace: true })
+    }
+
+    window.addEventListener('auth:invalid_token', onInvalidToken)
+    return () => window.removeEventListener('auth:invalid_token', onInvalidToken)
+  }, [navigate])
 
   useEffect(() => {
     let alive = true
@@ -21,12 +37,6 @@ export default function AppShell() {
         if (res.ok) {
           const js = await res.json()
           if (alive) setMe(js)
-          try {
-            const tid = (js as { tenant_id?: number | null })?.tenant_id
-            if (typeof tid === 'number') localStorage.setItem('ui_tenant_id', String(tid))
-          } catch {
-            // ignore
-          }
         } else {
           if (alive) setMe(null)
         }
@@ -36,7 +46,55 @@ export default function AppShell() {
     }
     loadMe()
     return () => { alive = false }
-  }, [authed])
+  }, [authed, tenantId])
+
+  useEffect(() => {
+    let alive = true
+    async function loadDomain() {
+      try {
+        if (!authed) {
+          if (alive) setTenantDomain('real_estate')
+          return
+        }
+        const res = await apiFetch('/api/ui/domain', { cache: 'no-store' })
+        if (!res.ok) {
+          if (alive) setTenantDomain('real_estate')
+          return
+        }
+        const js = (await res.json()) as { domain?: string }
+        const d = (js?.domain || '').trim() || 'real_estate'
+        if (alive) setTenantDomain(d)
+      } catch {
+        if (alive) setTenantDomain('real_estate')
+      }
+    }
+    loadDomain()
+    return () => { alive = false }
+  }, [authed, tenantId])
+
+  useEffect(() => {
+    let alive = true
+    async function loadActiveTenant() {
+      try {
+        if (!authed) {
+          if (alive) setActiveTenantName(null)
+          return
+        }
+        const res = await apiFetch('/api/ui/tenant', { cache: 'no-store' })
+        if (!res.ok) {
+          if (alive) setActiveTenantName(null)
+          return
+        }
+        const js = (await res.json()) as { tenant_name?: string | null }
+        const name = (js?.tenant_name || '').trim() || null;
+        if (alive) setActiveTenantName(name)
+      } catch {
+        if (alive) setActiveTenantName(null)
+      }
+    }
+    loadActiveTenant()
+    return () => { alive = false }
+  }, [authed, tenantId])
 
   useEffect(() => {
     try {
@@ -46,11 +104,42 @@ export default function AppShell() {
     }
   }, [cfg])
 
+  useEffect(() => {
+    try {
+      setCatalogOpen(localStorage.getItem('ui_nav_catalog_open') === '1')
+      setAdminOpen(localStorage.getItem('ui_nav_admin_open') === '1')
+    } catch {
+      setCatalogOpen(false)
+      setAdminOpen(false)
+    }
+  }, [])
+
+
+  function toggleCatalog() {
+    setCatalogOpen((prev) => {
+      const next = !prev
+      try { localStorage.setItem('ui_nav_catalog_open', next ? '1' : '0') } catch (e) { void e }
+      return next
+    })
+  }
+
+  function toggleAdmin() {
+    setAdminOpen((prev) => {
+      const next = !prev
+      try { localStorage.setItem('ui_nav_admin_open', next ? '1' : '0') } catch (e) { void e }
+      return next
+    })
+  }
+
   function onLogout() {
     clearToken()
     setMe(null)
+    setTenantDomain('real_estate')
     navigate('/login')
   }
+
+  const primaryGroupLabel = tenantDomain === 'car_dealer' ? 'Automotivo' : 'Imobiliário'
+  const isCarDealer = tenantDomain === 'car_dealer'
   return (
     <div className="min-h-screen flex bg-slate-50">
       <aside className="w-64 bg-gradient-to-b from-slate-800 to-slate-900 text-white flex-shrink-0 shadow-xl">
@@ -61,28 +150,60 @@ export default function AppShell() {
             </div>
             <div>
               <div className="text-lg font-bold">AtendeJá</div>
-              <div className="text-xs text-slate-300">{cfg?.branding?.tenantName || 'Tenant'}</div>
+              <div className="text-xs text-slate-300">{activeTenantName || me?.tenant_name || cfg?.branding?.tenantName || 'Tenant'}</div>
             </div>
           </Link>
         </div>
         <nav className="p-4 space-y-2">
-          <div className="px-3 py-2 text-xs uppercase tracking-wide text-slate-400 font-semibold">Imobiliário</div>
-          <Item to="/imoveis" label="Imóveis" />
-          <Item to="/import" label="Importar CSV" />
+          <div className="px-3 py-2 text-xs uppercase tracking-wide text-slate-400 font-semibold">{primaryGroupLabel}</div>
+          {isCarDealer ? (
+            <Item to="/catalog/vehicles" label="Veículos" />
+          ) : (
+            <>
+              <Item to="/imoveis" label="Imóveis" />
+              <Item to="/import" label="Importar CSV" />
+            </>
+          )}
           <Item to="/leads" label="Leads" />
           <Item to="/ops" label="Operações" />
           <Item to="/reports" label="Relatórios" />
-          {authed && (
+
+          {authed && me?.role === 'admin' && (
             <>
-              <NavLink
-                to="/users"
-                className="block px-3 py-2 text-xs uppercase tracking-wide font-semibold text-slate-400 hover:text-white hover:bg-slate-700/50 rounded-lg"
+              <button
+                type="button"
+                onClick={toggleCatalog}
+                className="w-full flex items-center px-3 py-2 text-xs uppercase tracking-wide font-semibold text-slate-400 hover:text-white hover:bg-slate-700/50 rounded-lg"
               >
-                Admin
-              </NavLink>
-                            <Item to="/users" label="Usuários" />
-              <Item to="/flows" label="Flows" />
-              {showSuper && <Item to="/super/tenants" label="Tenants" />}
+                <span>Catálogo</span>
+                <span className="ml-auto text-slate-500">{catalogOpen ? '−' : '+'}</span>
+              </button>
+              {catalogOpen && (
+                <>
+                  {!isCarDealer && <SubItem to="/catalog/vehicles" label="Veículos" />}
+                  <SubItem to="/catalog/admin" label="Admin do Catálogo" />
+                </>
+              )}
+            </>
+          )}
+
+          {authed && me?.role === 'admin' && (
+            <>
+              <button
+                type="button"
+                onClick={toggleAdmin}
+                className="w-full flex items-center px-3 py-2 text-xs uppercase tracking-wide font-semibold text-slate-400 hover:text-white hover:bg-slate-700/50 rounded-lg"
+              >
+                <span>Admin</span>
+                <span className="ml-auto text-slate-500">{adminOpen ? '−' : '+'}</span>
+              </button>
+              {adminOpen && (
+                <>
+                  <Item to="/users" label="Usuários" />
+                  <Item to="/flows" label="Flows" />
+                  {showSuper && <Item to="/super/tenants" label="Tenants" />}
+                </>
+              )}
             </>
           )}
           <Item to="/sobre" label="Sobre" />
@@ -125,6 +246,32 @@ function Item({ to, label }: { to: string; label: string }) {
         <>
           <span className="truncate">{label}</span>
           {/* Indicador visual para item ativo */}
+          <div
+            className={`ml-auto w-1 h-4 rounded-full transition-opacity ${
+              isActive ? 'opacity-100 bg-primary-300' : 'opacity-0'
+            }`}
+          />
+        </>
+      )}
+    </NavLink>
+  )
+}
+
+function SubItem({ to, label }: { to: string; label: string }) {
+  return (
+    <NavLink
+      to={to}
+      className={({ isActive }: { isActive: boolean }) =>
+        `group flex items-center px-3 py-2 text-sm font-medium rounded-lg transition-all duration-200 ml-6 ${
+          isActive
+            ? 'bg-primary-600 text-white shadow-lg shadow-primary-600/25'
+            : 'text-slate-300 hover:text-white hover:bg-slate-700/50'
+        }`
+      }
+    >
+      {({ isActive }: { isActive: boolean }) => (
+        <>
+          <span className="truncate">{label}</span>
           <div
             className={`ml-auto w-1 h-4 rounded-full transition-opacity ${
               isActive ? 'opacity-100 bg-primary-300' : 'opacity-0'

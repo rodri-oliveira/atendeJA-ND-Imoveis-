@@ -49,6 +49,11 @@ class Settings(BaseSettings):
     # LLM (Ollama/Local) – provider de IA para geração/chat (substituível)
     OLLAMA_BASE_URL: str = "http://localhost:11434"
     OLLAMA_DEFAULT_MODEL: str = "gemma3:1b"
+    OPENAI_API_KEY: str = ""
+    OPENAI_MODEL: str = "gpt-4o-mini"
+    OPENAI_TIMEOUT_SECONDS: int = 20
+    OPENAI_MAX_CALLS_PER_TENANT_PER_DAY: int = 500
+    OPENAI_MAX_CALLS_PER_SENDER_PER_MINUTE: int = 6
     # Integração MCP+LLM: quando ativo, MCP usa LLM para reescrever respostas
     LLM_ENRICH_MCP: bool = False
 

@@ -1,11 +1,22 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useMemo, useState } from 'react'
 import { apiFetch } from '../lib/auth'
+import { useTenant } from '../contexts/TenantContext'
 import { DndContext, closestCorners, DragEndEvent, useSensor, PointerSensor, useSensors } from '@dnd-kit/core';
 import { SortableContext, verticalListSortingStrategy, useSortable, arrayMove } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 
+const STATUS_COLUMN_ORDER = ['iniciado', 'novo', 'qualificado', 'agendamento_pendente', 'agendado', 'sem_imovel_disponivel'] as const;
+
+type LeadsConfig = {
+  domain: string
+  has_published_flow: boolean
+  lead_summary_fields: Array<Record<string, unknown>>
+  lead_kanban: { stages?: Array<{ id?: string | null; label?: string | null }> } | null
+}
+
 type ColumnProps = {
   id: string;
+  title: string;
   leads: Lead[];
   filters: Filters;
   getStatusBadge: (status?: string | null) => React.ReactNode;
@@ -14,7 +25,59 @@ type ColumnProps = {
   onCardClick: (lead: Lead) => void;
 }
 
-function Column({ id, leads, filters, getStatusBadge, formatPhone, formatDate, onCardClick }: ColumnProps) {
+function LeadSummaryDisplay({ summary }: { summary: Array<{ key?: string | null; label?: string | null; value?: unknown }> | null | undefined }) {
+  if (!summary || summary.length === 0) return null;
+
+  const visible = summary.filter((f) => {
+    const v = (f?.value ?? null) as unknown;
+    if (v === null || v === undefined) return false;
+    if (typeof v === 'string' && !v.trim()) return false;
+    return true;
+  });
+
+  if (visible.length === 0) return null;
+
+  return (
+    <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-3 text-sm">
+      {visible.map((f, idx) => (
+        <div key={(f.key as string) || `${idx}`}>
+          <strong className="text-slate-600">{f.label || f.key}:</strong>
+          <span className="text-slate-800 ml-2">{String(f.value)}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function GenericPreferencesDisplay({ preferences }: { preferences: Record<string, unknown> | null | undefined }) {
+  if (!preferences) {
+    return <p className="text-sm text-slate-600">Nenhuma preferência registrada.</p>;
+  }
+
+  const entries = Object.entries(preferences).filter(([, v]) => {
+    if (v === null || v === undefined) return false;
+    if (typeof v === 'string' && !v.trim()) return false;
+    if (Array.isArray(v) && v.length === 0) return false;
+    return true;
+  });
+
+  if (entries.length === 0) {
+    return <p className="text-sm text-slate-600">Nenhuma preferência registrada.</p>;
+  }
+
+  return (
+    <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-3 text-sm">
+      {entries.slice(0, 12).map(([k, v]) => (
+        <div key={k}>
+          <strong className="text-slate-600">{k}:</strong>
+          <span className="text-slate-800 ml-2">{String(v)}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function Column({ title, leads, filters, getStatusBadge, formatPhone, formatDate, onCardClick }: ColumnProps) {
   const filteredLeads = leads.filter((lead: Lead) => {
     if (filters.search) {
       const search = filters.search.toLowerCase();
@@ -29,7 +92,7 @@ function Column({ id, leads, filters, getStatusBadge, formatPhone, formatDate, o
 
   return (
     <div className="w-80 bg-slate-100 rounded-lg p-2 flex-shrink-0">
-      <h3 className="font-semibold text-slate-700 px-2 py-1 mb-2">{id.replace(/_/g, ' ').replace(/^\w/, (c: string) => c.toUpperCase())} <span className="text-sm text-slate-500 font-normal">({filteredLeads.length})</span></h3>
+      <h3 className="font-semibold text-slate-700 px-2 py-1 mb-2">{title} <span className="text-sm text-slate-500 font-normal">({filteredLeads.length})</span></h3>
       <SortableContext items={filteredLeads.map(l => l.id)} strategy={verticalListSortingStrategy}>
         <div className="space-y-2 h-[600px] overflow-y-auto">
           {filteredLeads.map((lead: Lead) => (
@@ -86,8 +149,14 @@ function PreferencesDisplay({ preferences }: { preferences: Record<string, unkno
         let value = preferences[key];
         if (value === null || value === undefined || value === '') return null;
 
-        if (key === 'purpose') value = purposeValues[value] || value;
-        if (key === 'type') value = typeValues[value] || value;
+        if (key === 'purpose') {
+          const k = String(value)
+          value = purposeValues[k] || value
+        }
+        if (key === 'type') {
+          const k = String(value)
+          value = typeValues[k] || value
+        }
         if (key === 'price_min' || key === 'price_max') value = typeof value === 'number' ? formatCurrency(value) : value;
 
         return (
@@ -121,7 +190,21 @@ function LeadCard({ lead, getStatusBadge, formatPhone, formatDate, onCardClick }
       <div className="font-semibold text-slate-800">{lead.name || 'Sem nome'}</div>
       <div className="text-sm text-slate-600">{formatPhone(lead.phone)}</div>
       <div className="text-xs text-slate-500 mt-1">{formatDate(lead.last_inbound_at)}</div>
-      {getStatusBadge(lead.status)}
+
+      {lead.lead_summary && lead.lead_summary.filter(item => item.value).length > 0 && (
+        <div className="mt-2 pt-2 border-t border-slate-200 space-y-1">
+          {lead.lead_summary.slice(0, 3).map((item, index) => (
+            item.value ? (
+              <div key={(item.key as string) || index} className="text-xs text-slate-600 flex items-center justify-between gap-2">
+                <span className="font-medium truncate">{item.label}:</span>
+                <span className="text-slate-800 font-semibold truncate max-w-[120px]">{String(item.value)}</span>
+              </div>
+            ) : null
+          ))}
+        </div>
+      )}
+
+      <div className="mt-2">{getStatusBadge(lead.status)}</div>
     </div>
   );
 }
@@ -134,6 +217,13 @@ interface Lead {
   source?: string | null
   status?: string | null
   preferences?: Record<string, unknown> | null
+  lead_summary?: Array<{ key?: string | null; label?: string | null; value?: unknown }> | null
+  lead_kanban?: { stages?: Array<{ id?: string | null; label?: string | null }> } | null
+  // Aliases retornados pelo backend (pt-BR)
+  nome?: string | null
+  telefone?: string | null
+  origem?: string | null
+  preferencias?: Record<string, unknown> | null
   property_interest_id?: number | null
   external_property_id?: string | null
   last_inbound_at?: string | null
@@ -159,10 +249,14 @@ interface Filters {
 }
 
 export default function LeadsList() {
+  const { tenantId } = useTenant()
   const [data, setData] = useState<Lead[] | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [leadsConfig, setLeadsConfig] = useState<LeadsConfig | null>(null)
+  const [loadingConfig, setLoadingConfig] = useState(false)
   const [showFilters, setShowFilters] = useState(false)
+  const [groupBy, setGroupBy] = useState<'status' | 'stage'>('status')
   const [filters, setFilters] = useState<Filters>({
     search: '',
     status: '',
@@ -193,12 +287,117 @@ export default function LeadsList() {
   // Kanban state
   const [columns, setColumns] = useState<Record<string, Lead[]>>({})
   const [selectedLead, setSelectedLead] = useState<Lead | null>(null)
+  const [stageConfig, setStageConfig] = useState<Record<string, string>>({})
+  const [stageOrder, setStageOrder] = useState<string[]>([])
+
+  const activeDomain = (leadsConfig?.domain || 'real_estate').trim() || 'real_estate'
+  const hasPublishedFlow = !!leadsConfig?.has_published_flow
+  const isRealEstate = activeDomain === 'real_estate'
+
+  const statusOrder = useMemo(() => {
+    if (isRealEstate) return [...STATUS_COLUMN_ORDER] as unknown as string[]
+    return ['iniciado', 'novo', 'qualificado', 'agendamento_pendente', 'agendado']
+  }, [isRealEstate])
+
+  function getLeadStage(lead: Lead): string {
+    const prefs = lead.preferences || null;
+    const stage = (prefs && typeof prefs === 'object' ? (prefs as Record<string, unknown>)['stage'] : null) as unknown;
+    const s = (stage ?? '').toString().trim();
+    return s || 'start';
+  }
+
+  function groupLeads(leads: Lead[], mode: 'status' | 'stage'): Record<string, Lead[]> {
+    if (mode === 'stage') {
+      return leads.reduce((acc, lead) => {
+        const stage = getLeadStage(lead);
+        if (!acc[stage]) acc[stage] = [];
+        acc[stage]!.push(lead);
+        return acc;
+      }, {} as Record<string, Lead[]>);
+    }
+
+    // status
+    const grouped = leads.reduce((acc, lead) => {
+      const status = lead.status || 'iniciado';
+      if (!acc[status]) acc[status] = [];
+      acc[status]!.push(lead);
+      return acc;
+    }, {} as Record<string, Lead[]>);
+
+    // garante colunas conhecidas mesmo vazias (para order fixo)
+    for (const s of statusOrder) {
+      if (!grouped[s]) grouped[s] = [];
+    }
+    return grouped;
+  }
+
+  const columnOrder = useMemo(() => {
+    if (groupBy === 'status') return [...statusOrder];
+    const keys = Object.keys(columns || {});
+    const present = new Set(keys.map((k) => (k || '').trim()).filter(Boolean));
+    const ordered = (stageOrder || []).filter((k) => present.has(k));
+    const remaining = Array.from(present).filter((k) => !ordered.includes(k));
+    remaining.sort((a, b) => {
+      if (a === 'start') return -1;
+      if (b === 'start') return 1;
+      return a.localeCompare(b);
+    });
+    const out = [...ordered, ...remaining];
+    return out.length ? out : ['start'];
+  }, [columns, groupBy, stageOrder, statusOrder]);
+
+  function getColumnTitle(columnId: string): string {
+    if (groupBy === 'status') {
+      return columnId.replace(/_/g, ' ').replace(/^\w/, (c: string) => c.toUpperCase());
+    }
+    const label = stageConfig[columnId];
+    if (label) return label;
+    return columnId.replace(/_/g, ' ').replace(/^\w/, (c: string) => c.toUpperCase());
+  }
 
   useEffect(() => {
+    loadLeadsConfig();
     loadLeads(filters);
     loadConfig();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [tenantId]);
+
+  async function loadLeadsConfig() {
+    setLoadingConfig(true)
+    try {
+      const res = await apiFetch('/api/re/leads/config', { cache: 'no-store' })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const js = (await res.json()) as LeadsConfig
+      setLeadsConfig(js)
+
+      const nextStageConfig: Record<string, string> = {}
+      const nextStageOrder: string[] = []
+      const stages = js?.lead_kanban?.stages
+      if (Array.isArray(stages)) {
+        for (const s of stages) {
+          const id = (s?.id ?? '').toString().trim()
+          const label = (s?.label ?? '').toString().trim()
+          if (!id || !label) continue
+          nextStageConfig[id] = label
+          nextStageOrder.push(id)
+        }
+      }
+      setStageConfig(nextStageConfig)
+      setStageOrder(nextStageOrder)
+
+      setGroupBy((prev) => {
+        if (prev === 'stage' && (!js?.has_published_flow || !nextStageOrder.length)) return 'status'
+        return prev
+      })
+    } catch {
+      setLeadsConfig(null)
+      setStageConfig({})
+      setStageOrder([])
+      setGroupBy('status')
+    } finally {
+      setLoadingConfig(false)
+    }
+  }
 
   // Gatilho para recarregar os leads quando os filtros mudam
   useEffect(() => {
@@ -231,19 +430,43 @@ export default function LeadsList() {
 
       const res = await apiFetch(`/api/re/leads?${params.toString()}`, { cache: 'no-store' })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      const leads: Lead[] = await res.json()
+      const js: unknown = await res.json()
+      const raw = Array.isArray(js) ? (js as unknown[]) : []
+
+      const normalizePreferences = (prefs: Record<string, unknown> | null | undefined) => {
+        if (!prefs) return prefs
+        // A UI espera: purpose/type/city/neighborhood/bedrooms/price_min/price_max
+        // Mas podemos receber: finalidade/tipo/cidade/bairro/dormitorios/preco_min/preco_max
+        const p = prefs as Record<string, unknown>
+        return {
+          ...p,
+          purpose: p.purpose ?? p.finalidade,
+          type: p.type ?? p.tipo,
+          city: p.city ?? p.cidade,
+          neighborhood: p.neighborhood ?? p.bairro,
+          bedrooms: p.bedrooms ?? p.dormitorios,
+          price_min: p.price_min ?? p.preco_min,
+          price_max: p.price_max ?? p.preco_max,
+        }
+      }
+
+      const leads: Lead[] = raw.map((row: unknown) => {
+        const r = (row ?? {}) as Record<string, unknown>
+        const prefs = normalizePreferences((r?.preferences ?? r?.preferencias) as Record<string, unknown> | null | undefined)
+        return {
+          ...(r as unknown as Lead),
+          name: (r?.name ?? r?.nome) as string | null | undefined,
+          phone: (r?.phone ?? r?.telefone) as string | null | undefined,
+          source: (r?.source ?? r?.origem) as string | null | undefined,
+          preferences: prefs ?? null,
+          lead_summary: (r?.lead_summary as Lead['lead_summary']) ?? null,
+          lead_kanban: (r?.lead_kanban as Lead['lead_kanban']) ?? null,
+        } as Lead
+      })
+
       setData(leads)
 
-      // Group leads by status for Kanban
-      const grouped = leads.reduce((acc, lead) => {
-        const status = lead.status || 'iniciado';
-        if (!acc[status]) {
-          acc[status] = [];
-        }
-        acc[status]!.push(lead);
-        return acc;
-      }, {} as Record<string, Lead[]>)
-      setColumns(grouped)
+      setColumns(groupLeads(leads, groupBy))
       
       // Calcular estatísticas
       setStats({
@@ -418,6 +641,11 @@ export default function LeadsList() {
     const overContainer = over.data.current?.sortable.containerId || over.id;
 
     if (activeContainer !== overContainer) {
+      if (groupBy === 'stage') {
+        // Em agrupamento por etapa, não alteramos status via drag&drop.
+        // Mantém comportamento de visualização operacional.
+        return;
+      }
       // Move between columns
       const sourceColumn = columns[activeContainer];
       const destColumn = columns[overContainer];
@@ -469,8 +697,6 @@ export default function LeadsList() {
     }
   };
 
-  const columnOrder: (keyof typeof columns)[] = ['iniciado', 'novo', 'qualificado', 'agendamento_pendente', 'agendado', 'sem_imovel_disponivel'];
-
   return (
     <section className="space-y-6">
       {/* Header */}
@@ -480,6 +706,21 @@ export default function LeadsList() {
           <p className="text-sm text-slate-600 mt-1">Gerencie e acompanhe todos os seus leads</p>
         </div>
         <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 bg-white border border-slate-300 rounded-lg px-3 py-2">
+            <span className="text-sm text-slate-600">Agrupar por</span>
+            <select
+              value={groupBy}
+              onChange={(e) => {
+                const v = e.target.value === 'stage' ? 'stage' : 'status';
+                setGroupBy(v);
+                setColumns(groupLeads(data || [], v));
+              }}
+              className="text-sm bg-transparent outline-none"
+            >
+              <option value="status">Status</option>
+              <option value="stage" disabled={!hasPublishedFlow || stageOrder.length === 0}>Etapa (Flow)</option>
+            </select>
+          </div>
           <button
             onClick={() => setShowConfigModal(true)}
             className="px-4 py-2 border border-slate-300 text-slate-700 rounded-lg hover:bg-slate-50 transition-colors text-sm font-medium"
@@ -573,7 +814,7 @@ export default function LeadsList() {
           <div className="bg-white rounded-xl border border-slate-200 p-6 shadow-sm">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-sm font-medium text-orange-600">Sem Imóvel</p>
+                <p className="text-sm font-medium text-orange-600">{isRealEstate ? 'Sem Imóvel' : 'Sem Match'}</p>
                 <p className="text-3xl font-bold text-orange-600 mt-2">{stats.sem_imovel}</p>
               </div>
               <div className="w-12 h-12 bg-orange-50 rounded-lg flex items-center justify-center text-2xl">
@@ -646,77 +887,81 @@ export default function LeadsList() {
               </select>
             </div>
 
-            <div>
-              <label className="block text-sm font-medium text-slate-700 mb-1">Finalidade</label>
-              <select
-                value={filters.finalidade}
-                onChange={(e) => setFilters({ ...filters, finalidade: e.target.value })}
-                className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500"
-              >
-                <option value="">Todas</option>
-                <option value="sale">Compra</option>
-                <option value="rent">Locação</option>
-              </select>
-            </div>
+            {isRealEstate && (
+              <>
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">Finalidade</label>
+                  <select
+                    value={filters.finalidade}
+                    onChange={(e) => setFilters({ ...filters, finalidade: e.target.value })}
+                    className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500"
+                  >
+                    <option value="">Todas</option>
+                    <option value="sale">Compra</option>
+                    <option value="rent">Locação</option>
+                  </select>
+                </div>
 
-            <div>
-              <label className="block text-sm font-medium text-slate-700 mb-1">Tipo de Imóvel</label>
-              <select
-                value={filters.tipo}
-                onChange={(e) => setFilters({ ...filters, tipo: e.target.value })}
-                className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500"
-              >
-                <option value="">Todos</option>
-                <option value="house">Casa</option>
-                <option value="apartment">Apartamento</option>
-                <option value="commercial">Comercial</option>
-                <option value="land">Terreno</option>
-              </select>
-            </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">Tipo de Imóvel</label>
+                  <select
+                    value={filters.tipo}
+                    onChange={(e) => setFilters({ ...filters, tipo: e.target.value })}
+                    className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500"
+                  >
+                    <option value="">Todos</option>
+                    <option value="house">Casa</option>
+                    <option value="apartment">Apartamento</option>
+                    <option value="commercial">Comercial</option>
+                    <option value="land">Terreno</option>
+                  </select>
+                </div>
 
-            <div>
-              <label className="block text-sm font-medium text-slate-700 mb-1">Cidade</label>
-              <input
-                type="text"
-                placeholder="Ex: Mogi das Cruzes"
-                value={filters.cidade}
-                onChange={(e) => setFilters({ ...filters, cidade: e.target.value })}
-                className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500"
-              />
-            </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">Cidade</label>
+                  <input
+                    type="text"
+                    placeholder="Ex: Mogi das Cruzes"
+                    value={filters.cidade}
+                    onChange={(e) => setFilters({ ...filters, cidade: e.target.value })}
+                    className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500"
+                  />
+                </div>
 
-            <div>
-              <label className="block text-sm font-medium text-slate-700 mb-1">Valor Mínimo (R$)</label>
-              <input
-                type="number"
-                placeholder="Ex: 200000"
-                value={filters.valorMin}
-                onChange={(e) => setFilters({ ...filters, valorMin: e.target.value })}
-                className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500"
-              />
-            </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">Valor Mínimo (R$)</label>
+                  <input
+                    type="number"
+                    placeholder="Ex: 200000"
+                    value={filters.valorMin}
+                    onChange={(e) => setFilters({ ...filters, valorMin: e.target.value })}
+                    className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500"
+                  />
+                </div>
 
-            <div>
-              <label className="block text-sm font-medium text-slate-700 mb-1">Valor Máximo (R$)</label>
-              <input
-                type="number"
-                placeholder="Ex: 500000"
-                value={filters.valorMax}
-                onChange={(e) => setFilters({ ...filters, valorMax: e.target.value })}
-                className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500"
-              />
-            </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">Valor Máximo (R$)</label>
+                  <input
+                    type="number"
+                    placeholder="Ex: 500000"
+                    value={filters.valorMax}
+                    onChange={(e) => setFilters({ ...filters, valorMax: e.target.value })}
+                    className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500"
+                  />
+                </div>
 
-            <div>
-              <label className="block text-sm font-medium text-slate-700 mb-1">Código do Imóvel</label>
-              <input
-                type="text"
-                placeholder="Ex: A738"
-                value={filters.codigoImovel}
-                onChange={(e) => setFilters({ ...filters, codigoImovel: e.target.value })}
-                className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500"
-              />
-            </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">Código do Imóvel</label>
+                  <input
+                    type="text"
+                    placeholder="Ex: A738"
+                    value={filters.codigoImovel}
+                    onChange={(e) => setFilters({ ...filters, codigoImovel: e.target.value })}
+                    className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500"
+                  />
+                </div>
+              </>
+            )}
 
             <div>
               <label className="block text-sm font-medium text-slate-700 mb-1">Data Inicial</label>
@@ -768,11 +1013,28 @@ export default function LeadsList() {
       )}
 
       {/* Kanban Board */}
-      {!loading && !error && (
+      {!loading && !error && !loadingConfig && !hasPublishedFlow && (
+        <div className="bg-white rounded-xl border border-slate-200 p-8 text-center">
+          <p className="text-sm text-slate-700 font-medium">Este tenant ainda não tem um Flow publicado.</p>
+          <p className="mt-1 text-sm text-slate-600">Assim que você publicar um Flow com etapas (Kanban), a visão por etapa fica disponível aqui.</p>
+          <div className="mt-4 flex items-center justify-center gap-3">
+            <a href="/flows" className="px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 transition-colors text-sm font-medium">Ir para Flows</a>
+            <button
+              type="button"
+              onClick={() => loadLeadsConfig()}
+              className="px-4 py-2 border border-slate-300 text-slate-700 rounded-lg hover:bg-slate-50 transition-colors text-sm font-medium"
+            >
+              Recarregar config
+            </button>
+          </div>
+        </div>
+      )}
+
+      {!loading && !error && (loadingConfig || hasPublishedFlow) && (
         <DndContext sensors={sensors} collisionDetection={closestCorners} onDragEnd={handleDragEnd}>
           <div className="flex gap-4 overflow-x-auto pb-4">
-            {columnOrder.map(columnId => (
-              <Column key={columnId} id={columnId} leads={columns[columnId] || []} filters={filters} getStatusBadge={getStatusBadge} formatPhone={formatPhone} formatDate={formatDate} onCardClick={setSelectedLead} />
+            {columnOrder.map((columnId: string) => (
+              <Column key={columnId} id={columnId} title={getColumnTitle(columnId)} leads={columns[columnId] || []} filters={filters} getStatusBadge={getStatusBadge} formatPhone={formatPhone} formatDate={formatDate} onCardClick={setSelectedLead} />
             ))}
           </div>
         </DndContext>
@@ -800,13 +1062,17 @@ export default function LeadsList() {
               <div><strong className="text-slate-600">Status:</strong> {getStatusBadge(selectedLead.status)}</div>
               <div><strong className="text-slate-600">Origem:</strong> <span className="capitalize">{selectedLead.source || '-'}</span></div>
               <div><strong className="text-slate-600">Último Contato:</strong> {formatDate(selectedLead.last_inbound_at)}</div>
-              <div><strong className="text-slate-600">ID do Imóvel:</strong> {selectedLead.external_property_id || '-'}</div>
+              <div><strong className="text-slate-600">{isRealEstate ? 'ID do Imóvel' : 'ID Externo'}:</strong> {selectedLead.external_property_id || '-'}</div>
             </div>
 
             <div className="mt-4 pt-4 border-t border-slate-200">
-              <h3 className="text-lg font-semibold text-slate-800 mb-2">Preferências de Busca</h3>
+              <h3 className="text-lg font-semibold text-slate-800 mb-2">Resumo do Lead</h3>
               <div className="bg-slate-50 p-4 rounded-lg mt-2">
-                <PreferencesDisplay preferences={selectedLead.preferences} />
+                {selectedLead.lead_summary && selectedLead.lead_summary.length > 0 ? (
+                  <LeadSummaryDisplay summary={selectedLead.lead_summary} />
+                ) : (
+                  (isRealEstate ? <PreferencesDisplay preferences={selectedLead.preferences} /> : <GenericPreferencesDisplay preferences={selectedLead.preferences} />)
+                )}
               </div>
             </div>
 

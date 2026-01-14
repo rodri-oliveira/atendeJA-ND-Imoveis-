@@ -3,6 +3,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 import React from 'react'
 import { render, screen, waitFor } from '@testing-library/react'
 import KanbanPage from '../src/pages/KanbanPage'
+import { ConfigProvider } from '../src/config/provider'
 
 const g: any = globalThis as any
 
@@ -14,6 +15,20 @@ describe('KanbanPage', () => {
     document.body.appendChild(root)
 
     g.fetch = vi.fn(async (url: string) => {
+      if (url.endsWith('/config.json')) {
+        return new Response(
+          JSON.stringify({
+            branding: { appTitle: 'Painel Operacional' },
+            kanban: {
+              columns: [
+                { status: 'draft', title: 'Rascunho' },
+                { status: 'in_kitchen', title: 'Em preparo' },
+              ],
+            },
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        )
+      }
       if (url.includes('/orders')) {
         return new Response(
           JSON.stringify([
@@ -32,7 +47,12 @@ describe('KanbanPage', () => {
 
   it('renderiza colunas e cards básicos', async () => {
     const container = document.getElementById('root') as HTMLElement
-    render(<KanbanPage />, { container })
+    render(
+      <ConfigProvider>
+        <KanbanPage />
+      </ConfigProvider>,
+      { container }
+    )
     // Títulos das colunas
     // Pode aparecer tanto no título da coluna quanto no badge do card
     const rascunhos = await screen.findAllByText('Rascunho')

@@ -54,11 +54,14 @@ class ChatbotFlow(Base):
     published_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     published_by: Mapped[str | None] = mapped_column(String(180), nullable=True)
 
+    is_archived: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     __table_args__ = (
-        Index("uix_re_chatbot_flow_tenant_name", "tenant_id", "name", unique=True),
+        Index("uix_re_chatbot_flow_tenant_domain_name", "tenant_id", "domain", "name", unique=True),
         Index("idx_re_chatbot_flow_tenant_domain_published", "tenant_id", "domain", "is_published"),
     )
 

@@ -12,15 +12,21 @@ from app.api.routes.admin import router as admin_router
 from app.api.routes.realestate import router as realestate_router
 from app.api.routes.mcp import router as mcp_router
 from app.api.routes.admin_realestate import router as admin_realestate_router
+from app.api.routes.admin_chatbot_templates import router as admin_chatbot_templates_router
+from app.api.routes.admin_chatbot_flows import router as admin_chatbot_flows_router
+from app.api.routes.admin_catalog import router as admin_catalog_router
 from app.api.routes.metrics import router as metrics_router
 from app.api.routes.llm import router as llm_router
 from app.api.routes.auth import router as auth_router
 from app.api.routes.super_admin import router as super_admin_router
+from app.api.routes.catalog import router as catalog_router
+from app.api.routes.ui import router as ui_router
 from app.repositories.db import db_session, engine
 from app.api.deps import get_db
 
 from app.repositories.models import Base, User, UserRole, Tenant
 import app.domain.realestate.models  # noqa: F401 - importa modelos para registrar no metadata
+import app.domain.catalog.models  # noqa: F401 - importa modelos para registrar no metadata
 from app.domain.realestate.models import ChatbotFlow
 from app.domain.realestate.services.chatbot_flow_service import ChatbotFlowService
 from app.domain.realestate.default_flow import get_default_flow_nodes
@@ -352,9 +358,15 @@ app.include_router(health_router, prefix="/health", tags=["health"])
 app.include_router(ops_router, prefix="/ops", tags=["ops"]) 
 app.include_router(webhook_router, prefix="/webhook", tags=["webhook"]) 
 app.include_router(admin_router, prefix="/admin", tags=["admin"]) 
+app.include_router(admin_chatbot_templates_router, prefix="/admin", tags=["admin-chatbot"]) 
+app.include_router(admin_chatbot_flows_router, prefix="/admin", tags=["admin-chatbot"]) 
+app.include_router(admin_catalog_router, prefix="/admin", tags=["admin-catalog"]) 
+app.include_router(catalog_router, tags=["catalog"]) 
 app.include_router(realestate_router, prefix="/re", tags=["realestate"]) 
 app.include_router(mcp_router, prefix="/api/v1/mcp", tags=["mcp"]) 
+app.include_router(ui_router, prefix="/ui", tags=["ui"]) 
 app.include_router(auth_router, prefix="/auth", tags=["auth"]) 
+
 app.include_router(metrics_router, prefix="/metrics", tags=["metrics"])
 app.include_router(llm_router, prefix="/llm", tags=["llm"]) 
 app.include_router(admin_realestate_router, prefix="/admin/re", tags=["admin-re"]) 

@@ -54,7 +54,13 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
 
 
 @router.get("/me", summary="Retorna o usuário logado (a partir do token)")
-def read_me(current_user: User = Depends(get_current_user)):
+def read_me(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    tenant_name = None
+    if current_user.tenant_id:
+        tenant = db.get(Tenant, current_user.tenant_id)
+        if tenant:
+            tenant_name = tenant.name
+
     return {
         "id": current_user.id,
         "email": current_user.email,
@@ -62,6 +68,7 @@ def read_me(current_user: User = Depends(get_current_user)):
         "role": current_user.role.value,
         "is_active": current_user.is_active,
         "tenant_id": current_user.tenant_id,
+        "tenant_name": tenant_name,
     }
 
 

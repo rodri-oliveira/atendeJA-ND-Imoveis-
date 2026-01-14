@@ -24,10 +24,23 @@ describe('ImoveisList', () => {
   })
 
   it('renderiza título e carrega lista', async () => {
-    vi.spyOn(globalThis, 'fetch' as any).mockResolvedValueOnce({
-      ok: true,
-      json: async () => mockImoveis,
-    } as Response)
+    const g: any = globalThis as any
+    g.fetch = vi.fn(async (url: string) => {
+      const u = String(url)
+      if (u.includes('/api/re/imoveis/type-counts')) {
+        return new Response(JSON.stringify({ type_counts: [] }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }
+      if (u.includes('/api/re/imoveis')) {
+        return new Response(JSON.stringify(mockImoveis), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json', 'X-Total-Count': '1' },
+        })
+      }
+      return new Response('', { status: 404 })
+    })
 
     render(
       <MemoryRouter initialEntries={["/imoveis"]}>
@@ -42,7 +55,7 @@ describe('ImoveisList', () => {
     // card carregado
     await waitFor(() => {
       expect(screen.getByText('Apto 2 dorm SP')).toBeTruthy()
-      expect(screen.getByText('R$ 3.000')).toBeTruthy()
+      expect(screen.getByText(/R\$\s*3\.000/)).toBeTruthy()
     })
   })
 })

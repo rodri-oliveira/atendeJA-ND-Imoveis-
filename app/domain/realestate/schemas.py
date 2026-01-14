@@ -254,6 +254,12 @@ class LeadOut(BaseModel):
     last_outbound_at: Optional[datetime] = None
     status_updated_at: Optional[datetime] = None
 
+    # Resumo dinâmico baseado no Flow (schema-driven)
+    lead_summary: Optional[list[dict]] = None
+
+    # Config do Kanban por etapa (Flow), repetida por compatibilidade no payload
+    lead_kanban: Optional[dict] = None
+
     @field_validator('last_inbound_at', 'last_outbound_at', 'status_updated_at', mode='before')
     @classmethod
     def _ensure_utc_timezone(cls, v):

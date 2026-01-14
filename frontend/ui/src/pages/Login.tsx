@@ -1,14 +1,19 @@
 import React, { useState } from 'react'
-import { useNavigate, Link, useLocation } from 'react-router-dom'
+import { useNavigate, Link, useLocation, useSearchParams } from 'react-router-dom'
 import { setToken, clearToken } from '../lib/auth'
 
+type LoginLocationState = {
+  redirectTo?: string
+}
+
 export default function Login() {
-  const [email, setEmail] = useState('admin@example.com')
+  const [search] = useSearchParams()
+  const [email, setEmail] = useState(() => search.get('email') || 'admin@example.com')
   const [password, setPassword] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const navigate = useNavigate()
-  const location = useLocation() as any
+  const location = useLocation()
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault()
@@ -28,17 +33,20 @@ export default function Login() {
         try {
           const js = await res.json()
           msg = js?.detail || js?.message || msg
-        } catch {}
+        } catch {
+          // ignore
+        }
         throw new Error(msg)
       }
       const js = await res.json()
       const token = js?.access_token
       if (!token) throw new Error('token ausente na resposta')
       setToken(token)
-      const dest = location?.state?.redirectTo || '/imoveis'
+      const state = (location.state || {}) as LoginLocationState
+      const dest = state.redirectTo || '/imoveis'
       navigate(dest, { replace: true })
-    } catch (e: any) {
-      setError(e?.message || 'Falha no login')
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : 'Falha no login')
     } finally {
       setLoading(false)
     }

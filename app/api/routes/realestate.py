@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Request
-from fastapi.responses import Response
- 
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Response, UploadFile
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
+
 from sqlalchemy import select, func, text
 import structlog
 import httpx
@@ -43,6 +43,8 @@ from app.domain.realestate.models import (
     PropertyImage,
     LeadStatus,
 )
+from app.domain.realestate.services.chatbot_flow_service import ChatbotFlowService
+from app.services.tenant_resolver import resolve_chatbot_domain_for_tenant
 from pydantic import BaseModel
 from app.api.deps import RequestContext, require_active_tenant_context
 
@@ -409,6 +411,44 @@ def list_leads(
     direcionado: Optional[bool] = Query(None, description="Se True, apenas leads com property_interest_id"),
     campaign_source: Optional[str] = Query(None, description="Origem de campanha (ex.: facebook, chavesnamao)"),
 ):
+    def _get_by_path(obj: object, path: str):
+        raw = (path or '').strip()
+        if not raw:
+            return None
+        cur: object = obj
+        for part in raw.split('.'):
+            if cur is None:
+                return None
+            if isinstance(cur, dict):
+                cur = cur.get(part)
+            else:
+                return None
+        return cur
+
+    def _extract_summary_value(*, preferences: dict, source: str):
+        src = (source or '').strip()
+        if not src:
+            return None
+        if src.startswith('preferences.'):
+            return _get_by_path({'preferences': preferences or {}}, src)
+        return _get_by_path(preferences or {}, src)
+
+    domain = resolve_chatbot_domain_for_tenant(db, int(ctx.tenant_id))
+    flow_svc = ChatbotFlowService(db)
+    flow_row = flow_svc.get_published_flow(tenant_id=int(ctx.tenant_id), domain=domain)
+    lead_summary_fields: list[dict] = []
+    lead_kanban: dict | None = None
+    if flow_row and isinstance(getattr(flow_row, 'flow_definition', None), dict):
+        try:
+            flow = flow_svc.validate_definition(flow_row.flow_definition)
+            if getattr(flow, 'lead_summary', None) and getattr(flow.lead_summary, 'fields', None):
+                lead_summary_fields = [f.model_dump() for f in flow.lead_summary.fields]
+            if getattr(flow, 'lead_kanban', None) and getattr(flow.lead_kanban, 'stages', None):
+                lead_kanban = {'stages': [s.model_dump() for s in flow.lead_kanban.stages]}
+        except Exception:
+            lead_summary_fields = []
+            lead_kanban = None
+
     q = db.query(Lead).filter(Lead.tenant_id == int(ctx.tenant_id))
     if status:
         q = q.filter(Lead.status == status)
@@ -472,12 +512,67 @@ def list_leads(
             campaign_name=r.campaign_name,
             campaign_content=r.campaign_content,
             landing_url=r.landing_url,
+            lead_kanban=lead_kanban,
+            lead_summary=(
+                [
+                    {
+                        'key': f.get('key'),
+                        'label': f.get('label'),
+                        'value': (
+                            _extract_summary_value(preferences=(r.preferences or {}), source=str(f.get('source') or ''))
+                            if _extract_summary_value(preferences=(r.preferences or {}), source=str(f.get('source') or '')) not in (None, '', [])
+                            else (f.get('empty_value') if f.get('empty_value') is not None else _extract_summary_value(preferences=(r.preferences or {}), source=str(f.get('source') or '')))
+                        ),
+                    }
+                    for f in (lead_summary_fields or [])
+                ]
+                if lead_summary_fields
+                else None
+            ),
         )
         for r in rows
     ]
 
 class LeadStatusUpdate(BaseModel):
     status: LeadStatus
+
+
+class LeadConfigOut(BaseModel):
+    domain: str
+    has_published_flow: bool
+    lead_summary_fields: list[dict]
+    lead_kanban: dict | None = None
+
+
+@router.get("/leads/config", response_model=LeadConfigOut, summary="Config de Leads (Flow/Kanban)")
+def get_leads_config(
+    db: Session = Depends(get_db),
+    ctx: RequestContext = Depends(require_active_tenant_context),
+):
+    domain = resolve_chatbot_domain_for_tenant(db, int(ctx.tenant_id))
+    flow_svc = ChatbotFlowService(db)
+    flow_row = flow_svc.get_published_flow(tenant_id=int(ctx.tenant_id), domain=domain)
+
+    lead_summary_fields: list[dict] = []
+    lead_kanban: dict | None = None
+
+    if flow_row and isinstance(getattr(flow_row, 'flow_definition', None), dict):
+        try:
+            flow = flow_svc.validate_definition(flow_row.flow_definition)
+            if getattr(flow, 'lead_summary', None) and getattr(flow.lead_summary, 'fields', None):
+                lead_summary_fields = [f.model_dump() for f in flow.lead_summary.fields]
+            if getattr(flow, 'lead_kanban', None) and getattr(flow.lead_kanban, 'stages', None):
+                lead_kanban = {'stages': [s.model_dump() for s in flow.lead_kanban.stages]}
+        except Exception:
+            lead_summary_fields = []
+            lead_kanban = None
+
+    return LeadConfigOut(
+        domain=domain,
+        has_published_flow=bool(flow_row),
+        lead_summary_fields=lead_summary_fields,
+        lead_kanban=lead_kanban,
+    )
 
 @router.patch("/leads/{lead_id}/status", response_model=LeadOut, summary="Atualizar status do lead")
 def update_lead_status(

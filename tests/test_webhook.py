@@ -67,12 +67,16 @@ def test_webhook_post_enqueues_buffer(monkeypatch):
 
     monkeypatch.setattr(webhook_module, "buffer_incoming_message", DummyTask())
 
+    # make tenant resolution deterministic for the test
+    monkeypatch.setattr(webhook_module, "_resolve_tenant_from_phone_number_id", lambda db, pnid: type("T", (), {"id": 99})())
+
     payload = {
         "entry": [
             {
                 "changes": [
                     {
                         "value": {
+                            "metadata": {"phone_number_id": "12345"},
                             "contacts": [{"wa_id": "5561999999999"}],
                             "messages": [
                                 {
@@ -97,6 +101,7 @@ def test_webhook_post_enqueues_buffer(monkeypatch):
     # ensure the task was enqueued with expected args
     assert calls, "buffer_incoming_message.delay was not called"
     args, kwargs = calls[0]
-    assert args[0] == settings.DEFAULT_TENANT_ID
+    assert args[0] == 99
     assert args[1] == "5561999999999"
     assert args[2] == "Ola"
+    assert isinstance(args[3], dict)

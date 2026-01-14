@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.domain.realestate.chatbot_flow_schema import ChatbotFlowDefinitionV1, FlowNodeV1
 from app.domain.realestate.services.chatbot_flow_service import ChatbotFlowService
-from app.domain.realestate.conversation_handlers import ConversationHandler
+from app.domain.chatbot.handler_factory import get_conversation_handler_for_domain
 from app.domain.realestate import detection_utils as detect
 from app.domain.realestate import message_formatters as fmt
 from app.domain.realestate.models import Lead, Property, PropertyImage, PropertyPurpose, PropertyType
@@ -41,7 +41,7 @@ class FlowEngine:
     def __init__(self, db: Session):
         self.db = db
         self._flow_service = ChatbotFlowService(db=db)
-        self._handler = ConversationHandler(db)
+        self._handler = None
 
     def try_process_message(
         self,
@@ -67,6 +67,7 @@ class FlowEngine:
         return self._try_process_with_flow(
             flow=flow,
             sender_id=sender_id,
+            domain=domain,
             text_raw=text_raw,
             text_normalized=text_normalized,
             state=state,
@@ -76,6 +77,7 @@ class FlowEngine:
         self,
         *,
         flow_definition: Dict[str, Any],
+        domain: str,
         sender_id: str,
         text_raw: str,
         text_normalized: str,
@@ -91,6 +93,7 @@ class FlowEngine:
         return self._try_process_with_flow(
             flow=flow,
             sender_id=sender_id,
+            domain=(domain or "").strip() or "real_estate",
             text_raw=text_raw,
             text_normalized=text_normalized,
             state=state,
@@ -101,6 +104,7 @@ class FlowEngine:
         *,
         flow: ChatbotFlowDefinitionV1,
         sender_id: str,
+        domain: str,
         text_raw: str,
         text_normalized: str,
         state: Dict[str, Any],
@@ -119,6 +123,7 @@ class FlowEngine:
             msg, new_state, continue_loop = self._call_legacy_handler(
                 handler_name=node.handler,
                 sender_id=sender_id,
+                domain=domain,
                 text_raw=text_raw,
                 text_normalized=text_normalized,
                 state=state,
@@ -266,12 +271,14 @@ class FlowEngine:
         *,
         handler_name: str,
         sender_id: str,
+        domain: str,
         text_raw: str,
         text_normalized: str,
         state: Dict[str, Any],
     ) -> Tuple[str, Dict[str, Any], bool]:
+        handler = get_conversation_handler_for_domain(domain=domain, db=self.db)
         fn_name = f"handle_{handler_name}".strip()
-        fn = getattr(self._handler, fn_name, None)
+        fn = getattr(handler, fn_name, None)
         if not fn:
             return ("", state, False)
 

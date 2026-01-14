@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime
 from typing import Any, Dict
 
 from app.core.config import settings
@@ -11,6 +12,52 @@ async def enrich_state_with_llm(*, sender_id: str, text_raw: str, state: Dict[st
     is_pytest = os.getenv("PYTEST_CURRENT_TEST") is not None
     if not text_raw.strip() or env == "test" or is_pytest:
         return state
+
+    # Guardrail: só aplicar limites de custo quando estiver usando OpenAI
+    if not (settings.OPENAI_API_KEY or "").strip():
+        return state
+
+    # Guardrails simples via Redis (fail-open)
+    try:
+        import redis
+
+        r = redis.from_url(settings.REDIS_URL, decode_responses=True)
+        tenant_id = int(state.get("tenant_id") or 0)
+        now = datetime.utcnow()
+
+        # Limite por tenant/dia
+        day_key = now.strftime("%Y%m%d")
+        tenant_daily_key = f"llm:openai:tenant:{tenant_id}:day:{day_key}"
+        tenant_daily = int(r.incr(tenant_daily_key))
+        r.expire(tenant_daily_key, 60 * 60 * 36)
+
+        if tenant_daily > int(getattr(settings, "OPENAI_MAX_CALLS_PER_TENANT_PER_DAY", 500) or 500):
+            log.warning(
+                "llm_guardrail_tenant_daily_exceeded",
+                sender_id=sender_id,
+                tenant_id=tenant_id,
+                count=tenant_daily,
+            )
+            return state
+
+        # Limite por sender/minuto (protege custo + abusos)
+        minute_key = now.strftime("%Y%m%d%H%M")
+        sender_minute_key = f"llm:openai:tenant:{tenant_id}:sender:{sender_id}:min:{minute_key}"
+        sender_minute = int(r.incr(sender_minute_key))
+        r.expire(sender_minute_key, 60 * 5)
+
+        if sender_minute > int(getattr(settings, "OPENAI_MAX_CALLS_PER_SENDER_PER_MINUTE", 6) or 6):
+            log.warning(
+                "llm_guardrail_sender_minute_exceeded",
+                sender_id=sender_id,
+                tenant_id=tenant_id,
+                count=sender_minute,
+            )
+            return state
+
+    except Exception as e:  # noqa: BLE001
+        # Fail-open: se Redis cair, não derruba o bot
+        log.info("llm_guardrail_skipped", sender_id=sender_id, error=str(e))
 
     try:
         log.info(

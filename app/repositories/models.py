@@ -44,6 +44,26 @@ class Tenant(Base):
     contacts: Mapped[list[Contact]] = relationship(back_populates="tenant")  # type: ignore
 
 
+class OnboardingRun(Base):
+    __tablename__ = "onboarding_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    idempotency_key: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    status: Mapped[str] = mapped_column(String(32), default="in_progress", index=True)
+    tenant_id: Mapped[int | None] = mapped_column(ForeignKey("tenants.id"), nullable=True, index=True)
+    request_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    response_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        Index("uix_onboarding_idempotency_key", "idempotency_key", unique=True),
+        Index("idx_onboarding_status", "status"),
+        Index("idx_onboarding_tenant", "tenant_id"),
+    )
+
+
 class WhatsAppAccount(Base):
     __tablename__ = "whatsapp_accounts"
 
