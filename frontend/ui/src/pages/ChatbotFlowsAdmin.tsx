@@ -1,225 +1,70 @@
-import React, { useEffect, useMemo, useState } from 'react';
-import { apiFetch } from '../lib/auth';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 
-// Types matching the backend schema
-type FlowTransitionV1 = {
-  to: string;
-  when?: Record<string, unknown>;
-};
+import {
+  type ChatbotFlowDefinitionV1,
+  type FlowNodeV1,
+  type FlowTransitionV1,
+  type LeadKanbanStageV1,
+  type LeadSummaryFieldV1,
+  type LeadSummarySourceOptionV1,
+  defaultDefinition,
+  normalizeDefinition,
+  validateDefinition,
+  createNodeId,
+  safeJsonParse,
+  splitCommaList,
+} from '../lib/chatbotFlowDefinitionV1';
 
-type FlowNodeV1 = {
-  id: string;
-  type: string;
-  prompt?: string;
-  handler?: string;
-  transitions: FlowTransitionV1[];
-};
+import { FlowCommandBar } from './chatbotFlowsAdmin/FlowCommandBar';
+import { FlowNodesSidebar } from './chatbotFlowsAdmin/FlowNodesSidebar';
+import { FlowNodeBasicsEditor } from './chatbotFlowsAdmin/FlowNodeBasicsEditor';
+import { FlowNodeConfigEditor } from './chatbotFlowsAdmin/FlowNodeConfigEditor';
+import { FlowTransitionsEditor } from './chatbotFlowsAdmin/FlowTransitionsEditor';
+import { FlowLeadSummaryEditor } from './chatbotFlowsAdmin/FlowLeadSummaryEditor';
+import { FlowLeadKanbanEditor } from './chatbotFlowsAdmin/FlowLeadKanbanEditor';
+import { FlowPreviewPanel } from './chatbotFlowsAdmin/FlowPreviewPanel';
+import { ChatbotFlowsTable } from './chatbotFlowsAdmin/ChatbotFlowsTable';
 
-type LeadSummaryFieldV1 = {
-  key: string;
-  label: string;
-  source: string;
-  empty_value?: string | null;
-};
-
-type LeadSummarySourceOptionV1 = {
-  value: string;
-  label: string;
-};
-
-type LeadSummaryV1 = {
-  fields: LeadSummaryFieldV1[];
-  source_options?: LeadSummarySourceOptionV1[] | null;
-};
-
-type LeadKanbanStageV1 = {
-  id: string;
-  label: string;
-};
-
-type LeadKanbanV1 = {
-  stages: LeadKanbanStageV1[];
-};
-
-type ChatbotFlowDefinitionV1 = {
-  version: number;
-  start: string;
-  nodes: FlowNodeV1[];
-  lead_summary?: LeadSummaryV1 | null;
-  lead_kanban?: LeadKanbanV1 | null;
-};
+import { previewFlowCommands } from '../lib/chatbotFlowEditorV1';
+import { FLOW_NODE_TYPE_LABELS, FLOW_NODE_TYPES, type FlowNodeType } from '../lib/chatbotFlowNodeCatalog';
+import {
+  cloneFlow as apiCloneFlow,
+  createFromTemplate as apiCreateFromTemplate,
+  getFlowById as apiGetFlowById,
+  getPublishedFlowForDomain,
+  getTenantChatbotDomain,
+  listFlowsForDomain,
+  previewFlow as apiPreviewFlow,
+  publishByVersion as apiPublishByVersion,
+  publishFlow as apiPublishFlow,
+  saveFlow as apiSaveFlow,
+  setArchived as apiSetArchived,
+} from '../lib/chatbotFlowsAdminService';
+import {
+  addLeadKanbanStageToDefinition,
+  addLeadSummaryFieldToDefinition,
+  addLeadSummarySourceOptionToDefinition,
+  addTransitionToNode,
+  getNodeConfig,
+  moveLeadKanbanStageInDefinition,
+  moveLeadSummaryFieldInDefinition,
+  moveLeadSummarySourceOptionInDefinition,
+  removeLeadKanbanStageFromDefinition,
+  removeLeadSummaryFieldFromDefinition,
+  removeLeadSummarySourceOptionFromDefinition,
+  removeNodeFromDefinition,
+  removeTransitionFromNode,
+  renameNodeInDefinition,
+  setTransitionWhenInDefinition,
+  updateLeadKanbanStageInDefinition,
+  updateLeadSummaryFieldInDefinition,
+  updateLeadSummarySourceOptionInDefinition,
+  updateNodeConfigValueInDefinition,
+  updateNodeInDefinition,
+  updateTransitionInDefinition,
+} from '../lib/chatbotFlowMutationsV1';
 
 type FlowEditorMode = 'guided' | 'json';
-
-const FLOW_NODE_TYPES = [
-  'static_message',
-  'end',
-  'handler',
-  'prompt_and_branch',
-  'capture_phone',
-  'capture_date',
-  'capture_time',
-  'capture_purpose',
-  'capture_property_type',
-  'capture_price_min',
-  'capture_price_max',
-  'capture_bedrooms',
-  'capture_city',
-  'capture_neighborhood',
-  'execute_search',
-  'show_property_card',
-  'property_feedback_decision',
-  'refinement_decision',
-] as const;
-
-type FlowNodeType = (typeof FLOW_NODE_TYPES)[number];
-
-function safeJsonParse<T>(s: string): { ok: true; value: T } | { ok: false; error: string } {
-  try {
-    return { ok: true, value: JSON.parse(s) as T };
-  } catch {
-    return { ok: false, error: 'JSON inválido' };
-  }
-}
-
-function validateDefinition(def: ChatbotFlowDefinitionV1): string[] {
-  const errors: string[] = [];
-  const nodes = def.nodes || [];
-  if (nodes.length === 0) {
-    errors.push('Flow precisa ter ao menos 1 node.');
-    return errors;
-  }
-
-  const ids = nodes.map((n) => (n.id || '').trim());
-  const idSet = new Set(ids);
-
-  if (ids.some((id) => !id)) errors.push('Todo node precisa ter um id.');
-  if (idSet.size !== ids.length) errors.push('Existem IDs de nodes duplicados.');
-
-  const start = (def.start || '').trim();
-  if (!start) errors.push('Campo start é obrigatório.');
-  if (start && !idSet.has(start)) errors.push(`Start aponta para node inexistente: ${start}`);
-
-  for (const n of nodes) {
-    const from = (n.id || '').trim();
-    for (const t of n.transitions || []) {
-      const to = (t.to || '').trim();
-      if (!to) {
-        errors.push(`Transição sem destino em node ${from || '(sem id)'}`);
-      } else if (!idSet.has(to)) {
-        errors.push(`Transição aponta para node inexistente: ${from || '(sem id)'} -> ${to}`);
-      }
-    }
-  }
-
-  return errors;
-}
-
-function defaultDefinition(): ChatbotFlowDefinitionV1 {
-  return {
-    version: 1,
-    start: 'start',
-    nodes: [{ id: 'start', type: 'static_message', prompt: 'Olá!', transitions: [] }],
-    lead_summary: {
-      source_options: [
-        { value: 'stage', label: 'Etapa (stage)' },
-        { value: 'purpose', label: 'Finalidade (purpose)' },
-        { value: 'type', label: 'Tipo (type)' },
-        { value: 'city', label: 'Cidade (city)' },
-        { value: 'neighborhood', label: 'Bairro (neighborhood)' },
-        { value: 'bedrooms', label: 'Quartos (bedrooms)' },
-        { value: 'price_min', label: 'Preço mín. (price_min)' },
-        { value: 'price_max', label: 'Preço máx. (price_max)' },
-        { value: 'date', label: 'Data (date)' },
-        { value: 'time', label: 'Horário (time)' },
-        { value: 'phone', label: 'Telefone (phone)' },
-      ],
-      fields: [
-        { key: 'stage', label: 'Etapa', source: 'stage' },
-        { key: 'city', label: 'Cidade', source: 'city' },
-        { key: 'neighborhood', label: 'Bairro', source: 'neighborhood' },
-      ],
-    },
-    lead_kanban: {
-      stages: [
-        { id: 'start', label: 'Início' },
-        { id: 'awaiting_purpose', label: 'Finalidade' },
-        { id: 'awaiting_city', label: 'Cidade' },
-        { id: 'awaiting_neighborhood', label: 'Bairro' },
-        { id: 'execute_search', label: 'Busca' },
-      ],
-    },
-  };
-}
-
-function normalizeDefinition(def: ChatbotFlowDefinitionV1): ChatbotFlowDefinitionV1 {
-  const nodes = (def.nodes || []).map((n) => ({
-    id: n.id,
-    type: n.type,
-    prompt: n.prompt,
-    handler: n.handler,
-    transitions: Array.isArray(n.transitions) ? n.transitions.map((t) => ({ to: t.to, when: t.when })) : [],
-  }));
-
-  const leadSummaryFieldsRaw = (def.lead_summary?.fields || []).filter(Boolean) as LeadSummaryFieldV1[];
-  const leadSummarySourceOptionsRaw = (def.lead_summary?.source_options || []).filter(Boolean) as LeadSummarySourceOptionV1[];
-  const lead_summary: LeadSummaryV1 | null = {
-    source_options: leadSummarySourceOptionsRaw
-      .map((o) => ({
-        value: (o.value || '').trim(),
-        label: (o.label || '').trim(),
-      }))
-      .filter((o) => o.value && o.label),
-    fields: leadSummaryFieldsRaw
-      .map((f) => ({
-        key: (f.key || '').trim(),
-        label: (f.label || '').trim(),
-        source: (f.source || '').trim(),
-        empty_value: f.empty_value ?? null,
-      }))
-      .filter((f) => f.key && f.label && f.source),
-  };
-
-  const leadKanbanStagesRaw = (def.lead_kanban?.stages || []).filter(Boolean) as LeadKanbanStageV1[];
-  const lead_kanban: LeadKanbanV1 | null = {
-    stages: leadKanbanStagesRaw
-      .map((s) => ({
-        id: (s.id || '').trim(),
-        label: (s.label || '').trim(),
-      }))
-      .filter((s) => s.id && s.label),
-  };
-
-  return {
-    version: def.version || 1,
-    start: def.start || (nodes[0]?.id || 'start'),
-    nodes,
-    lead_summary,
-    lead_kanban,
-  };
-}
-
-function createNodeId(existing: FlowNodeV1[], prefix: string) {
-  const base = (prefix || 'node').trim() || 'node';
-  const used = new Set(existing.map((n) => n.id));
-  if (!used.has(base)) return base;
-  for (let i = 2; i < 999; i++) {
-    const c = `${base}_${i}`;
-    if (!used.has(c)) return c;
-  }
-  return `${base}_${Date.now()}`;
-}
-
-function createKeyId(existing: { key: string }[], prefix: string) {
-  const base = (prefix || 'field').trim() || 'field';
-  const used = new Set(existing.map((x) => x.key));
-  if (!used.has(base)) return base;
-  for (let i = 2; i < 999; i++) {
-    const c = `${base}_${i}`;
-    if (!used.has(c)) return c;
-  }
-  return `${base}_${Date.now()}`;
-}
 
 type ChatbotFlow = {
   id: number;
@@ -257,8 +102,22 @@ export default function ChatbotFlowsAdmin() {
 
   const [uiTenantId, setUiTenantId] = useState<string | null>(null);
   const [isSuperMode, setIsSuperMode] = useState(false);
+  const [selectedNodeId, setSelectedNodeId] = useState<string>('start');
 
-  const nodeIds = useMemo(() => new Set((definition.nodes || []).map((n) => n.id)), [definition]);
+  const [commandText, setCommandText] = useState<string>('');
+  const [commandError, setCommandError] = useState<string | null>(null);
+  const [commandApplied, setCommandApplied] = useState<string[]>([]);
+
+  const commandPreview = useMemo(() => {
+    const txt = (commandText || '').trim();
+    if (!txt) return { previewError: null as string | null, previewLines: [] as string[] };
+
+    const res = previewFlowCommands(definition, txt);
+    if (!res.ok) return { previewError: res.error, previewLines: [] as string[] };
+    return { previewError: null as string | null, previewLines: res.applied };
+  }, [commandText, definition]);
+
+  const nodeIds = useMemo(() => new Set((definition.nodes || []).map((n) => (n.id || '').trim()).filter(Boolean)), [definition]);
 
   const leadSummaryFields = useMemo(() => {
     const raw = definition.lead_summary?.fields || [];
@@ -269,6 +128,12 @@ export default function ChatbotFlowsAdmin() {
     const raw = definition.lead_kanban?.stages || [];
     return Array.isArray(raw) ? raw : [];
   }, [definition.lead_kanban]);
+
+  const selectedNode = useMemo(() => (definition.nodes || []).find((n) => n.id === selectedNodeId) || null, [definition.nodes, selectedNodeId]);
+  const selectedNodeIdx = useMemo(
+    () => (definition.nodes || []).findIndex((n) => n.id === selectedNodeId),
+    [definition.nodes, selectedNodeId],
+  );
 
   const leadSummarySourceSuggestions = useMemo(() => {
     const raw = definition.lead_summary?.source_options || [];
@@ -293,167 +158,95 @@ export default function ChatbotFlowsAdmin() {
     return Array.isArray(raw) ? raw : [];
   }, [definition.lead_summary?.source_options]);
 
+  function updateNodeConfigValue(nodeIdx: number, key: string, value: unknown) {
+    setDefinition((prev) => updateNodeConfigValueInDefinition(prev, nodeIdx, key, value));
+  }
+
+  function updateTransition(nodeIdx: number, tIdx: number, patch: Partial<FlowTransitionV1>) {
+    setDefinition((prev) => updateTransitionInDefinition(prev, nodeIdx, tIdx, patch));
+  }
+
+  function updateTransitionWhen(nodeIdx: number, tIdx: number, nextWhen: Record<string, unknown> | undefined) {
+    setDefinition((prev) => setTransitionWhenInDefinition(prev, nodeIdx, tIdx, nextWhen));
+  }
+
   function updateLeadSummarySourceOption(idx: number, patch: Partial<LeadSummarySourceOptionV1>) {
-    setDefinition((prev) => {
-      const fields = Array.isArray(prev.lead_summary?.fields) ? [...prev.lead_summary!.fields] : [];
-      const opts = Array.isArray(prev.lead_summary?.source_options) ? [...prev.lead_summary!.source_options!] : [];
-      const cur = opts[idx];
-      if (!cur) return prev;
-      opts[idx] = { ...cur, ...patch };
-      return { ...prev, lead_summary: { fields, source_options: opts } };
-    });
+    setDefinition((prev) => updateLeadSummarySourceOptionInDefinition(prev, idx, patch));
   }
 
   function addLeadSummarySourceOption() {
-    setDefinition((prev) => {
-      const fields = Array.isArray(prev.lead_summary?.fields) ? [...prev.lead_summary!.fields] : [];
-      const opts = Array.isArray(prev.lead_summary?.source_options) ? [...prev.lead_summary!.source_options!] : [];
-      opts.push({ value: 'custom', label: 'Personalizado (custom)' });
-      return { ...prev, lead_summary: { fields, source_options: opts } };
-    });
+    setDefinition((prev) => addLeadSummarySourceOptionToDefinition(prev));
   }
 
   function removeLeadSummarySourceOption(idx: number) {
-    setDefinition((prev) => {
-      const fields = Array.isArray(prev.lead_summary?.fields) ? [...prev.lead_summary!.fields] : [];
-      const opts = Array.isArray(prev.lead_summary?.source_options) ? [...prev.lead_summary!.source_options!] : [];
-      opts.splice(idx, 1);
-      return { ...prev, lead_summary: { fields, source_options: opts } };
-    });
+    setDefinition((prev) => removeLeadSummarySourceOptionFromDefinition(prev, idx));
   }
 
   function moveLeadSummarySourceOption(idx: number, dir: -1 | 1) {
-    setDefinition((prev) => {
-      const fields = Array.isArray(prev.lead_summary?.fields) ? [...prev.lead_summary!.fields] : [];
-      const opts = Array.isArray(prev.lead_summary?.source_options) ? [...prev.lead_summary!.source_options!] : [];
-      const next = idx + dir;
-      if (idx < 0 || idx >= opts.length) return prev;
-      if (next < 0 || next >= opts.length) return prev;
-      const tmp = opts[idx];
-      opts[idx] = opts[next]!;
-      opts[next] = tmp!;
-      return { ...prev, lead_summary: { fields, source_options: opts } };
-    });
+    setDefinition((prev) => moveLeadSummarySourceOptionInDefinition(prev, idx, dir));
   }
 
   function updateLeadSummaryField(idx: number, patch: Partial<LeadSummaryFieldV1>) {
-    setDefinition((prev) => {
-      const fields = Array.isArray(prev.lead_summary?.fields) ? [...prev.lead_summary!.fields] : [];
-      const source_options = Array.isArray(prev.lead_summary?.source_options) ? [...prev.lead_summary!.source_options!] : undefined;
-      const cur = fields[idx];
-      if (!cur) return prev;
-      fields[idx] = { ...cur, ...patch };
-      return { ...prev, lead_summary: { fields, source_options } };
-    });
+    setDefinition((prev) => updateLeadSummaryFieldInDefinition(prev, idx, patch));
   }
 
   function addLeadSummaryField() {
-    setDefinition((prev) => {
-      const fields = Array.isArray(prev.lead_summary?.fields) ? [...prev.lead_summary!.fields] : [];
-      const source_options = Array.isArray(prev.lead_summary?.source_options) ? [...prev.lead_summary!.source_options!] : undefined;
-      const key = createKeyId(fields, 'field');
-      fields.push({ key, label: 'Novo campo', source: 'stage', empty_value: null });
-      return { ...prev, lead_summary: { fields, source_options } };
-    });
+    setDefinition((prev) => addLeadSummaryFieldToDefinition(prev));
   }
 
   function removeLeadSummaryField(idx: number) {
-    setDefinition((prev) => {
-      const fields = Array.isArray(prev.lead_summary?.fields) ? [...prev.lead_summary!.fields] : [];
-      const source_options = Array.isArray(prev.lead_summary?.source_options) ? [...prev.lead_summary!.source_options!] : undefined;
-      fields.splice(idx, 1);
-      return { ...prev, lead_summary: { fields, source_options } };
-    });
+    setDefinition((prev) => removeLeadSummaryFieldFromDefinition(prev, idx));
   }
 
   function moveLeadSummaryField(idx: number, dir: -1 | 1) {
-    setDefinition((prev) => {
-      const fields = Array.isArray(prev.lead_summary?.fields) ? [...prev.lead_summary!.fields] : [];
-      const source_options = Array.isArray(prev.lead_summary?.source_options) ? [...prev.lead_summary!.source_options!] : undefined;
-      const next = idx + dir;
-      if (idx < 0 || idx >= fields.length) return prev;
-      if (next < 0 || next >= fields.length) return prev;
-      const tmp = fields[idx];
-      fields[idx] = fields[next]!;
-      fields[next] = tmp!;
-      return { ...prev, lead_summary: { fields, source_options } };
-    });
+    setDefinition((prev) => moveLeadSummaryFieldInDefinition(prev, idx, dir));
   }
 
   function updateLeadKanbanStage(idx: number, patch: Partial<LeadKanbanStageV1>) {
-    setDefinition((prev) => {
-      const stages = Array.isArray(prev.lead_kanban?.stages) ? [...prev.lead_kanban!.stages] : [];
-      const cur = stages[idx];
-      if (!cur) return prev;
-      stages[idx] = { ...cur, ...patch };
-      return { ...prev, lead_kanban: { stages } };
-    });
+    setDefinition((prev) => updateLeadKanbanStageInDefinition(prev, idx, patch));
   }
 
   function addLeadKanbanStage() {
-    setDefinition((prev) => {
-      const stages = Array.isArray(prev.lead_kanban?.stages) ? [...prev.lead_kanban!.stages] : [];
-      const used = new Set(stages.map((s) => s.id));
-      const candidates = (prev.nodes || []).map((n) => n.id).filter((id) => !used.has(id));
-      const id = candidates[0] || 'start';
-      stages.push({ id, label: id });
-      return { ...prev, lead_kanban: { stages } };
-    });
+    setDefinition((prev) => addLeadKanbanStageToDefinition(prev));
   }
 
   function removeLeadKanbanStage(idx: number) {
-    setDefinition((prev) => {
-      const stages = Array.isArray(prev.lead_kanban?.stages) ? [...prev.lead_kanban!.stages] : [];
-      stages.splice(idx, 1);
-      return { ...prev, lead_kanban: { stages } };
-    });
+    setDefinition((prev) => removeLeadKanbanStageFromDefinition(prev, idx));
   }
 
   function moveLeadKanbanStage(idx: number, dir: -1 | 1) {
-    setDefinition((prev) => {
-      const stages = Array.isArray(prev.lead_kanban?.stages) ? [...prev.lead_kanban!.stages] : [];
-      const next = idx + dir;
-      if (idx < 0 || idx >= stages.length) return prev;
-      if (next < 0 || next >= stages.length) return prev;
-      const tmp = stages[idx];
-      stages[idx] = stages[next]!;
-      stages[next] = tmp!;
-      return { ...prev, lead_kanban: { stages } };
-    });
+    setDefinition((prev) => moveLeadKanbanStageInDefinition(prev, idx, dir));
   }
 
-  async function load() {
-    setLoading(true);
-    setError(null);
+  const loadForDomain = useCallback(async (domain: string) => {
+    const d = (domain || '').trim() || 'real_estate'
+    setLoading(true)
+    setError(null)
+    try {
+      const [flowsData, publishedFlow] = await Promise.all([listFlowsForDomain(d), getPublishedFlowForDomain(d)])
+      setFlows(flowsData as unknown as ChatbotFlow[])
+      setPublished((publishedFlow as unknown as ChatbotFlow) || null)
+      setCurrentDomain(d)
+    } catch (e) {
+      setError((e as Error).message || 'Erro ao carregar flows')
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  const load = useCallback(async () => {
     try {
       // Primeiro, busca o domínio atual do tenant
-      const domainRes = await apiFetch('/admin/chatbot-domain');
-      if (!domainRes.ok) throw new Error(`Domain: HTTP ${domainRes.status}`);
-      const domainData = await domainRes.json();
-      const domain = domainData.domain || 'real_estate';
-      setCurrentDomain(domain);
-
-      // Depois, busca os flows e o publicado para o domínio encontrado
-      const [flowsRes, publishedRes] = await Promise.all([
-        apiFetch(`/admin/chatbot-flows?domain=${domain}&include_archived=true`),
-        apiFetch(`/admin/chatbot-flows/published?domain=${domain}`),
-      ]);
-      if (!flowsRes.ok) throw new Error(`Flows: HTTP ${flowsRes.status}`);
-      if (!publishedRes.ok) throw new Error(`Published: HTTP ${publishedRes.status}`);
-      const flowsData = await flowsRes.json();
-      const publishedData = await publishedRes.json();
-      setFlows(flowsData);
-      setPublished(publishedData.flow || null);
+      const domain = await getTenantChatbotDomain();
+      await loadForDomain(domain)
     } catch (e) {
-      setError((e as Error).message || 'Erro ao carregar flows');
-    } finally {
-      setLoading(false);
+      setError((e as Error).message || 'Erro ao carregar flows')
     }
-  }
+  }, [loadForDomain])
 
   useEffect(() => {
     load();
-  }, []);
+  }, [load]);
 
   useEffect(() => {
     try {
@@ -474,6 +267,14 @@ export default function ChatbotFlowsAdmin() {
     setDefinitionJson(JSON.stringify(definition, null, 2));
   }, [definition, editorMode]);
 
+  useEffect(() => {
+    // Garantir que sempre exista um nó selecionado válido
+    const ids = (definition.nodes || []).map((n) => n.id);
+    if (!ids.includes(selectedNodeId)) {
+      setSelectedNodeId(definition.start || ids[0] || 'start');
+    }
+  }, [definition.nodes, definition.start, selectedNodeId]);
+
   async function openNewFlow() {
     const def = defaultDefinition();
     setEditorMode('guided');
@@ -492,12 +293,7 @@ export default function ChatbotFlowsAdmin() {
     setValidationErrors([]);
     setPreviewOut(null);
     try {
-      const res = await apiFetch(`/admin/chatbot-flows/by-id/${flowId}`);
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));
-        throw new Error(err.detail);
-      }
-      const flow = (await res.json()) as ChatbotFlow;
+      const flow = (await apiGetFlowById(flowId)) as unknown as ChatbotFlow;
       const def = normalizeDefinition((flow.flow_definition || defaultDefinition()) as ChatbotFlowDefinitionV1);
       setEditorMode('guided');
       setDefinition(def);
@@ -521,16 +317,7 @@ export default function ChatbotFlowsAdmin() {
     const publish = window.confirm('Publicar automaticamente após criar?');
 
     try {
-      const res = await apiFetch('/admin/chatbot-flows/create-from-template', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ domain: currentDomain, template, name, overwrite, publish }),
-      });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));
-        throw new Error(err.detail || `HTTP ${res.status}`);
-      }
-      const js = (await res.json()) as { flow_id: number };
+      const js = await apiCreateFromTemplate({ domain: currentDomain, template, name, overwrite, publish });
       await load();
       if (js.flow_id) {
         await openEditFlow(js.flow_id);
@@ -549,16 +336,7 @@ export default function ChatbotFlowsAdmin() {
     const publish = window.confirm('Publicar automaticamente após clonar?');
 
     try {
-      const res = await apiFetch(`/admin/chatbot-flows/${flowId}/clone`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, overwrite, publish }),
-      });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));
-        throw new Error(err.detail || `HTTP ${res.status}`);
-      }
-      const js = (await res.json()) as { new_flow_id: number };
+      const js = await apiCloneFlow(flowId, { name, overwrite, publish });
       await load();
       if (js.new_flow_id) {
         await openEditFlow(js.new_flow_id);
@@ -573,11 +351,7 @@ export default function ChatbotFlowsAdmin() {
     const action = archived ? 'arquivar' : 'desarquivar';
     if (!window.confirm(`Confirma ${action} este flow?`)) return;
     try {
-      const res = await apiFetch(`/admin/chatbot-flows/${flowId}/${archived ? 'archive' : 'unarchive'}`, { method: 'POST' });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));
-        throw new Error(err.detail || `HTTP ${res.status}`);
-      }
+      await apiSetArchived(flowId, archived);
       await load();
     } catch (e) {
       setError((e as Error).message || `Erro ao ${action} flow`);
@@ -595,15 +369,7 @@ export default function ChatbotFlowsAdmin() {
     }
     if (!window.confirm(`Publicar versão ${v}?`)) return;
     try {
-      const res = await apiFetch('/admin/chatbot-flows/publish-by-version', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ domain: currentDomain, published_version: v }),
-      });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));
-        throw new Error(err.detail || `HTTP ${res.status}`);
-      }
+      await apiPublishByVersion({ domain: currentDomain, published_version: v });
       await load();
     } catch (e) {
       setError((e as Error).message || 'Erro ao publicar por versão');
@@ -641,15 +407,7 @@ export default function ChatbotFlowsAdmin() {
         domain: editing.domain || currentDomain,
         flow_definition: nextDefinition,
       };
-      const res = await apiFetch('/admin/chatbot-flows', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));
-        throw new Error(err.detail);
-      }
+      await apiSaveFlow(payload);
       setEditing(null);
       await load();
     } catch (e) {
@@ -660,8 +418,7 @@ export default function ChatbotFlowsAdmin() {
   async function onPublish(flowId: number) {
     if (!window.confirm('Publicar este flow? O flow publicado anteriormente será desativado.')) return;
     try {
-      const res = await apiFetch(`/admin/chatbot-flows/${flowId}/publish`, { method: 'POST' });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      await apiPublishFlow(flowId);
       await load();
     } catch (e) {
       setError((e as Error).message);
@@ -683,17 +440,13 @@ export default function ChatbotFlowsAdmin() {
     }
 
     try {
-      const res = await apiFetch(`/admin/chatbot-flows/${flowId}/preview`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ input: previewInput, state: parsedState.value }),
-      });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));
-        throw new Error(err.detail || `HTTP ${res.status}`);
-      }
-      const js = (await res.json()) as { message: string; state: Record<string, unknown> };
+      const js = await apiPreviewFlow(flowId, { input: previewInput, state: parsedState.value });
       setPreviewOut(js);
+      try {
+        setPreviewStateJson(JSON.stringify(js.state || {}, null, 0));
+      } catch {
+        // ignore
+      }
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -701,11 +454,32 @@ export default function ChatbotFlowsAdmin() {
     }
   }
 
+  function onResetPreview() {
+    setPreviewInput('oi');
+    setPreviewStateJson('{}');
+    setPreviewOut(null);
+  }
+
   return (
     <section className="space-y-6">
       <header>
         <h1 className="text-2xl font-bold text-slate-800">Chatbot Flows</h1>
         <p className="text-sm text-slate-500">Gestão de flows de conversa por tenant</p>
+        <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
+          <span className="text-slate-600">Domínio ativo:</span>
+          <span className="badge badge-neutral font-mono">{currentDomain}</span>
+          <select
+            className="select select-sm"
+            value={currentDomain}
+            onChange={(e) => {
+              void loadForDomain(e.target.value)
+            }}
+            disabled={loading}
+          >
+            <option value="real_estate">real_estate</option>
+            <option value="car_dealer">car_dealer</option>
+          </select>
+        </div>
         {isSuperMode && (
           <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
             <span className="badge badge-neutral">Super Admin</span>
@@ -745,17 +519,33 @@ export default function ChatbotFlowsAdmin() {
         <div className="card space-y-4">
           <h2 className="font-bold text-lg">{editing.id ? 'Editando' : 'Novo'} Flow</h2>
           <form onSubmit={onSave} className="space-y-4">
-            <div>
-              <label htmlFor="flow_name" className="block text-sm font-medium text-slate-700 mb-1">Nome do Flow</label>
-              <input
-                id="flow_name"
-                type="text"
-                value={editing.name || ''}
-                onChange={(e) => setEditing({ ...editing, name: e.target.value })}
-                className="input w-full"
-                placeholder="Ex: Boas-vindas Carros"
-                required
-              />
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <label htmlFor="flow_domain" className="block text-sm font-medium text-slate-700 mb-1">Domínio</label>
+                <select
+                  id="flow_domain"
+                  className="select w-full font-mono"
+                  value={(editing.domain || currentDomain) as string}
+                  onChange={(e) => setEditing({ ...editing, domain: e.target.value })}
+                  disabled={editingLoading}
+                >
+                  <option value="real_estate">real_estate</option>
+                  <option value="car_dealer">car_dealer</option>
+                </select>
+                <div className="text-xs text-slate-500 mt-1">Este domínio define qual flow será usado pelo tenant.</div>
+              </div>
+              <div>
+                <label htmlFor="flow_name" className="block text-sm font-medium text-slate-700 mb-1">Nome do Flow</label>
+                <input
+                  id="flow_name"
+                  type="text"
+                  value={editing.name || ''}
+                  onChange={(e) => setEditing({ ...editing, name: e.target.value })}
+                  className="input w-full"
+                  placeholder="Ex: Boas-vindas Carros"
+                  required
+                />
+              </div>
             </div>
 
             {editingLoading && <p className="text-sm text-slate-500">Carregando definição...</p>}
@@ -788,447 +578,156 @@ export default function ChatbotFlowsAdmin() {
 
             {editorMode === 'guided' ? (
               <div className="space-y-4">
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-sm font-medium text-slate-700 mb-1">Start node</label>
-                    <select
-                      className="select w-full"
-                      value={definition.start}
-                      onChange={(e) => setDefinition((prev) => ({ ...prev, start: e.target.value }))}
-                      disabled={editingLoading}
-                    >
-                      {(definition.nodes || []).map((n) => (
-                        <option key={n.id} value={n.id}>{n.id}</option>
-                      ))}
-                    </select>
-                  </div>
-                  <div className="flex items-end justify-end">
-                    <button
-                      type="button"
-                      className="btn btn-secondary"
-                      onClick={() => {
-                        const id = createNodeId(definition.nodes || [], 'node');
-                        setDefinition((prev) => ({
-                          ...prev,
-                          nodes: [...(prev.nodes || []), { id, type: 'static_message', prompt: '', transitions: [] }],
-                        }));
-                      }}
-                      disabled={editingLoading}
-                    >
-                      + Nó
-                    </button>
-                  </div>
-                </div>
+                <FlowCommandBar
+                  commandText={commandText}
+                  onChangeCommandText={setCommandText}
+                  commandError={commandError}
+                  commandApplied={commandApplied}
+                  nodeIdOptions={(definition.nodes || []).map((n) => n.id)}
+                  previewError={commandPreview.previewError}
+                  previewLines={commandPreview.previewLines}
+                  disabled={editingLoading}
+                  onClear={() => {
+                    setCommandText('');
+                    setCommandError(null);
+                    setCommandApplied([]);
+                  }}
+                  onApply={() => {
+                    setCommandError(null);
+                    setCommandApplied([]);
 
-                <div className="space-y-3">
-                  {(definition.nodes || []).map((n, nodeIdx) => (
-                    <div key={n.id} className="bg-slate-50 border border-slate-200 rounded-lg p-3 space-y-3">
-                      <div className="flex items-center justify-between gap-2">
-                        <div className="font-mono text-xs text-slate-600">{n.id}</div>
-                        <button
-                          type="button"
-                          className="btn btn-sm btn-secondary"
-                          onClick={() => {
-                            setDefinition((prev) => {
-                              const nodes = (prev.nodes || []).filter((x) => x.id !== n.id);
-                              const start = prev.start === n.id ? (nodes[0]?.id || 'start') : prev.start;
-                              const cleaned = nodes.map((x) => ({
-                                ...x,
-                                transitions: (x.transitions || []).filter((t) => t.to !== n.id),
-                              }));
-                              return { ...prev, start, nodes: cleaned };
-                            });
-                          }}
-                          disabled={editingLoading || n.id === definition.start}
-                        >
-                          Remover
-                        </button>
-                      </div>
+                    const res = previewFlowCommands(definition, commandText);
+                    if (!res.ok) {
+                      setCommandError(res.error);
+                      return;
+                    }
 
-                      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                        <div>
-                          <label className="block text-xs font-semibold text-slate-600">ID</label>
-                          <input
-                            className="input"
-                            value={n.id}
-                            onChange={(e) => {
-                              const nextId = e.target.value.trim();
-                              if (!nextId) return;
-                              if (nextId !== n.id && nodeIds.has(nextId)) return;
-                              setDefinition((prev) => {
-                                const nodes = (prev.nodes || []).map((x) => {
-                                  if (x.id !== n.id) {
-                                    return {
-                                      ...x,
-                                      transitions: (x.transitions || []).map((t) => (t.to === n.id ? { ...t, to: nextId } : t)),
-                                    };
-                                  }
-                                  return { ...x, id: nextId };
-                                });
-                                const start = prev.start === n.id ? nextId : prev.start;
-                                return { ...prev, start, nodes };
-                              });
-                            }}
-                            disabled={editingLoading}
-                          />
-                        </div>
-                        <div>
-                          <label className="block text-xs font-semibold text-slate-600">Tipo</label>
-                          <select
-                            className="select w-full"
-                            value={(FLOW_NODE_TYPES.includes(n.type as FlowNodeType) ? (n.type as FlowNodeType) : 'static_message')}
-                            onChange={(e) => {
-                              const v = e.target.value;
-                              setDefinition((prev) => ({
-                                ...prev,
-                                nodes: (prev.nodes || []).map((x, i) => (i === nodeIdx ? { ...x, type: v } : x)),
-                              }));
-                            }}
-                            disabled={editingLoading}
-                          >
-                            {FLOW_NODE_TYPES.map((t) => (
-                              <option key={t} value={t}>{t}</option>
-                            ))}
-                            {!FLOW_NODE_TYPES.includes(n.type as FlowNodeType) && (
-                              <option value={n.type}>custom: {n.type}</option>
-                            )}
-                          </select>
-                        </div>
-                        <div>
-                          <label className="block text-xs font-semibold text-slate-600">Handler</label>
-                          <input
-                            className="input"
-                            value={n.handler || ''}
-                            onChange={(e) => {
-                              const v = e.target.value;
-                              setDefinition((prev) => ({
-                                ...prev,
-                                nodes: (prev.nodes || []).map((x, i) => (i === nodeIdx ? { ...x, handler: v || undefined } : x)),
-                              }));
-                            }}
-                            disabled={editingLoading}
-                          />
-                        </div>
-                      </div>
+                    setDefinition(res.definition);
+                    if (res.suggestedSelectedNodeId) setSelectedNodeId(res.suggestedSelectedNodeId);
+                    setCommandApplied(res.applied);
+                    setCommandText('');
+                  }}
+                />
 
-                      <div>
-                        <label className="block text-xs font-semibold text-slate-600">Prompt</label>
-                        <textarea
-                          className="input w-full"
-                          value={n.prompt || ''}
-                          onChange={(e) => {
-                            const v = e.target.value;
-                            setDefinition((prev) => ({
-                              ...prev,
-                              nodes: (prev.nodes || []).map((x, i) => (i === nodeIdx ? { ...x, prompt: v || undefined } : x)),
-                            }));
-                          }}
-                          disabled={editingLoading}
-                        />
-                      </div>
+                <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
+                  <FlowNodesSidebar
+                    nodes={(definition.nodes || []).map((n) => ({ id: n.id, type: n.type }))}
+                    selectedNodeId={selectedNodeId}
+                    startNodeId={definition.start}
+                    getNodeTypeLabel={(nodeType) => (FLOW_NODE_TYPE_LABELS[nodeType as FlowNodeType] || nodeType)}
+                    onAddNode={() => {
+                      const id = createNodeId(definition.nodes || [], 'node');
+                      setDefinition((prev) => ({
+                        ...prev,
+                        nodes: [...(prev.nodes || []), { id, type: 'static_message', prompt: '', transitions: [] }],
+                      }));
+                      setSelectedNodeId(id);
+                    }}
+                    onSelectNode={setSelectedNodeId}
+                    onChangeStartNode={(nodeId) => setDefinition((prev) => ({ ...prev, start: nodeId }))}
+                    disabled={editingLoading}
+                  />
 
-                      <div className="space-y-2">
-                        <div className="flex items-center justify-between">
-                          <div className="text-sm font-semibold text-slate-700">Transições</div>
-                          <button
-                            type="button"
-                            className="btn btn-sm btn-secondary"
-                            onClick={() => {
-                              const to = definition.nodes?.[0]?.id || definition.start;
-                              setDefinition((prev) => ({
-                                ...prev,
-                                nodes: (prev.nodes || []).map((x, i) => (i === nodeIdx ? { ...x, transitions: [...(x.transitions || []), { to }] } : x)),
-                              }));
-                            }}
-                            disabled={editingLoading || (definition.nodes || []).length === 0}
-                          >
-                            + Transição
-                          </button>
-                        </div>
-
-                        {(n.transitions || []).map((t, tIdx) => (
-                          <div key={`${n.id}:${tIdx}`} className="grid grid-cols-1 md:grid-cols-6 gap-2 items-end bg-white border border-slate-200 rounded-lg p-2">
-                            <div className="md:col-span-2">
-                              <label className="block text-xs font-semibold text-slate-600">To</label>
-                              <select
-                                className="select w-full"
-                                value={t.to}
-                                onChange={(e) => {
-                                  const v = e.target.value;
-                                  setDefinition((prev) => ({
-                                    ...prev,
-                                    nodes: (prev.nodes || []).map((x, i) => {
-                                      if (i !== nodeIdx) return x;
-                                      const nextTransitions = (x.transitions || []).map((tt, j) => (j === tIdx ? { ...tt, to: v } : tt));
-                                      return { ...x, transitions: nextTransitions };
-                                    }),
-                                  }));
-                                }}
-                                disabled={editingLoading}
-                              >
-                                {(definition.nodes || []).map((nn) => (
-                                  <option key={nn.id} value={nn.id}>{nn.id}</option>
-                                ))}
-                              </select>
-                            </div>
-                            <div className="md:col-span-3">
-                              <label className="block text-xs font-semibold text-slate-600">When (JSON)</label>
-                              <input
-                                className="input w-full font-mono text-xs"
-                                value={t.when ? JSON.stringify(t.when) : ''}
-                                onChange={(e) => {
-                                  const raw = e.target.value;
-                                  if (!raw.trim()) {
-                                    setDefinition((prev) => ({
-                                      ...prev,
-                                      nodes: (prev.nodes || []).map((x, i) => {
-                                        if (i !== nodeIdx) return x;
-                                        const nextTransitions = (x.transitions || []).map((tt, j) => (j === tIdx ? { ...tt, when: undefined } : tt));
-                                        return { ...x, transitions: nextTransitions };
-                                      }),
-                                    }));
-                                    return;
-                                  }
-                                  const parsed = safeJsonParse<Record<string, unknown>>(raw);
-                                  if (!parsed.ok) return;
-                                  setDefinition((prev) => ({
-                                    ...prev,
-                                    nodes: (prev.nodes || []).map((x, i) => {
-                                      if (i !== nodeIdx) return x;
-                                      const nextTransitions = (x.transitions || []).map((tt, j) => (j === tIdx ? { ...tt, when: parsed.value } : tt));
-                                      return { ...x, transitions: nextTransitions };
-                                    }),
-                                  }));
-                                }}
-                                placeholder='{"eq": ["state.foo", "bar"]}'
-                                disabled={editingLoading}
-                              />
-                            </div>
-                            <div className="md:col-span-1 flex items-center justify-end">
-                              <button
-                                type="button"
-                                className="btn btn-sm btn-secondary"
-                                onClick={() => {
-                                  setDefinition((prev) => ({
-                                    ...prev,
-                                    nodes: (prev.nodes || []).map((x, i) => {
-                                      if (i !== nodeIdx) return x;
-                                      const nextTransitions = (x.transitions || []).filter((_, j) => j !== tIdx);
-                                      return { ...x, transitions: nextTransitions };
-                                    }),
-                                  }));
-                                }}
-                                disabled={editingLoading}
-                              >
-                                Remover
-                              </button>
-                            </div>
-                            {t.to && !nodeIds.has(t.to) && (
-                              <div className="md:col-span-6 text-xs text-red-600">Destino inexistente: {t.to}</div>
-                            )}
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-
-                <div className="border-t border-slate-200 pt-4 space-y-3">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <div className="text-sm font-semibold text-slate-700">Resumo do Lead</div>
-                      <div className="text-xs text-slate-500">Define quais campos do state (preferences) aparecem no card/modal de Lead.</div>
-                    </div>
-                    <button type="button" className="btn btn-secondary btn-sm" onClick={() => addLeadSummaryField()} disabled={editingLoading}>
-                      + Campo
-                    </button>
-                  </div>
-
-                  <div className="bg-slate-50 border border-slate-200 rounded-lg p-3 space-y-2">
-                    <div className="flex items-center justify-between">
-                      <div>
-                        <div className="text-xs font-semibold text-slate-700">Opções do dropdown (Fonte / source)</div>
-                        <div className="text-xs text-slate-500">Você pode adicionar, remover e ordenar as opções exibidas no select.</div>
-                      </div>
-                      <button type="button" className="btn btn-secondary btn-sm" onClick={() => addLeadSummarySourceOption()} disabled={editingLoading}>
-                        + Opção
-                      </button>
-                    </div>
-
-                    {leadSummarySourceOptions.length === 0 ? (
-                      <div className="text-sm text-slate-500">Nenhuma opção customizada. O sistema usa as sugestões padrão.</div>
+                  <div className="md:col-span-3 bg-white border border-slate-200 rounded-lg p-4 space-y-3">
+                    {!selectedNode ? (
+                      <div className="text-sm text-slate-500">Selecione um nó para editar.</div>
                     ) : (
-                      <div className="space-y-2">
-                        {leadSummarySourceOptions.map((o, idx) => (
-                          <div key={`${o.value}-${idx}`} className="bg-white border border-slate-200 rounded-lg p-3">
-                            <div className="grid grid-cols-1 md:grid-cols-12 gap-2 items-end">
-                              <div className="md:col-span-5">
-                                <label className="block text-xs font-semibold text-slate-600">Value</label>
-                                <input
-                                  className="input font-mono text-xs"
-                                  value={o.value}
-                                  onChange={(e) => updateLeadSummarySourceOption(idx, { value: e.target.value })}
-                                  disabled={editingLoading}
-                                  placeholder="ex: city"
-                                />
-                              </div>
-                              <div className="md:col-span-7">
-                                <label className="block text-xs font-semibold text-slate-600">Label</label>
-                                <input
-                                  className="input"
-                                  value={o.label}
-                                  onChange={(e) => updateLeadSummarySourceOption(idx, { label: e.target.value })}
-                                  disabled={editingLoading}
-                                  placeholder="ex: Cidade"
-                                />
-                              </div>
-                            </div>
+                      <>
+                        <FlowNodeBasicsEditor
+                          nodeId={selectedNode.id}
+                          startNodeId={definition.start}
+                          nodeType={FLOW_NODE_TYPES.includes(selectedNode.type as FlowNodeType) ? (selectedNode.type as string) : 'static_message'}
+                          nodeTypeOptions={FLOW_NODE_TYPES.map((t) => ({ value: t, label: FLOW_NODE_TYPE_LABELS[t] }))}
+                          showCustomNodeTypeOption={!FLOW_NODE_TYPES.includes(selectedNode.type as FlowNodeType)}
+                          handler={selectedNode.handler || ''}
+                          prompt={selectedNode.prompt || ''}
+                          disabled={editingLoading}
+                          onRemove={() => {
+                            const res = removeNodeFromDefinition(definition, selectedNode.id);
+                            setDefinition(res.definition);
+                            setSelectedNodeId(res.nextSelectedNodeId);
+                          }}
+                          onChangeNodeId={(raw) => {
+                            const nextId = raw.trim();
+                            if (!nextId) return;
+                            if (nextId !== selectedNode.id && nodeIds.has(nextId)) return;
+                            const res = renameNodeInDefinition(definition, selectedNode.id, nextId);
+                            setDefinition(res.definition);
+                            setSelectedNodeId(res.nextSelectedNodeId);
+                          }}
+                          onChangeNodeType={(v) => {
+                            setDefinition((prev) => updateNodeInDefinition(prev, selectedNodeIdx, { type: v }));
+                          }}
+                          onChangeHandler={(v) => {
+                            setDefinition((prev) => updateNodeInDefinition(prev, selectedNodeIdx, { handler: v || undefined }));
+                          }}
+                          onChangePrompt={(v) => {
+                            setDefinition((prev) => updateNodeInDefinition(prev, selectedNodeIdx, { prompt: v || undefined }));
+                          }}
+                        />
 
-                            <div className="flex items-center justify-end gap-2 mt-2">
-                              <button type="button" className="btn btn-secondary btn-sm" onClick={() => moveLeadSummarySourceOption(idx, -1)} disabled={editingLoading || idx === 0}>↑</button>
-                              <button type="button" className="btn btn-secondary btn-sm" onClick={() => moveLeadSummarySourceOption(idx, 1)} disabled={editingLoading || idx === leadSummarySourceOptions.length - 1}>↓</button>
-                              <button type="button" className="btn btn-secondary btn-sm" onClick={() => removeLeadSummarySourceOption(idx)} disabled={editingLoading}>Remover</button>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
+                        <FlowNodeConfigEditor
+                          nodeType={selectedNode.type}
+                          cfg={getNodeConfig(selectedNode as FlowNodeV1)}
+                          advancedConfigJson={selectedNode.config ? JSON.stringify(selectedNode.config) : ''}
+                          disabled={editingLoading}
+                          onUpdateConfigValue={(key, value) => updateNodeConfigValue(selectedNodeIdx, key, value)}
+                          onChangeAdvancedConfigRaw={(raw) => {
+                            if (!raw.trim()) {
+                              setDefinition((prev) => updateNodeInDefinition(prev, selectedNodeIdx, { config: undefined }));
+                              return;
+                            }
+                            const parsed = safeJsonParse<Record<string, unknown>>(raw);
+                            if (!parsed.ok) return;
+                            setDefinition((prev) => updateNodeInDefinition(prev, selectedNodeIdx, { config: parsed.value }));
+                          }}
+                        />
+
+                        <FlowTransitionsEditor
+                          nodeId={selectedNode.id}
+                          transitions={selectedNode.transitions || []}
+                          nodeOptions={(definition.nodes || []).map((n) => ({ id: n.id }))}
+                          disabled={editingLoading}
+                          splitCommaList={splitCommaList}
+                          onAddTransition={() => {
+                            const to = definition.nodes?.[0]?.id || definition.start;
+                            setDefinition((prev) => addTransitionToNode(prev, selectedNodeIdx, to));
+                          }}
+                          onRemoveTransition={(tIdx) => {
+                            setDefinition((prev) => removeTransitionFromNode(prev, selectedNodeIdx, tIdx));
+                          }}
+                          onUpdateTransitionTo={(tIdx, to) => updateTransition(selectedNodeIdx, tIdx, { to })}
+                          onUpdateTransitionWhen={(tIdx, when) => updateTransitionWhen(selectedNodeIdx, tIdx, when)}
+                        />
+                      </>
                     )}
                   </div>
-
-                  {leadSummaryFields.length === 0 ? (
-                    <div className="text-sm text-slate-500">Nenhum campo configurado.</div>
-                  ) : (
-                    <div className="space-y-2">
-                      {leadSummaryFields.map((f, idx) => (
-                        <div key={f.key || idx} className="bg-white border border-slate-200 rounded-lg p-3">
-                          <div className="grid grid-cols-1 md:grid-cols-12 gap-2 items-end">
-                            <div className="md:col-span-2">
-                              <label className="block text-xs font-semibold text-slate-600">Key</label>
-                              <input
-                                className="input"
-                                value={f.key}
-                                onChange={(e) => updateLeadSummaryField(idx, { key: e.target.value })}
-                                disabled={editingLoading}
-                              />
-                            </div>
-                            <div className="md:col-span-3">
-                              <label className="block text-xs font-semibold text-slate-600">Label</label>
-                              <input
-                                className="input"
-                                value={f.label}
-                                onChange={(e) => updateLeadSummaryField(idx, { label: e.target.value })}
-                                disabled={editingLoading}
-                              />
-                            </div>
-                            <div className="md:col-span-4">
-                              <label className="block text-xs font-semibold text-slate-600">Fonte (source)</label>
-                              <div className="grid grid-cols-1 gap-2">
-                                <select
-                                  className="select w-full"
-                                  value={
-                                    leadSummarySourceSuggestions.some((x) => x.value === f.source)
-                                      ? f.source
-                                      : '__custom__'
-                                  }
-                                  onChange={(e) => {
-                                    const v = e.target.value;
-                                    if (v === '__custom__') return;
-                                    updateLeadSummaryField(idx, { source: v });
-                                  }}
-                                  disabled={editingLoading}
-                                >
-                                  {leadSummarySourceSuggestions.map((x) => (
-                                    <option key={x.value} value={x.value}>{x.label}</option>
-                                  ))}
-                                  <option value="__custom__">Personalizado…</option>
-                                </select>
-
-                                {(!f.source || !leadSummarySourceSuggestions.some((x) => x.value === f.source)) && (
-                                  <input
-                                    className="input font-mono text-xs"
-                                    value={f.source}
-                                    onChange={(e) => updateLeadSummaryField(idx, { source: e.target.value })}
-                                    disabled={editingLoading}
-                                    placeholder="Digite a fonte (ex: stage, city, price_max)"
-                                  />
-                                )}
-                              </div>
-                            </div>
-                            <div className="md:col-span-3">
-                              <label className="block text-xs font-semibold text-slate-600">Empty value</label>
-                              <input
-                                className="input"
-                                value={(f.empty_value ?? '') as string}
-                                onChange={(e) => updateLeadSummaryField(idx, { empty_value: e.target.value || null })}
-                                disabled={editingLoading}
-                                placeholder="Ex: -"
-                              />
-                            </div>
-                          </div>
-
-                          <div className="flex items-center justify-end gap-2 mt-2">
-                            <button type="button" className="btn btn-secondary btn-sm" onClick={() => moveLeadSummaryField(idx, -1)} disabled={editingLoading || idx === 0}>↑</button>
-                            <button type="button" className="btn btn-secondary btn-sm" onClick={() => moveLeadSummaryField(idx, 1)} disabled={editingLoading || idx === leadSummaryFields.length - 1}>↓</button>
-                            <button type="button" className="btn btn-secondary btn-sm" onClick={() => removeLeadSummaryField(idx)} disabled={editingLoading}>Remover</button>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
                 </div>
 
-                <div className="border-t border-slate-200 pt-4 space-y-3">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <div className="text-sm font-semibold text-slate-700">Kanban por Etapa (Flow)</div>
-                      <div className="text-xs text-slate-500">Define a ordem e os nomes das colunas quando você agrupa Leads por Etapa.</div>
-                    </div>
-                    <button type="button" className="btn btn-secondary btn-sm" onClick={() => addLeadKanbanStage()} disabled={editingLoading}>
-                      + Etapa
-                    </button>
-                  </div>
+                <FlowLeadSummaryEditor
+                  leadSummaryFields={leadSummaryFields}
+                  leadSummarySourceOptions={leadSummarySourceOptions}
+                  leadSummarySourceSuggestions={leadSummarySourceSuggestions}
+                  disabled={editingLoading}
+                  onAddField={addLeadSummaryField}
+                  onUpdateField={updateLeadSummaryField}
+                  onMoveField={moveLeadSummaryField}
+                  onRemoveField={removeLeadSummaryField}
+                  onAddSourceOption={addLeadSummarySourceOption}
+                  onUpdateSourceOption={updateLeadSummarySourceOption}
+                  onMoveSourceOption={moveLeadSummarySourceOption}
+                  onRemoveSourceOption={removeLeadSummarySourceOption}
+                />
 
-                  {leadKanbanStages.length === 0 ? (
-                    <div className="text-sm text-slate-500">Nenhuma etapa configurada.</div>
-                  ) : (
-                    <div className="space-y-2">
-                      {leadKanbanStages.map((s, idx) => (
-                        <div key={`${s.id}-${idx}`} className="bg-white border border-slate-200 rounded-lg p-3">
-                          <div className="grid grid-cols-1 md:grid-cols-12 gap-2 items-end">
-                            <div className="md:col-span-5">
-                              <label className="block text-xs font-semibold text-slate-600">Etapa (id do node)</label>
-                              <select
-                                className="select w-full"
-                                value={s.id}
-                                onChange={(e) => updateLeadKanbanStage(idx, { id: e.target.value })}
-                                disabled={editingLoading}
-                              >
-                                {(definition.nodes || []).map((n) => (
-                                  <option key={n.id} value={n.id}>{n.id}</option>
-                                ))}
-                              </select>
-                            </div>
-                            <div className="md:col-span-7">
-                              <label className="block text-xs font-semibold text-slate-600">Label</label>
-                              <input
-                                className="input"
-                                value={s.label}
-                                onChange={(e) => updateLeadKanbanStage(idx, { label: e.target.value })}
-                                disabled={editingLoading}
-                              />
-                            </div>
-                          </div>
-
-                          <div className="flex items-center justify-end gap-2 mt-2">
-                            <button type="button" className="btn btn-secondary btn-sm" onClick={() => moveLeadKanbanStage(idx, -1)} disabled={editingLoading || idx === 0}>↑</button>
-                            <button type="button" className="btn btn-secondary btn-sm" onClick={() => moveLeadKanbanStage(idx, 1)} disabled={editingLoading || idx === leadKanbanStages.length - 1}>↓</button>
-                            <button type="button" className="btn btn-secondary btn-sm" onClick={() => removeLeadKanbanStage(idx)} disabled={editingLoading}>Remover</button>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
+                <FlowLeadKanbanEditor
+                  stages={leadKanbanStages}
+                  nodeOptions={(definition.nodes || []).map((n) => ({ id: n.id }))}
+                  disabled={editingLoading}
+                  onAddStage={addLeadKanbanStage}
+                  onUpdateStage={updateLeadKanbanStage}
+                  onMoveStage={moveLeadKanbanStage}
+                  onRemoveStage={removeLeadKanbanStage}
+                />
               </div>
             ) : (
               <div>
@@ -1252,40 +751,18 @@ export default function ChatbotFlowsAdmin() {
               </div>
             )}
 
-            <div className="border-t border-slate-200 pt-4 space-y-2">
-              <div className="text-sm font-semibold text-slate-700">Preview</div>
-              {!editing.id ? (
-                <div className="text-sm text-slate-500">Salve o flow primeiro para habilitar o preview.</div>
-              ) : (
-                <>
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                    <div>
-                      <label className="block text-xs font-semibold text-slate-600">Input</label>
-                      <input className="input" value={previewInput} onChange={(e) => setPreviewInput(e.target.value)} disabled={previewLoading || editingLoading} />
-                    </div>
-                    <div>
-                      <label className="block text-xs font-semibold text-slate-600">State (JSON)</label>
-                      <input className="input font-mono text-xs" value={previewStateJson} onChange={(e) => setPreviewStateJson(e.target.value)} disabled={previewLoading || editingLoading} />
-                    </div>
-                  </div>
-                  <div>
-                    <button type="button" className="btn btn-secondary" onClick={() => void onPreview()} disabled={previewLoading || editingLoading}>
-                      {previewLoading ? 'Executando...' : 'Executar preview'}
-                    </button>
-                    <div className="text-xs text-slate-500 mt-2">Obs: preview usa a definição salva no backend. Salve para refletir alterações.</div>
-                  </div>
-                  {previewOut && (
-                    <div className="text-sm bg-slate-50 border border-slate-200 rounded-lg p-3 space-y-2">
-                      <div><span className="font-semibold">Mensagem:</span> {previewOut.message}</div>
-                      <div>
-                        <div className="font-semibold">State:</div>
-                        <pre className="text-xs bg-white border border-slate-200 rounded p-2 overflow-auto">{JSON.stringify(previewOut.state, null, 2)}</pre>
-                      </div>
-                    </div>
-                  )}
-                </>
-              )}
-            </div>
+            <FlowPreviewPanel
+              canPreview={Boolean(editing.id)}
+              previewInput={previewInput}
+              previewStateJson={previewStateJson}
+              previewLoading={previewLoading}
+              previewOut={previewOut}
+              onChangePreviewInput={setPreviewInput}
+              onChangePreviewStateJson={setPreviewStateJson}
+              onRunPreview={() => void onPreview()}
+              onResetPreview={onResetPreview}
+              disabled={editingLoading}
+            />
 
             {jsonError && <p className="text-red-600 text-sm">{jsonError}</p>}
             <div className="flex items-center gap-4">
@@ -1297,68 +774,17 @@ export default function ChatbotFlowsAdmin() {
       )}
 
       {!editing && (
-        <div className="card space-y-4">
-          <div className="flex justify-between items-start">
-            <div>
-              <h2 className="font-bold">Flow Publicado</h2>
-              {published ? (
-                <p className="text-sm text-slate-600">{published.name} (v{published.published_version})</p>
-              ) : (
-                <p className="text-sm text-slate-500">Nenhum flow publicado.</p>
-              )}
-            </div>
-            <div className="flex items-center gap-2">
-              <button onClick={() => void publishByVersion()} className="btn btn-secondary">Publicar por versão</button>
-              <button onClick={() => void createFromTemplate()} className="btn btn-secondary">Criar do template</button>
-              <button onClick={() => void openNewFlow()} className="btn btn-primary">Novo Flow</button>
-            </div>
-          </div>
-          <div className="overflow-x-auto">
-            <table className="table min-w-full text-sm">
-              <thead>
-                <tr className="text-left text-slate-600">
-                  <th>Nome</th>
-                  <th>Status</th>
-                  <th>Versão</th>
-                  <th>Atualizado em</th>
-                  <th>Arquivado em</th>
-                  <th>Ações</th>
-                </tr>
-              </thead>
-              <tbody>
-                {flows.map(flow => (
-                  <tr key={flow.id} className="table-row">
-                    <td>{flow.name}</td>
-                    <td>
-                      {flow.is_archived ? (
-                        <span className='badge badge-neutral'>Arquivado</span>
-                      ) : flow.is_published ? (
-                        <span className='badge badge-success'>Publicado</span>
-                      ) : (
-                        <span className='badge badge-neutral'>Draft</span>
-                      )}
-                    </td>
-                    <td>{flow.published_version || '-'}</td>
-                    <td>{flow.updated_at ? new Date(flow.updated_at).toLocaleString() : '-'}</td>
-                    <td>{flow.archived_at ? new Date(flow.archived_at).toLocaleString() : '-'}</td>
-                    <td className="flex gap-2">
-                      <button onClick={() => void openEditFlow(flow.id)} className="btn btn-sm btn-secondary">Editar</button>
-                      <button onClick={() => void cloneFlow(flow.id)} className="btn btn-sm btn-secondary">Clonar</button>
-                      {!flow.is_archived && !flow.is_published && (
-                        <button onClick={() => onPublish(flow.id)} className="btn btn-sm btn-primary">Publicar</button>
-                      )}
-                      {flow.is_archived ? (
-                        <button onClick={() => void setArchived(flow.id, false)} className="btn btn-sm btn-secondary">Desarquivar</button>
-                      ) : (
-                        <button onClick={() => void setArchived(flow.id, true)} className="btn btn-sm btn-secondary">Arquivar</button>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
+        <ChatbotFlowsTable
+          flows={flows}
+          published={published ? { domain: published.domain, name: published.name, published_version: published.published_version } : null}
+          onPublishByVersion={() => void publishByVersion()}
+          onCreateFromTemplate={() => void createFromTemplate()}
+          onOpenNewFlow={() => void openNewFlow()}
+          onOpenEditFlow={(flowId) => void openEditFlow(flowId)}
+          onCloneFlow={(flowId) => void cloneFlow(flowId)}
+          onPublishFlow={(flowId) => onPublish(flowId)}
+          onSetArchived={(flowId, archived) => void setArchived(flowId, archived)}
+        />
       )}
     </section>
   );
