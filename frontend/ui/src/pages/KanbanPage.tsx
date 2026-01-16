@@ -20,21 +20,21 @@ export default function KanbanPage() {
     try {
       const raw = localStorage.getItem('atendeja.ui.compact')
       if (raw !== null) return raw === '1'
-    } catch {}
+    } catch { void 0 }
     return !!ui.ui?.compactDefault
   })
-  const [colWidth, setColWidth] = useState<number>(() => {
+  const [colWidth] = useState<number>(() => {
     try {
       const raw = localStorage.getItem('atendeja.ui.colWidth')
       if (raw !== null) return Number(raw)
-    } catch {}
+    } catch { void 0 }
     return ui.ui?.columnWidth ?? 280
   })
   const [targetCols, setTargetCols] = useState<number>(() => {
     try {
       const raw = localStorage.getItem('atendeja.ui.targetCols')
       if (raw !== null) return Number(raw)
-    } catch {}
+    } catch { void 0 }
     return ui.ui?.targetColumnsDefault ?? 7
   })
   const boardRef = useRef<HTMLDivElement | null>(null)
@@ -169,7 +169,7 @@ export default function KanbanPage() {
               onClick={() => {
                 const next = !compact
                 setCompact(next)
-                try { localStorage.setItem('atendeja.ui.compact', next ? '1' : '0') } catch {}
+                try { localStorage.setItem('atendeja.ui.compact', next ? '1' : '0') } catch { void 0 }
               }}
             >
               {compact ? 'Visualização Padrão' : 'Visualização Compacta'}
@@ -182,7 +182,7 @@ export default function KanbanPage() {
                 onChange={(e) => {
                   const v = Number(e.target.value)
                   setTargetCols(v)
-                  try { localStorage.setItem('atendeja.ui.targetCols', String(v)) } catch {}
+                  try { localStorage.setItem('atendeja.ui.targetCols', String(v)) } catch { void 0 }
                 }}
               >
                 <option value={5}>5</option>

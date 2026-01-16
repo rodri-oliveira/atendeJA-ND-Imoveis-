@@ -23,6 +23,7 @@ class VehicleListing:
     transmission: str | None
     fuel: str | None
     images: list[str]
+    accessories: list[str]
 
 
 def normalize_url(url: str) -> str:
@@ -38,11 +39,120 @@ def external_key_from_url(url: str) -> str:
     return hashlib.sha256(norm.encode("utf-8")).hexdigest()
 
 
+def _is_probably_vehicle_photo(url: str) -> bool:
+    u = (url or "").strip()
+    if not u:
+        return False
+    lu = u.lower()
+    if lu.startswith("data:"):
+        return False
+    try:
+        p = urlparse(lu)
+        path = (p.path or "").lower()
+    except Exception:
+        path = lu
+
+    # Exclude obvious non-photos / branding assets
+    if path.endswith((".svg", ".ico")):
+        return False
+    if any(k in path for k in [
+        "favicon",
+        "logo",
+        "brand",
+        "sprite",
+        "icon",
+        "header",
+        "footer",
+        "navbar",
+        "menu",
+        "social",
+        "whatsapp",
+        "facebook",
+        "instagram",
+        "tiktok",
+        "placeholder",
+        "noimage",
+        "default",
+        "banner",
+    ]):
+        return False
+
+    return True
+
+
+def _extract_accessories(soup: BeautifulSoup) -> list[str]:
+    def norm(s: str) -> str:
+        return re.sub(r"\s+", " ", (s or "").strip())
+
+    out: list[str] = []
+
+    # Prefer explicit section titled "Acessórios" (ClickGarage renders it like that)
+    section_title = None
+    for tag in soup.find_all(["h1", "h2", "h3", "h4", "h5", "h6"]):
+        txt = norm(tag.get_text(" ", strip=True))
+        if not txt:
+            continue
+        lt = txt.lower()
+        if "acess" in lt:
+            section_title = tag
+            break
+
+    if section_title is not None:
+        lst = section_title.find_next(["ul", "ol"])
+        if lst is not None:
+            for li in lst.find_all("li", limit=120):
+                t = norm(li.get_text(" ", strip=True))
+                if not t:
+                    continue
+                if len(t) > 80:
+                    continue
+                out.append(t)
+
+    # Dedup preserving order
+    dedup: list[str] = []
+    seen: set[str] = set()
+    for x in out:
+        k = x.lower()
+        if k in seen:
+            continue
+        seen.add(k)
+        dedup.append(x)
+    return dedup[:40]
+
+
 def _parse_price(text: str) -> float | None:
     t = (text or "").strip()
     if not t:
         return None
-    n = re.sub(r"[^0-9,\.]", "", t).replace(".", "").replace(",", ".")
+
+    # Robust BR formats:
+    # - "99.900,00" (thousand='.', decimal=',')
+    # - "99,900,00" (thousand=',', decimal=',')
+    # - "99900" / "99900.00"
+    raw = re.sub(r"[^0-9,\.]", "", t)
+    if not raw:
+        return None
+
+    # If both separators exist, decide decimal separator by last occurrence.
+    if "," in raw and "." in raw:
+        if raw.rfind(",") > raw.rfind("."):
+            # decimal is ',' -> remove '.' thousand sep and normalize last ',' to '.'
+            raw = raw.replace(".", "")
+            raw = raw.replace(",", ".")
+        else:
+            # decimal is '.' -> remove ',' thousand sep
+            raw = raw.replace(",", "")
+    elif raw.count(",") >= 2 and "." not in raw:
+        # e.g. "216,900,00" -> keep last ',' as decimal
+        parts = raw.split(",")
+        dec = parts[-1]
+        intp = "".join(parts[:-1])
+        raw = f"{intp}.{dec}"
+    elif raw.count(",") == 1 and "." not in raw:
+        # e.g. "99900,00" or "99900,0"
+        raw = raw.replace(",", ".")
+
+    n = raw
     try:
         v = float(n)
         if v <= 0:
@@ -93,6 +203,7 @@ def parse_vehicle_listing(*, html: str, page_url: str) -> VehicleListing:
     transmission: str | None = None
     fuel: str | None = None
     images: list[str] = []
+    accessories: list[str] = []
 
     # Layer 1: JSON-LD
     for doc in _extract_json_ld(soup):
@@ -122,6 +233,28 @@ def parse_vehicle_listing(*, html: str, page_url: str) -> VehicleListing:
             model = model or doc.get("model")
             break
 
+    if title:
+        # Normalize common noisy prefixes like "Veiculo -" (including unicode dashes)
+        title = (
+            re.sub(
+                r"^\s*(ve[ií]culo|carro)\s*[-:\u2013\u2014]+\s*",
+                "",
+                str(title),
+                flags=re.IGNORECASE,
+            )
+            .strip()
+            or title
+        )
+
+    if not description:
+        ogd = soup.find("meta", property="og:description")
+        if ogd and ogd.get("content"):
+            description = str(ogd.get("content") or "").strip() or description
+    if not description:
+        md = soup.find("meta", attrs={"name": "description"})
+        if md and md.get("content"):
+            description = str(md.get("content") or "").strip() or description
+
     # Layer 1.5: OpenGraph/meta
     if not title:
         ogt = soup.find("meta", property="og:title")
@@ -135,10 +268,57 @@ def parse_vehicle_listing(*, html: str, page_url: str) -> VehicleListing:
     # Layer 2: Heuristics
     text = soup.get_text(" ", strip=True)
 
-    if price is None:
-        m = re.search(r"R\$\s*[0-9\.]+(?:,[0-9]{2})?", text)
+    # ClickGarage-like labels (common in car dealer sites)
+    if km is None:
+        m = re.search(r"quilometragem\s*([0-9\.]{1,12})\b", text, flags=re.IGNORECASE)
         if m:
-            price = _parse_price(m.group(0))
+            km = _parse_int(m.group(1))
+
+    if year is None:
+        # Ex: "Ano/Modelo 2023 / 2023"
+        m = re.search(r"ano\s*/\s*modelo\s*([12][0-9]{3})", text, flags=re.IGNORECASE)
+        if m:
+            year = _parse_int(m.group(1))
+        if year is None:
+            m = re.search(r"ano\s*/\s*modelo\s*([12][0-9]{3})\s*/\s*([12][0-9]{3})", text, flags=re.IGNORECASE)
+            if m:
+                year = _parse_int(m.group(1))
+
+    if transmission is None:
+        # Ex: "Câmbio AUTOMÁTICO"
+        m = re.search(r"c[âa]mbio\s*([a-z\s]{3,20})", text, flags=re.IGNORECASE)
+        if m:
+            v = (m.group(1) or "").strip().lower()
+            if "auto" in v:
+                transmission = "automatic"
+            elif "man" in v:
+                transmission = "manual"
+
+    if fuel is None:
+        m = re.search(r"combust[ií]vel\s*([a-z\s]{3,20})", text, flags=re.IGNORECASE)
+        if m:
+            v = (m.group(1) or "").strip().lower()
+            if "flex" in v:
+                fuel = "flex"
+            elif "diesel" in v:
+                fuel = "diesel"
+            elif "gasolina" in v:
+                fuel = "gasoline"
+            elif "etanol" in v:
+                fuel = "ethanol"
+
+    if price is None:
+        matches = re.findall(r"R\$\s*[0-9\.,]{1,16}", text)
+        candidates: list[float] = []
+        for raw in matches:
+            v = _parse_price(raw)
+            if v is None:
+                continue
+            if v < 1000:
+                continue
+            candidates.append(v)
+        if candidates:
+            price = max(candidates)
 
     if year is None:
         m = re.search(r"\b(19[8-9]\d|20[0-3]\d)\b", text)
@@ -146,9 +326,17 @@ def parse_vehicle_listing(*, html: str, page_url: str) -> VehicleListing:
             year = _parse_int(m.group(0))
 
     if km is None:
-        m = re.search(r"([0-9\.]{1,12})\s*km\b", text.lower())
-        if m:
-            km = _parse_int(m.group(1))
+        kms = re.findall(r"([0-9\.]{1,12})\s*km\b", text.lower())
+        km_candidates: list[int] = []
+        for raw in kms:
+            v = _parse_int(raw)
+            if v is None:
+                continue
+            if v <= 0:
+                continue
+            km_candidates.append(v)
+        if km_candidates:
+            km = max(km_candidates)
 
     tl = text.lower()
     if transmission is None:
@@ -169,13 +357,28 @@ def parse_vehicle_listing(*, html: str, page_url: str) -> VehicleListing:
 
     # Layer 2.5: title-derived make/model
     if title and (make is None or model is None):
-        # naive split: "Marca Modelo ..."
-        parts = re.split(r"\s+", title.strip())
+        # naive split: "Marca Modelo ..." with common noisy prefixes
+        parts = [p for p in re.split(r"\s+", title.strip()) if p and p not in {"-", "–", "—"}]
+        if parts and parts[0].lower() in {"veiculo", "veículo", "carro"}:
+            parts = parts[1:]
         if len(parts) >= 2:
-            make = make or parts[0]
-            model = model or parts[1]
+            cand_make = parts[0]
+            cand_model = parts[1]
+            if cand_make.lower() in {"veiculo", "veículo", "carro"}:
+                cand_make = ""
+            if cand_model in {"-", "–", "—"}:
+                cand_model = ""
+            make = make or (cand_make or None)
+            model = model or (cand_model or None)
+
+    # Guardrails: never keep invalid placeholders
+    if make and make.strip().lower() in {"veiculo", "veículo", "carro", "-"}:
+        make = None
+    if model and model.strip() in {"-", "–", "—"}:
+        model = None
 
     images = [i for i in images if i]
+    images = [i for i in images if _is_probably_vehicle_photo(str(i))]
     if images:
         # remove duplicates preserving order
         dedup: list[str] = []
@@ -186,6 +389,30 @@ def parse_vehicle_listing(*, html: str, page_url: str) -> VehicleListing:
             seen.add(u)
             dedup.append(u)
         images = dedup[:15]
+
+    if not images:
+        img_urls: list[str] = []
+        for img in soup.find_all("img"):
+            u = img.get("data-src") or img.get("data-original") or img.get("src")
+            if not u:
+                continue
+            u = str(u).strip()
+            if not u:
+                continue
+            if not _is_probably_vehicle_photo(u):
+                continue
+            img_urls.append(u)
+        if img_urls:
+            dedup: list[str] = []
+            seen: set[str] = set()
+            for u in img_urls:
+                if u in seen:
+                    continue
+                seen.add(u)
+                dedup.append(u)
+            images = dedup[:15]
+
+    accessories = _extract_accessories(soup)
 
     return VehicleListing(
         url=page_url,
@@ -199,4 +426,5 @@ def parse_vehicle_listing(*, html: str, page_url: str) -> VehicleListing:
         transmission=transmission,
         fuel=fuel,
         images=images,
+        accessories=accessories,
     )

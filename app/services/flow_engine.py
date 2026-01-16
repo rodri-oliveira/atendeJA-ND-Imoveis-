@@ -13,6 +13,7 @@ from app.domain.chatbot.handler_factory import get_conversation_handler_for_doma
 from app.domain.realestate import detection_utils as detect
 from app.domain.realestate import message_formatters as fmt
 from app.domain.realestate.models import Lead, Property, PropertyImage, PropertyPurpose, PropertyType
+from app.domain.catalog.models import CatalogItem, CatalogItemType
 from app.domain.realestate.validation_utils import validate_bedrooms, validate_city, validate_price
 from app.services.lead_service import LeadService
 from app.services.visit_service import VisitService
@@ -114,7 +115,21 @@ class FlowEngine:
         if not node:
             return FlowEngineResult(message="", state=state, continue_loop=False, handled=False)
 
-        if node.type == "handler":
+        if node.type == "static_message":
+            msg, new_state, continue_loop = self._process_static_message(node=node, state=state)
+        elif node.type == "end":
+            msg, new_state, continue_loop = self._process_end(node=node, state=state)
+        elif node.type == "set_state":
+            msg, new_state, continue_loop = self._process_set_state(node=node, state=state)
+        elif node.type == "capture_text":
+            msg, new_state, continue_loop = self._process_capture_text(node=node, text_raw=text_raw, state=state)
+        elif node.type == "capture_number":
+            msg, new_state, continue_loop = self._process_capture_number(node=node, text_raw=text_raw, state=state)
+        elif node.type == "capture_phone_generic":
+            msg, new_state, continue_loop = self._process_capture_phone_generic(node=node, text_raw=text_raw, state=state)
+        elif node.type == "execute_vehicle_search":
+            msg, new_state, continue_loop = self._process_execute_vehicle_search(node=node, state=state)
+        elif node.type == "handler":
             if not node.handler:
                 return FlowEngineResult(message="", state=state, continue_loop=False, handled=False)
 
@@ -257,6 +272,315 @@ class FlowEngine:
         # Em V1 a engine não implementa loop interno. Isso fica com o MCP.
         return FlowEngineResult(message=msg, state=new_state, continue_loop=bool(continue_loop), handled=True)
 
+    def _get_by_path(self, obj: Dict[str, Any], path: str) -> Any:
+        raw = (path or "").strip()
+        if not raw:
+            return None
+        cur: Any = obj
+        for part in raw.split("."):
+            if not isinstance(cur, dict):
+                return None
+            cur = cur.get(part)
+        return cur
+
+    def _set_by_path(self, obj: Dict[str, Any], path: str, value: Any) -> None:
+        raw = (path or "").strip()
+        if not raw:
+            return
+        parts = raw.split(".")
+        cur: Dict[str, Any] = obj
+        for p in parts[:-1]:
+            nxt = cur.get(p)
+            if not isinstance(nxt, dict):
+                nxt = {}
+                cur[p] = nxt
+            cur = nxt
+        cur[parts[-1]] = value
+
+    def _process_static_message(self, *, node: FlowNodeV1, state: Dict[str, Any]) -> Tuple[str, Dict[str, Any], bool]:
+        # Send prompt and advance to default transition (if any) in the same MCP request.
+        next_stage = self._default_transition(node)
+        if next_stage:
+            state["stage"] = next_stage
+            return ((node.prompt or ""), state, True)
+        return ((node.prompt or ""), state, False)
+
+    def _process_end(self, *, node: FlowNodeV1, state: Dict[str, Any]) -> Tuple[str, Dict[str, Any], bool]:
+        # End node: optional message, then reset stage to start so next inbound can restart safely.
+        # This avoids FlowEngine returning handled=False on subsequent messages.
+        msg = (node.prompt or "").strip()
+        state["stage"] = "start"
+        state["flow_ended"] = True
+        return (msg, state, False)
+
+    def _process_set_state(self, *, node: FlowNodeV1, state: Dict[str, Any]) -> Tuple[str, Dict[str, Any], bool]:
+        config = node.config or {}
+        if not isinstance(config, dict):
+            config = {}
+        patch = config.get("set")
+        if isinstance(patch, dict):
+            for k, v in patch.items():
+                if isinstance(k, str) and k.strip():
+                    self._set_by_path(state, k, v)
+        next_stage = self._default_transition(node)
+        if next_stage:
+            state["stage"] = next_stage
+            return ("", state, True)
+        return ("", state, False)
+
+    def _process_capture_phone_generic(self, *, node: FlowNodeV1, text_raw: str, state: Dict[str, Any]) -> Tuple[str, Dict[str, Any], bool]:
+        config = node.config or {}
+        if not isinstance(config, dict):
+            config = {}
+
+        target = config.get("target")
+        if not isinstance(target, str) or not target.strip():
+            target = "car_dealer.phone"
+
+        prompt_key = "_flow_prompt_stage"
+        if state.get(prompt_key) != node.id:
+            state[prompt_key] = node.id
+            return ((node.prompt or ""), state, False)
+
+        raw = "".join(ch for ch in (text_raw or "") if ch.isdigit())
+        min_digits = config.get("min_digits")
+        max_digits = config.get("max_digits")
+        try:
+            min_digits_int = int(min_digits) if min_digits is not None else 10
+        except Exception:
+            min_digits_int = 10
+        try:
+            max_digits_int = int(max_digits) if max_digits is not None else 13
+        except Exception:
+            max_digits_int = 13
+
+        if len(raw) < min_digits_int or len(raw) > max_digits_int:
+            invalid = config.get("invalid_message")
+            if isinstance(invalid, str) and invalid.strip():
+                return (invalid, state, False)
+            return ((node.prompt or ""), state, False)
+
+        self._set_by_path(state, target, raw)
+
+        lead_status = config.get("lead_status")
+        if isinstance(lead_status, str) and lead_status.strip():
+            name_path = config.get("lead_name_path")
+            email_path = config.get("lead_email_path")
+            name = self._get_by_path(state, str(name_path)) if isinstance(name_path, str) and name_path.strip() else None
+            email = self._get_by_path(state, str(email_path)) if isinstance(email_path, str) and email_path.strip() else None
+            try:
+                LeadService.upsert_lead_status(
+                    self.db,
+                    phone=raw,
+                    state=state,
+                    status=lead_status.strip(),
+                    name=(str(name).strip() if isinstance(name, str) and str(name).strip() else None),
+                    email=(str(email).strip() if isinstance(email, str) and str(email).strip() else None),
+                )
+            except Exception:
+                pass
+
+        state.pop(prompt_key, None)
+        next_stage = self._default_transition(node)
+        if next_stage:
+            state["stage"] = next_stage
+            return ("", state, True)
+        return ("", state, False)
+
+    def _process_capture_text(self, *, node: FlowNodeV1, text_raw: str, state: Dict[str, Any]) -> Tuple[str, Dict[str, Any], bool]:
+        config = node.config or {}
+        if not isinstance(config, dict):
+            config = {}
+
+        target = config.get("target")
+        if not isinstance(target, str) or not target.strip():
+            # Without target, cannot persist.
+            return (node.prompt or "", state, False)
+
+        prompt_key = "_flow_prompt_stage"
+        if state.get(prompt_key) != node.id:
+            state[prompt_key] = node.id
+            return ((node.prompt or ""), state, False)
+
+        val = (text_raw or "").strip()
+        min_len = config.get("min_len")
+        try:
+            min_len_int = int(min_len) if min_len is not None else 1
+        except Exception:
+            min_len_int = 1
+        if len(val) < max(1, min_len_int):
+            return ((node.prompt or ""), state, False)
+
+        self._set_by_path(state, target, val)
+        state.pop(prompt_key, None)
+        next_stage = self._default_transition(node)
+        if next_stage:
+            state["stage"] = next_stage
+            return ("", state, True)
+        return ("", state, False)
+
+    def _process_capture_number(self, *, node: FlowNodeV1, text_raw: str, state: Dict[str, Any]) -> Tuple[str, Dict[str, Any], bool]:
+        config = node.config or {}
+        if not isinstance(config, dict):
+            config = {}
+
+        target = config.get("target")
+        if not isinstance(target, str) or not target.strip():
+            return (node.prompt or "", state, False)
+
+        prompt_key = "_flow_prompt_stage"
+        if state.get(prompt_key) != node.id:
+            state[prompt_key] = node.id
+            return ((node.prompt or ""), state, False)
+
+        raw = (text_raw or "").strip().lower()
+        cleaned = raw.replace("r$", " ").replace(".", " ").replace(",", " ")
+        digits = "".join(ch for ch in cleaned if ch.isdigit())
+        if not digits:
+            return ((node.prompt or ""), state, False)
+
+        try:
+            n = int(digits)
+        except Exception:
+            return ((node.prompt or ""), state, False)
+
+        if bool(config.get("treat_as_thousands")) and n < 1000:
+            n = n * 1000
+
+        min_v = config.get("min")
+        max_v = config.get("max")
+        try:
+            if min_v is not None and n < int(min_v):
+                return ((node.prompt or ""), state, False)
+        except Exception:
+            pass
+        try:
+            if max_v is not None and n > int(max_v):
+                return ((node.prompt or ""), state, False)
+        except Exception:
+            pass
+
+        self._set_by_path(state, target, n)
+        state.pop(prompt_key, None)
+        next_stage = self._default_transition(node)
+        if next_stage:
+            state["stage"] = next_stage
+            return ("", state, True)
+        return ("", state, False)
+
+    def _process_execute_vehicle_search(self, *, node: FlowNodeV1, state: Dict[str, Any]) -> Tuple[str, Dict[str, Any], bool]:
+        config = node.config or {}
+        if not isinstance(config, dict):
+            config = {}
+
+        tenant_id = int(state.get("tenant_id") or 0)
+        if not tenant_id:
+            return ("Não consegui identificar o tenant para buscar veículos.", state, False)
+
+        query_path = config.get("query_path") or "car_dealer.query"
+        budget_path = config.get("budget_max_path") or "car_dealer.budget_max"
+        results_path = config.get("results_path") or "car_dealer.search_results"
+        limit = config.get("limit")
+        try:
+            limit_int = int(limit) if limit is not None else 3
+        except Exception:
+            limit_int = 3
+        limit_int = max(1, min(10, limit_int))
+
+        q = str(self._get_by_path(state, str(query_path)) or "").strip().lower()
+        budget_val = self._get_by_path(state, str(budget_path))
+        try:
+            budget_max = int(budget_val) if budget_val is not None else None
+        except Exception:
+            budget_max = None
+
+        item_type = (
+            self.db.query(CatalogItemType)
+            .filter(CatalogItemType.tenant_id == int(tenant_id), CatalogItemType.key == "vehicle")
+            .first()
+        )
+        if not item_type:
+            self._set_by_path(state, results_path, [])
+            next_stage = self._default_transition(node)
+            if next_stage:
+                state["stage"] = next_stage
+            return ("Ainda não há catálogo de veículos configurado.", state, False)
+
+        rows = (
+            self.db.query(CatalogItem)
+            .filter(
+                CatalogItem.tenant_id == int(tenant_id),
+                CatalogItem.item_type_id == int(item_type.id),
+                CatalogItem.is_active == True,  # noqa: E712
+            )
+            .order_by(CatalogItem.id.desc())
+            .limit(120)
+            .all()
+        )
+
+        def norm(s: str) -> str:
+            return " ".join((s or "").strip().lower().split())
+
+        qn = norm(q)
+        results: list[dict[str, Any]] = []
+        for r in rows:
+            title = str(getattr(r, "title", "") or "")
+            attrs = dict(getattr(r, "attributes", {}) or {})
+            hay = norm(" ".join([title, str(attrs.get("make") or ""), str(attrs.get("model") or "")]))
+            if qn and qn not in hay:
+                continue
+
+            price = attrs.get("price")
+            try:
+                price_n = float(price) if price is not None else None
+            except Exception:
+                price_n = None
+            if budget_max is not None and price_n is not None and price_n > float(budget_max):
+                continue
+
+            results.append(
+                {
+                    "id": int(r.id),
+                    "title": title,
+                    "price": price_n,
+                    "year": attrs.get("year"),
+                    "km": attrs.get("km"),
+                }
+            )
+            if len(results) >= limit_int:
+                break
+
+        self._set_by_path(state, results_path, results)
+
+        # Format message (or allow override in config)
+        if not results:
+            msg = str(config.get("empty_message") or "Não encontrei veículos com esse perfil.")
+        else:
+            header = str(config.get("header") or "Encontrei essas opções:")
+            lines = [header]
+            for idx, it in enumerate(results, start=1):
+                price = it.get("price")
+                price_str = f"R$ {price:,.0f}".replace(",", ".") if isinstance(price, (int, float)) else "Consulte"
+                year = it.get("year")
+                km = it.get("km")
+                extras = []
+                if year is not None:
+                    extras.append(str(year))
+                if km is not None:
+                    try:
+                        extras.append(f"{int(km):,} km".replace(",", "."))
+                    except Exception:
+                        extras.append(str(km))
+                extra_str = " • ".join(extras)
+                lines.append(f"{idx}) {it.get('title') or 'Veículo'} — {price_str}" + (f" ({extra_str})" if extra_str else ""))
+            msg = "\n".join(lines)
+
+        next_stage = self._default_transition(node)
+        if next_stage:
+            state["stage"] = next_stage
+            return (msg, state, True)
+        return (msg, state, False)
+
     def _resolve_node(self, flow: ChatbotFlowDefinitionV1, node_id: str) -> Optional[FlowNodeV1]:
         by_id = flow.node_by_id()
         return by_id.get(node_id)
@@ -338,19 +662,23 @@ class FlowEngine:
             self._maybe_execute_transition_actions(transition=transition, sender_id=sender_id, state=state)
             new_state = self._apply_transition_effects(state=state, transition=transition, sender_id=sender_id)
 
+            # Limpa o marcador de prompt ANTES de definir o novo stage
+            new_state.pop(prompt_stage_key, None)
+
             # Permite encerrar a conversa sem forçar stage (ex.: usuário não quer agendar)
             if getattr(transition, "to", None):
                 new_state["stage"] = transition.to
 
-            # Se permanecer no mesmo nó, mantemos o marcador para permitir retry.
-            if transition.to != node.id:
-                new_state.pop(prompt_stage_key, None)
-                # Continua o loop para processar o próximo stage na mesma requisição.
-                return (
-                    self._transition_message_override(transition, sender_id=sender_id, state=new_state) or "",
-                    new_state,
-                    self._transition_continue_loop(transition, default=True),
-                )
+            # Se o destino for o mesmo nó, não limpamos o marcador (permitindo retry)
+            if transition.to == node.id:
+                new_state[prompt_stage_key] = node.id
+
+            # Continua o loop para processar o próximo stage na mesma requisição.
+            return (
+                self._transition_message_override(transition, sender_id=sender_id, state=new_state) or "",
+                new_state,
+                self._transition_continue_loop(transition, default=True),
+            )
 
             # retry no mesmo nó
             return (
@@ -366,6 +694,13 @@ class FlowEngine:
         default_transition: Optional[Any] = None
         for t in (node.transitions or []):
             when = t.when or {}
+
+            # Se não há condição explícita, tratamos como default.
+            # Isso evita ficar preso em nós de prompt quando a UI cria transições
+            # sem configurar `when`.
+            if not when and default_transition is None:
+                default_transition = t
+                continue
 
             if when.get("default") is True:
                 default_transition = t

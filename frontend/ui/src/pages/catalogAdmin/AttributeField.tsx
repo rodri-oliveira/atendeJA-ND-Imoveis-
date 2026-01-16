@@ -21,7 +21,7 @@ export default function AttributeField({ field: f, value, disabled, onChange }: 
     )
   }
 
-  if (f.type === 'enum') {
+  if (f.type === 'select') {
     return (
       <div key={k}>
         <label className="block text-sm font-medium text-slate-700 mb-2">{label}</label>
@@ -34,7 +34,7 @@ export default function AttributeField({ field: f, value, disabled, onChange }: 
         >
           <option value="">Selecione</option>
           {(f.options || []).map(opt => (
-            <option key={opt} value={opt}>{opt}</option>
+            <option key={opt.value} value={opt.value}>{opt.label}</option>
           ))}
         </select>
       </div>

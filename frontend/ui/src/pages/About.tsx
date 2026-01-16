@@ -20,8 +20,9 @@ export default function About() {
         if (!r.ok) throw new Error(`HTTP ${r.status}`)
         const js = await r.json()
         if (alive) setCfg(js)
-      } catch (e: any) {
-        if (alive) setErr(e?.message || 'erro')
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : 'erro'
+        if (alive) setErr(msg)
       }
     })()
     return () => { alive = false }
@@ -94,7 +95,7 @@ export default function About() {
             <div>
               <span className="font-medium text-slate-900">Importar CSV de Imóveis</span>
               <p className="text-sm text-slate-600 mt-1">
-                Acesse <span className="font-mono bg-white px-1 rounded">Imobiliário &gt; Importar CSV</span>. Após enviar, clique em "Ver imóveis".
+                Acesse <span className="font-mono bg-white px-1 rounded">Imobiliário &gt; Importar CSV</span>. Após enviar, clique em &quot;Ver imóveis&quot;.
               </p>
             </div>
           </li>

@@ -600,3 +600,40 @@ def get_vehicle_ingestion_run(tenant_id: int, run_id: int, db: Session = Depends
         started_at=run.started_at.isoformat() if getattr(run, "started_at", None) else "",
         finished_at=run.finished_at.isoformat() if getattr(run, "finished_at", None) else None,
     )
+
+
+class VehicleIngestionErrorOut(BaseModel):
+    id: int
+    run_id: int
+    url: str | None
+    step: str | None
+    error_message: str | None
+    created_at: str
+
+
+@router.get("/tenants/{tenant_id}/ingestion/runs/{run_id}/errors", response_model=list[VehicleIngestionErrorOut])
+def get_vehicle_ingestion_run_errors(tenant_id: int, run_id: int, db: Session = Depends(get_db)):
+    t = db.get(Tenant, int(tenant_id))
+    if not t:
+        raise HTTPException(status_code=404, detail="tenant_not_found")
+    run = db.get(CatalogIngestionRun, int(run_id))
+    if not run or int(run.tenant_id) != int(t.id):
+        raise HTTPException(status_code=404, detail="run_not_found")
+
+    errors = (
+        db.query(CatalogIngestionError)
+        .filter(CatalogIngestionError.run_id == int(run.id))
+        .order_by(CatalogIngestionError.id.asc())
+        .all()
+    )
+    return [
+        VehicleIngestionErrorOut(
+            id=int(e.id),
+            run_id=int(e.run_id),
+            url=str(e.url) if e.url else None,
+            step=str(e.step) if e.step else None,
+            error_message=str(e.error_message) if e.error_message else None,
+            created_at=e.created_at.isoformat() if getattr(e, "created_at", None) else "",
+        )
+        for e in errors
+    ]

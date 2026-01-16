@@ -5,7 +5,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 
-CatalogFieldType = Literal["string", "number", "boolean", "enum"]
+CatalogFieldType = Literal["string", "number", "boolean", "enum", "string_list"]
 
 
 class CatalogFieldDefinition(BaseModel):
@@ -86,6 +86,9 @@ def validate_attributes(*, schema: dict, attributes: dict) -> None:
                 raise ValueError(f"invalid_attribute_type: {k}")
         elif fd.type == "boolean":
             if not isinstance(v, bool):
+                raise ValueError(f"invalid_attribute_type: {k}")
+        elif fd.type == "string_list":
+            if not isinstance(v, list) or any((not isinstance(x, str)) for x in v):
                 raise ValueError(f"invalid_attribute_type: {k}")
         elif fd.type == "enum":
             if not isinstance(v, str):

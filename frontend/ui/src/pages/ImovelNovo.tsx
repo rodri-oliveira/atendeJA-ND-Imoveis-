@@ -28,7 +28,7 @@ export default function ImovelNovo() {
   const [files, setFiles] = useState<File[]>([])
   const MAX_FILES = 10
 
-  function upd<K extends keyof typeof form>(k: K, v: any) {
+  function upd<K extends keyof typeof form>(k: K, v: (typeof form)[K]) {
     setForm(prev => ({ ...prev, [k]: v }))
   }
 
@@ -56,7 +56,7 @@ export default function ImovelNovo() {
       setError('Preço deve ser um número maior que zero.')
       return
     }
-    const payload: any = {
+    const payload: Record<string, unknown> = {
       titulo: form.titulo,
       descricao: form.descricao || null,
       tipo: form.tipo,
@@ -99,8 +99,9 @@ export default function ImovelNovo() {
         }
       }
       navigate(`/imoveis/${js.id}`)
-    } catch (e: any) {
-      setError(e?.message || 'Erro ao salvar')
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : 'Erro ao salvar'
+      setError(msg)
     } finally {
       setSaving(false)
     }

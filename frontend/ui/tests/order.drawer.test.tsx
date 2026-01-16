@@ -84,7 +84,7 @@ describe('OrderDrawer', () => {
 
     // botão salvar desabilitado enquanto existir erro de validação (faltam outros campos obrigatórios)
     const btnSalvar = screen.getByText('Salvar endereço') as HTMLButtonElement
-    expect(btnSalvar.disabled).to.be.true
+    expect(btnSalvar.disabled).toBe(true)
   })
 
   it('valida UF com 2 letras e transforma para maiúsculas', async () => {

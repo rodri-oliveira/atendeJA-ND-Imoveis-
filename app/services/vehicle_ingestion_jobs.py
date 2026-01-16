@@ -8,6 +8,8 @@ import anyio
 
 from app.domain.catalog.models import CatalogIngestionError, CatalogIngestionRun
 from app.domain.vehicles_ingestion.service import VehicleIngestionService
+import structlog
+import traceback
 
 
 @dataclass(frozen=True)
@@ -21,31 +23,48 @@ def run_vehicle_ingestion_job(*, tenant_id: int, run_id: int, base_url: str, max
 
     IMPORTANT: runs in a fresh DB session (do not reuse request session).
     """
+    logger = structlog.get_logger().bind(module="vehicle_ingestion_job", tenant_id=int(tenant_id), run_id=int(run_id))
+
     with db_session() as db:
         run = db.get(CatalogIngestionRun, int(run_id))
         if not run:
+            logger.warning("ingestion.run.missing", message="CatalogIngestionRun not found; job will not start")
             return
+
         run.status = "running"
         db.add(run)
         db.commit()
+        logger.info(
+            "ingestion.run.start",
+            base_url=str(base_url),
+            max_listings=int(max_listings),
+            timeout_seconds=float(timeout_seconds),
+            max_listing_pages=int(max_listing_pages),
+        )
 
-        try:
-            anyio.run(
-                VehicleIngestionService(db=db, tenant_id=int(tenant_id)).run,
+        async def _runner() -> None:
+            await VehicleIngestionService(db=db, tenant_id=int(tenant_id)).run(
                 run_id=int(run_id),
                 base_url=base_url,
                 max_listings=int(max_listings),
                 timeout_seconds=float(timeout_seconds),
                 max_listing_pages=int(max_listing_pages),
             )
+
+        try:
+            anyio.run(_runner)
+            db.refresh(run)
+            logger.info("ingestion.run.finish", status=run.status)
         except Exception as e:
-            # Persist a summary error row and mark run as error
+            full_error = traceback.format_exc()
+            logger.error("ingestion.run.exception", error=str(e), traceback=full_error)
             db.add(
                 CatalogIngestionError(
                     tenant_id=int(tenant_id),
                     run_id=int(run_id),
                     url=str(base_url),
-                    error=str(e)[:400],
+                    step="run_job",
+                    error_message=f"{str(e)}\n\n{full_error}"[:2048],
                 )
             )
             run.status = "error"

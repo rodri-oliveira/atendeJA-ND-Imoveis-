@@ -7,7 +7,7 @@ interface ImportResult {
   inserted?: number
   updated?: number
   errors?: Array<{ line?: number; message: string }>
-  [k: string]: any
+  [k: string]: unknown
 }
 
 export default function ImportCsv() {
@@ -49,8 +49,9 @@ export default function ImportCsv() {
       const js = await res.json()
       setResult(js)
       setSuccess(true)
-    } catch (e: any) {
-      setError(e?.message || 'Falha no upload')
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : 'Falha no upload'
+      setError(msg)
       setSuccess(false)
     } finally {
       setLoading(false)

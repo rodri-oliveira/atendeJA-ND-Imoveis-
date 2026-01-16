@@ -56,6 +56,9 @@ function allowContact(wa_id) {
 const lastBotByChat = new Map() // chatId -> { body, ts }
 const ANTI_ECHO_WINDOW_MS = parseInt(process.env.WA_ANTI_ECHO_WINDOW_MS || '30000', 10)
 
+// Override de tenant por chat (permite testar vários tenants sem reiniciar)
+const tenantOverrideByChat = new Map() // chatId -> tenant_id (string)
+
 // Cliente WhatsApp com sessão persistente (sem abrir navegador visível)
 // Detecta caminho do navegador (Chromium baixado pelo Puppeteer ou Chrome local)
 let executablePath
@@ -130,11 +133,12 @@ client.on('disconnected', (reason) => {
 })
 
 // Encaminha mensagem para MCP
-async function sendToMCP(text, senderId) {
+async function sendToMCP(text, senderId, tenantIdOverride) {
+  const tenant_id = (tenantIdOverride || MCP_TENANT_ID || 'default')
   const body = {
     input: String(text || ''),
     sender_id: String(senderId || 'unknown'),
-    tenant_id: MCP_TENANT_ID,
+    tenant_id,
     mode: 'auto',
   }
   const headers = { 'Content-Type': 'application/json' }
@@ -226,8 +230,24 @@ async function handleMessage(msg, source) {
         return
       }
       
+      // Comando de troca de tenant (fromMe)
+      const cmd = text.match(/^(?:#tenant|\/tenant)\s+(\d+)\s*$/i)
+      if (cmd) {
+        const nextTid = String(cmd[1] || '').trim()
+        tenantOverrideByChat.set(chatId, nextTid)
+        const ack = `✅ Tenant de teste definido para ${nextTid} (chat ${chatId}).`
+        if (OUTBOUND_ENABLED) {
+          lastBotByChat.set(chatId, { body: ack, ts: Date.now() })
+          await client.sendMessage(chatId, ack)
+        } else {
+          console.log('[wa] OUTBOUND desabilitado: ack suprimido (fromMe).')
+        }
+        return
+      }
+
       console.log('[wa] ✅ Processando fromMe para:', chatId)
-      const mcp = await sendToMCP(text, chatId)
+      const tenantOverride = tenantOverrideByChat.get(chatId) || null
+      const mcp = await sendToMCP(text, chatId, tenantOverride)
       const reply = mcp?.message || 'Ok.'
       const media = mcp?.media || []
       
@@ -295,7 +315,23 @@ async function handleMessage(msg, source) {
     // Rate limit por contato
     if (!allowContact(chatId)) return
 
-    const mcp = await sendToMCP(text, chatId)
+    // Comando de troca de tenant (inbound)
+    const cmd = text.match(/^(?:#tenant|\/tenant)\s+(\d+)\s*$/i)
+    if (cmd) {
+      const nextTid = String(cmd[1] || '').trim()
+      tenantOverrideByChat.set(chatId, nextTid)
+      const ack = `✅ Tenant de teste definido para ${nextTid}.`
+      if (OUTBOUND_ENABLED) {
+        lastBotByChat.set(chatId, { body: ack, ts: Date.now() })
+        await client.sendMessage(chatId, ack)
+      } else {
+        console.log('[wa] OUTBOUND desabilitado: ack suprimido (inbound).')
+      }
+      return
+    }
+
+    const tenantOverride = tenantOverrideByChat.get(chatId) || null
+    const mcp = await sendToMCP(text, chatId, tenantOverride)
     const reply = mcp?.message || 'Ok.'
     const media = mcp?.media || []
     
@@ -336,8 +372,14 @@ async function handleMessage(msg, source) {
 }
 
 // Registrar listeners para ambos os eventos
-client.on('message', (msg) => handleMessage(msg, 'message'))
-client.on('message_create', (msg) => handleMessage(msg, 'message_create'))
+client.on('message', (msg) => {
+  console.log('[wa-debug] Evento RECEBIDO: message');
+  handleMessage(msg, 'message');
+});
+client.on('message_create', (msg) => {
+  console.log('[wa-debug] Evento RECEBIDO: message_create');
+  handleMessage(msg, 'message_create');
+});
 
 async function main() {
   console.log('[wa] Iniciando adapter WA...')

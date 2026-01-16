@@ -10,7 +10,7 @@ interface OpsConfig {
 
 export default function OpsDashboard() {
   const [config, setConfig] = useState<OpsConfig | null>(null)
-  const [ping, setPing] = useState<any>(null)
+  const [ping, setPing] = useState<Record<string, unknown> | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -32,8 +32,9 @@ export default function OpsDashboard() {
           setConfig(c)
           setPing(p)
         }
-      } catch (e: any) {
-        if (alive) setError(e?.message || 'erro')
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : 'erro'
+        if (alive) setError(msg)
       } finally {
         if (alive) setLoading(false)
       }
@@ -68,7 +69,7 @@ export default function OpsDashboard() {
               <div className="flex justify-between"><dt>Env OK</dt><dd className="font-mono">{String(ping?.env_ok)}</dd></div>
               <div className="flex justify-between"><dt>Alcance</dt><dd className="font-mono">{String(ping?.graph_reachable)}</dd></div>
               {'graph_head_status' in (ping || {}) && (
-                <div className="flex justify-between"><dt>Status</dt><dd className="font-mono">{ping?.graph_head_status}</dd></div>
+                <div className="flex justify-between"><dt>Status</dt><dd className="font-mono">{String((ping as Record<string, unknown> | null)?.graph_head_status ?? '')}</dd></div>
               )}
             </dl>
           </div>

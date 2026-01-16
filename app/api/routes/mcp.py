@@ -235,6 +235,10 @@ async def execute_mcp(
 
     raw_state = state_service.get_state(body.sender_id, tenant_id=resolved_tenant_id) or {}
 
+    import structlog
+    log = structlog.get_logger()
+    log.info("mcp_state_loaded_from_redis", raw_state=raw_state)
+
     state = normalize_state(state=raw_state, sender_id=body.sender_id, tenant_id=resolved_tenant_id, default_stage="start")
     
     # DEBUG: Log do estado atual
@@ -290,7 +294,7 @@ async def execute_mcp(
         # Tenta executar pelo flow publicado do tenant. Se não houver flow/nó válido, cai no roteamento hardcoded.
         msg = ""
         continue_loop = False
-        tenant_id = int(state.get("tenant_id") or 1)
+        tenant_id = resolved_tenant_id
         domain = resolve_chatbot_domain_for_tenant(db, tenant_id)
         try:
             flow_out = try_process_via_flow_engine(
@@ -304,6 +308,13 @@ async def execute_mcp(
                 initial_state=state,
                 persist_state=False,
             )
+            log.info("mcp_flow_engine_input", 
+                     sender_id=body.sender_id, 
+                     tenant_id=tenant_id, 
+                     domain=domain, 
+                     text_raw=text_raw, 
+                     text_normalized=text, 
+                     initial_state=state)
             if flow_out.handled:
                 msg = flow_out.message
                 state = flow_out.state
@@ -314,7 +325,15 @@ async def execute_mcp(
                     has_message=bool(msg),
                     continue_loop=bool(continue_loop),
                     new_stage=(state.get("stage") if state else None),
+                    state_keys_returned=list(state.keys()) if state else [],
                 )
+                log.info("mcp_flow_engine_output", 
+                         sender_id=body.sender_id, 
+                         tenant_id=tenant_id, 
+                         domain=domain, 
+                         message=msg, 
+                         state=state, 
+                         continue_loop=continue_loop)
             else:
                 log.info("mcp_flow_engine_result", handled=False)
         except Exception:

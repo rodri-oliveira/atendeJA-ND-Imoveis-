@@ -91,10 +91,10 @@ function Column({ title, leads, filters, getStatusBadge, formatPhone, formatDate
   });
 
   return (
-    <div className="w-80 bg-slate-100 rounded-lg p-2 flex-shrink-0">
+    <div className="w-[min(320px,85vw)] sm:w-[280px] md:w-[300px] lg:w-80 bg-slate-100 rounded-lg p-2 flex-shrink-0">
       <h3 className="font-semibold text-slate-700 px-2 py-1 mb-2">{title} <span className="text-sm text-slate-500 font-normal">({filteredLeads.length})</span></h3>
       <SortableContext items={filteredLeads.map(l => l.id)} strategy={verticalListSortingStrategy}>
-        <div className="space-y-2 h-[600px] overflow-y-auto">
+        <div className="space-y-2 h-[60vh] md:h-[600px] overflow-y-auto">
           {filteredLeads.map((lead: Lead) => (
             <LeadCard key={lead.id} lead={lead} getStatusBadge={getStatusBadge} formatPhone={formatPhone} formatDate={formatDate} onCardClick={onCardClick} />
           ))}

@@ -15,6 +15,9 @@ import AcceptInvite from './pages/AcceptInvite'
 import SuperTenants from './pages/SuperTenants'
 import ChatbotFlowsAdmin from './pages/ChatbotFlowsAdmin'
 import CatalogList from './pages/CatalogList'
+import CatalogVehicleDetails from './pages/CatalogVehicleDetails'
+import CatalogVehicleNew from './pages/CatalogVehicleNew'
+import CatalogVehicleEdit from './pages/CatalogVehicleEdit'
 import CatalogAdmin from './pages/CatalogAdmin'
 import RequireAuth from './components/RequireAuth'
 import RequireAdmin from './components/RequireAdmin'
@@ -42,6 +45,9 @@ export default function App() {
 
           {/* Catálogo Genérico */}
           <Route path="catalog/vehicles" element={<RequireAuth><CatalogList /></RequireAuth>} />
+          <Route path="catalog/vehicles/novo" element={<RequireAuth><CatalogVehicleNew /></RequireAuth>} />
+          <Route path="catalog/vehicles/:id" element={<RequireAuth><CatalogVehicleDetails /></RequireAuth>} />
+          <Route path="catalog/vehicles/:id/editar" element={<RequireAuth><CatalogVehicleEdit /></RequireAuth>} />
           <Route path="catalog/admin" element={<RequireAdmin><CatalogAdmin /></RequireAdmin>} />
           <Route path="users" element={<RequireAdmin><UsersAdmin /></RequireAdmin>} />
           <Route path="flows" element={<RequireAdmin><ChatbotFlowsAdmin /></RequireAdmin>} />

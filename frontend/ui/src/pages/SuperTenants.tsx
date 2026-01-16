@@ -38,7 +38,6 @@ type OnboardByUrlOut = {
   flow_id: number
   published: boolean
   published_version?: number | null
-  ingestion?: Record<string, unknown> | null
   whatsapp_account_id?: number | null
   invite_token?: string | null
   invite_email?: string | null
@@ -51,6 +50,19 @@ type ChatbotTemplate = {
 
 type ChatbotDomain = string
 
+type TenantDomainsOut = {
+  tenant_id: number
+  tenant_name?: string | null
+  active_domain: string
+  enabled_domains: string[]
+  by_domain: Array<{
+    domain: string
+    has_published_flow: boolean
+    has_lead_kanban: boolean
+    has_lead_summary: boolean
+  }>
+}
+
 type OnboardingRunOut = {
   id: number
   idempotency_key: string
@@ -61,39 +73,6 @@ type OnboardingRunOut = {
   error_code: string | null
   created_at: string
   updated_at: string
-}
-
-type VehicleIngestionEnqueueOut = {
-  run_id: number
-  status: string
-}
-
-type VehicleIngestionRunOut = {
-  run_id: number
-  tenant_id: number
-  status: string
-  discovered: number
-  processed: number
-  created: number
-  updated: number
-  errors: number
-  started_at: string
-  finished_at: string | null
-}
-
-type IngestionSummary = {
-  run_id: number
-  status?: string
-}
-
-function getIngestionSummary(v: unknown): IngestionSummary | null {
-  if (!v || typeof v !== 'object') return null
-  const r = v as Record<string, unknown>
-  if (typeof r.run_id !== 'number') return null
-  return {
-    run_id: r.run_id,
-    status: typeof r.status === 'string' ? r.status : undefined,
-  }
 }
 
 export default function SuperTenants() {
@@ -115,9 +94,56 @@ export default function SuperTenants() {
     [tenants, selectedTenantId]
   )
 
+  const [supportedDomains, setSupportedDomains] = useState<string[]>(['real_estate'])
   const [selectedTenantDomain, setSelectedTenantDomain] = useState<string>('real_estate')
+  const [selectedTenantEnabledDomains, setSelectedTenantEnabledDomains] = useState<string[]>(['real_estate'])
+  const [selectedTenantDomainStatus, setSelectedTenantDomainStatus] = useState<TenantDomainsOut['by_domain']>([])
   const [domainLoading, setDomainLoading] = useState(false)
   const [domainError, setDomainError] = useState<string | null>(null)
+
+  async function reloadSelectedTenantDomains(nextSelectedTenantId?: number | null) {
+    const tid = typeof nextSelectedTenantId === 'number' ? nextSelectedTenantId : selectedTenantId
+    if (!tid) return
+    setDomainLoading(true)
+    setDomainError(null)
+    try {
+      const res = await apiFetch('/api/ui/tenant/domains', {
+        headers: {
+          'X-Tenant-Id': String(tid),
+        },
+      })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const js = (await res.json()) as TenantDomainsOut
+      const active = (js?.active_domain || '').trim() || 'real_estate'
+      const enabled = Array.isArray(js?.enabled_domains) ? js.enabled_domains.map((d) => String(d || '').trim()).filter(Boolean) : []
+      const statusList = Array.isArray(js?.by_domain) ? js.by_domain : []
+
+      setSelectedTenantDomain(active)
+      setSelectedTenantEnabledDomains(enabled.length ? enabled : [active])
+      setSelectedTenantDomainStatus(statusList)
+    } catch (e) {
+      setDomainError((e as Error)?.message || 'falha ao carregar domínio')
+    } finally {
+      setDomainLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    let alive = true
+    async function loadSupportedDomains() {
+      try {
+        const res = await apiFetch('/api/ui/domains', { cache: 'no-store' })
+        if (!res.ok) throw new Error(`HTTP ${res.status}`)
+        const js = (await res.json()) as { domains?: string[] }
+        const list = Array.isArray(js?.domains) ? js.domains.map((d) => String(d || '').trim()).filter(Boolean) : []
+        if (alive) setSupportedDomains(list.length ? list : ['real_estate'])
+      } catch {
+        if (alive) setSupportedDomains(['real_estate'])
+      }
+    }
+    loadSupportedDomains()
+    return () => { alive = false }
+  }, [])
 
   useEffect(() => {
     let alive = true
@@ -126,15 +152,22 @@ export default function SuperTenants() {
       setDomainLoading(true)
       setDomainError(null)
       try {
-        const res = await apiFetch('/admin/chatbot-domain', {
+        const res = await apiFetch('/api/ui/tenant/domains', {
           headers: {
             'X-Tenant-Id': String(selectedTenantId),
           },
         })
         if (!res.ok) throw new Error(`HTTP ${res.status}`)
-        const js = (await res.json()) as { domain?: string }
-        const d = (js?.domain || '').trim() || 'real_estate'
-        if (alive) setSelectedTenantDomain(d)
+        const js = (await res.json()) as TenantDomainsOut
+        const active = (js?.active_domain || '').trim() || 'real_estate'
+        const enabled = Array.isArray(js?.enabled_domains) ? js.enabled_domains.map((d) => String(d || '').trim()).filter(Boolean) : []
+        const statusList = Array.isArray(js?.by_domain) ? js.by_domain : []
+
+        if (alive) {
+          setSelectedTenantDomain(active)
+          setSelectedTenantEnabledDomains(enabled.length ? enabled : [active])
+          setSelectedTenantDomainStatus(statusList)
+        }
       } catch (e) {
         if (alive) setDomainError((e as Error)?.message || 'falha ao carregar domínio')
       } finally {
@@ -147,28 +180,95 @@ export default function SuperTenants() {
     }
   }, [selectedTenantId])
 
-  async function saveSelectedTenantDomain() {
+  async function applyDefaultTemplateForDomain(domain: string) {
     if (!selectedTenantId) return
+    const d = String(domain || '').trim()
+    if (!d) return
     setDomainLoading(true)
     setDomainError(null)
     try {
-      const res = await apiFetch('/admin/chatbot-domain', {
-        method: 'PUT',
+      const res = await apiFetch(`/super/onboarding/steps/tenants/${selectedTenantId}/apply-flow-template`, {
+        method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-Tenant-Id': String(selectedTenantId),
         },
-        body: JSON.stringify({ domain: selectedTenantDomain }),
+        body: JSON.stringify({
+          chatbot_domain: d,
+          template: 'default',
+          flow_name: 'default',
+          overwrite_flow: true,
+          publish_flow: true,
+        }),
       })
       if (!res.ok) {
         const msg = await res.text().catch(() => '')
         throw new Error(msg || `HTTP ${res.status}`)
       }
-      const js = (await res.json()) as { domain?: string }
-      const d = (js?.domain || '').trim() || selectedTenantDomain
-      setSelectedTenantDomain(d)
+      await reloadSelectedTenantDomains(selectedTenantId)
+    } catch (e) {
+      setDomainError((e as Error)?.message || 'falha ao aplicar template')
+    } finally {
+      setDomainLoading(false)
+    }
+  }
+
+  async function saveSelectedTenantDomain() {
+    if (!selectedTenantId) return
+    setDomainLoading(true)
+    setDomainError(null)
+    try {
+      const res = await apiFetch('/api/ui/tenant/active-domain', {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Tenant-Id': String(selectedTenantId),
+        },
+        body: JSON.stringify({ active_domain: selectedTenantDomain }),
+      })
+      if (!res.ok) {
+        const msg = await res.text().catch(() => '')
+        throw new Error(msg || `HTTP ${res.status}`)
+      }
+      const js = (await res.json()) as TenantDomainsOut
+      const active = (js?.active_domain || '').trim() || selectedTenantDomain
+      const enabled = Array.isArray(js?.enabled_domains) ? js.enabled_domains.map((d) => String(d || '').trim()).filter(Boolean) : []
+      const statusList = Array.isArray(js?.by_domain) ? js.by_domain : []
+      setSelectedTenantDomain(active)
+      setSelectedTenantEnabledDomains(enabled.length ? enabled : [active])
+      setSelectedTenantDomainStatus(statusList)
     } catch (e) {
       setDomainError((e as Error)?.message || 'falha ao salvar domínio')
+    } finally {
+      setDomainLoading(false)
+    }
+  }
+
+  async function saveSelectedTenantEnabledDomains() {
+    if (!selectedTenantId) return
+    setDomainLoading(true)
+    setDomainError(null)
+    try {
+      const res = await apiFetch('/api/ui/tenant/enabled-domains', {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Tenant-Id': String(selectedTenantId),
+        },
+        body: JSON.stringify({ enabled_domains: selectedTenantEnabledDomains }),
+      })
+      if (!res.ok) {
+        const msg = await res.text().catch(() => '')
+        throw new Error(msg || `HTTP ${res.status}`)
+      }
+      const js = (await res.json()) as TenantDomainsOut
+      const active = (js?.active_domain || '').trim() || selectedTenantDomain
+      const enabled = Array.isArray(js?.enabled_domains) ? js.enabled_domains.map((d) => String(d || '').trim()).filter(Boolean) : []
+      const statusList = Array.isArray(js?.by_domain) ? js.by_domain : []
+      setSelectedTenantDomain(active)
+      setSelectedTenantEnabledDomains(enabled.length ? enabled : [active])
+      setSelectedTenantDomainStatus(statusList)
+    } catch (e) {
+      setDomainError((e as Error)?.message || 'falha ao salvar domínios habilitados')
     } finally {
       setDomainLoading(false)
     }
@@ -178,8 +278,6 @@ export default function SuperTenants() {
   const [wizardWhatsAppAccountId, setWizardWhatsAppAccountId] = useState<number | null>(null)
   const [wizardInviteEmail, setWizardInviteEmail] = useState<string | null>(null)
   const [wizardInviteToken, setWizardInviteToken] = useState<string | null>(null)
-  const [wizardIngestionRunId, setWizardIngestionRunId] = useState<number | null>(null)
-  const [wizardIngestionStatus, setWizardIngestionStatus] = useState<string | null>(null)
 
   function onOpenFlows() {
     if (!selectedTenant) return
@@ -261,54 +359,6 @@ export default function SuperTenants() {
     }
   }
 
-  async function onWizardEnqueueIngestion(e: React.FormEvent) {
-    e.preventDefault()
-    if (!wizardTenantId) return
-    setError(null)
-    try {
-      const res = await apiFetch(`/super/tenants/${wizardTenantId}/ingestion/vehicles/enqueue`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          base_url: onboardBaseUrl,
-          max_listings: 30,
-          timeout_seconds: 10,
-          max_listing_pages: 4,
-        }),
-      })
-      if (!res.ok) {
-        let msg = `HTTP ${res.status}`
-        try {
-          const js = await res.json()
-          msg = js?.detail || js?.error?.code || js?.message || msg
-        } catch {
-          // ignore
-        }
-        throw new Error(msg)
-      }
-      const js = (await res.json()) as VehicleIngestionEnqueueOut
-      setWizardIngestionRunId(js.run_id)
-      setWizardIngestionStatus(js.status)
-    } catch (e) {
-      const err = e as Error
-      setError(err?.message || 'falha ao enfileirar ingestão (wizard)')
-    }
-  }
-
-  async function onWizardCheckIngestionStatus() {
-    if (!wizardTenantId || !wizardIngestionRunId) return
-    setError(null)
-    try {
-      const res = await apiFetch(`/super/tenants/${wizardTenantId}/ingestion/runs/${wizardIngestionRunId}`)
-      if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      const js = (await res.json()) as VehicleIngestionRunOut
-      setWizardIngestionStatus(js.status)
-      window.alert(`IngestionRun #${js.run_id}\nstatus=${js.status}\nprocessed=${js.processed}\ncreated=${js.created}\nupdated=${js.updated}\nerrors=${js.errors}`)
-    } catch (e) {
-      const err = e as Error
-      setError(err?.message || 'falha ao consultar ingestão')
-    }
-  }
 
   async function setTenantActive(tid: number, next: boolean) {
     setError(null)
@@ -392,7 +442,7 @@ export default function SuperTenants() {
           flow_name: onboardFlowName,
           overwrite_flow: true,
           publish_flow: true,
-          // passos opcionais (WA / invite / ingestão) são feitos separadamente no checklist
+          // passos opcionais (WA / invite) são feitos separadamente no checklist
         }),
       })
 
@@ -418,7 +468,6 @@ export default function SuperTenants() {
         // ignore
       }
       setOnboardName('')
-      setOnboardBaseUrl('')
       setOnboardAllowExisting(false)
       setOnboardIdempotencyKey('')
       setOnboardPhoneNumberId('')
@@ -468,7 +517,6 @@ export default function SuperTenants() {
   const [onboardDomain, setOnboardDomain] = useState<ChatbotDomain>('real_estate')
   const [onboardTemplate, setOnboardTemplate] = useState('default')
   const [onboardFlowName, setOnboardFlowName] = useState('default')
-  const [onboardBaseUrl, setOnboardBaseUrl] = useState('')
   const [onboardAllowExisting, setOnboardAllowExisting] = useState(false)
   const [onboardIdempotencyKey, setOnboardIdempotencyKey] = useState('')
   const [onboardPhoneNumberId, setOnboardPhoneNumberId] = useState('')
@@ -488,14 +536,7 @@ export default function SuperTenants() {
     setWizardInviteEmail(lastOnboard.invite_email || null)
     setWizardInviteToken(lastOnboard.invite_token || null)
 
-    const ing = getIngestionSummary(lastOnboard.ingestion)
-    if (ing) {
-      setWizardIngestionRunId(ing.run_id)
-      setWizardIngestionStatus(ing.status || null)
-    } else {
-      setWizardIngestionRunId(null)
-      setWizardIngestionStatus(null)
-    }
+    // Ingestão removida da UI
   }, [lastOnboard])
 
   const [assignEmail, setAssignEmail] = useState('')
@@ -737,10 +778,6 @@ export default function SuperTenants() {
                 <input className="input" value={onboardFlowName} onChange={e => setOnboardFlowName(e.target.value)} disabled={onboarding} />
               </div>
             </div>
-            <div>
-              <label className="block text-sm font-medium text-slate-700 mb-1">Base URL (para ingestão opcional)</label>
-              <input className="input" value={onboardBaseUrl} onChange={e => setOnboardBaseUrl(e.target.value)} placeholder="https://exemplo.com.br/" disabled={onboarding} />
-            </div>
 
             <div>
               <label className="block text-sm font-medium text-slate-700 mb-1">Idempotency key (opcional)</label>
@@ -784,10 +821,6 @@ export default function SuperTenants() {
                   <div className="flex items-center justify-between">
                     <div>3) Invite admin</div>
                     <div className="text-xs">{wizardInviteToken ? 'OK' : 'Pendente'}</div>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <div>4) Ingestão</div>
-                    <div className="text-xs">{wizardIngestionRunId ? `${wizardIngestionStatus || ''} (#${wizardIngestionRunId})` : 'Pendente'}</div>
                   </div>
                 </div>
 
@@ -880,22 +913,6 @@ export default function SuperTenants() {
                     )}
                   </div>
 
-                  <div className="rounded-lg border border-slate-200 bg-white p-3 space-y-2">
-                    <div className="text-xs font-semibold text-slate-600">4) Enfileirar ingestão</div>
-                    <form className="space-y-2" onSubmit={onWizardEnqueueIngestion}>
-                      <div>
-                        <label className="block text-sm font-medium text-slate-700 mb-1">Base URL</label>
-                        <input className="input" value={onboardBaseUrl} onChange={e => setOnboardBaseUrl(e.target.value)} placeholder="https://exemplo.com.br/" required />
-                      </div>
-                      <button className="btn btn-ghost" type="submit" disabled={!wizardTenantId}>Enfileirar ingestão</button>
-                    </form>
-                    {wizardIngestionRunId && (
-                      <div className="flex items-center gap-2">
-                        <div className="text-xs text-slate-600">Run #{wizardIngestionRunId} • {wizardIngestionStatus}</div>
-                        <button type="button" className="btn btn-ghost" onClick={onWizardCheckIngestionStatus}>Atualizar status</button>
-                      </div>
-                    )}
-                  </div>
                 </div>
               </div>
               {lastOnboardKey && (
@@ -1056,8 +1073,9 @@ export default function SuperTenants() {
                   onChange={(e) => setSelectedTenantDomain(e.target.value)}
                   disabled={domainLoading}
                 >
-                  <option value="real_estate">Imobiliário (real_estate)</option>
-                  <option value="car_dealer">Automotivo (car_dealer)</option>
+                  {(supportedDomains.length ? supportedDomains : ['real_estate']).map((d) => (
+                    <option key={d} value={d}>{d}</option>
+                  ))}
                 </select>
                 <button
                   className="btn btn-ghost"
@@ -1068,6 +1086,80 @@ export default function SuperTenants() {
                   {domainLoading ? 'Salvando...' : 'Salvar domínio'}
                 </button>
               </div>
+
+              <div className="border-t border-slate-200 pt-3" />
+
+              <div className="text-xs font-semibold text-slate-600">Domínios habilitados</div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                {(supportedDomains.length ? supportedDomains : ['real_estate']).map((d) => {
+                  const checked = selectedTenantEnabledDomains.includes(d)
+                  const disabled = d === selectedTenantDomain
+                  return (
+                    <label key={d} className="flex items-center gap-2 text-sm text-slate-700">
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        disabled={disabled || domainLoading}
+                        onChange={(e) => {
+                          const next = e.target.checked
+                            ? Array.from(new Set([...selectedTenantEnabledDomains, d]))
+                            : selectedTenantEnabledDomains.filter((x) => x !== d)
+                          setSelectedTenantEnabledDomains(next)
+                        }}
+                      />
+                      <span>{d}{disabled ? ' (ativo)' : ''}</span>
+                    </label>
+                  )
+                })}
+              </div>
+
+              <div className="flex items-center gap-2">
+                <button
+                  className="btn btn-ghost"
+                  type="button"
+                  disabled={domainLoading || !selectedTenantId}
+                  onClick={saveSelectedTenantEnabledDomains}
+                >
+                  {domainLoading ? 'Salvando...' : 'Salvar domínios habilitados'}
+                </button>
+              </div>
+
+              {selectedTenantDomainStatus.length > 0 && (
+                <div className="border-t border-slate-200 pt-3 space-y-2">
+                  <div className="text-xs font-semibold text-slate-600">Status por domínio</div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                    {selectedTenantDomainStatus.map((s) => (
+                      <div key={s.domain} className="rounded-lg border border-slate-200 bg-slate-50 p-2 text-sm">
+                        <div className="font-medium text-slate-800">{s.domain}</div>
+                        <div className="text-xs text-slate-600">
+                          Published: <strong>{String(s.has_published_flow)}</strong>
+                          {' • '}Kanban: <strong>{String(s.has_lead_kanban)}</strong>
+                          {' • '}Resumo: <strong>{String(s.has_lead_summary)}</strong>
+                        </div>
+                        <div className="mt-2 flex items-center gap-2">
+                          <button
+                            type="button"
+                            className="btn btn-ghost btn-sm"
+                            disabled={domainLoading || !selectedTenantId}
+                            onClick={() => applyDefaultTemplateForDomain(s.domain)}
+                          >
+                            Aplicar template default
+                          </button>
+                          <button
+                            type="button"
+                            className="btn btn-ghost btn-sm"
+                            disabled={domainLoading || !selectedTenantId}
+                            onClick={() => reloadSelectedTenantDomains(selectedTenantId)}
+                          >
+                            Recarregar
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {domainError && <div className="text-xs text-red-700">{domainError}</div>}
             </div>
           )}

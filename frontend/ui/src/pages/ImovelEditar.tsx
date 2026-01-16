@@ -31,7 +31,7 @@ interface ImovelAtualizarDTO {
   cidade?: string
   estado?: string
   bairro?: string | null
-  endereco_json?: Record<string, any> | null
+  endereco_json?: Record<string, unknown> | null
   dormitorios?: number | null
   banheiros?: number | null
   suites?: number | null
@@ -56,7 +56,7 @@ export default function ImovelEditar() {
   const [form, setForm] = useState<ImovelAtualizarDTO>({})
   const [showAdvanced, setShowAdvanced] = useState(false)
 
-  function numOrNull(v: any): number | null {
+  function numOrNull(v: unknown): number | null {
     if (v === '' || v === undefined || v === null) return null
     const n = Number(v)
     return Number.isFinite(n) ? n : null
@@ -89,8 +89,9 @@ export default function ImovelEditar() {
           area_total: js.area_total ?? null,
           area_util: js.area_util ?? null,
         })
-      } catch (e: any) {
-        if (alive) setError(e?.message || 'erro')
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : 'erro'
+        if (alive) setError(msg)
       } finally {
         if (alive) setLoading(false)
       }
@@ -113,7 +114,7 @@ export default function ImovelEditar() {
         if (!res.ok) return
         const base = await res.json()
         setForm(prev => ({ ...prev, ativo: Boolean(base?.ativo) }))
-      } catch {}
+      } catch { void 0 }
     }
     load()
     loadRole()
@@ -138,7 +139,7 @@ export default function ImovelEditar() {
     setError(null)
     try {
       // Remove campos indefinidos para PATCH parcial
-      const payload: Record<string, any> = {}
+      const payload: Record<string, unknown> = {}
       Object.entries(form).forEach(([k, v]) => {
         if (v !== undefined) payload[k] = v
       })
@@ -149,8 +150,9 @@ export default function ImovelEditar() {
       })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       navigate(`/imoveis/${encodeURIComponent(id)}`)
-    } catch (e: any) {
-      setError(e?.message || 'erro ao salvar')
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : 'erro ao salvar'
+      setError(msg)
     } finally {
       setSaving(false)
     }
@@ -232,7 +234,7 @@ export default function ImovelEditar() {
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                 <div>
                   <label className="block text-xs text-slate-600 mb-1">Bairro</label>
-                  <input className="w-full border rounded px-3 py-2 text-sm" value={(form.bairro as any) || ''} onChange={(e) => onChange('bairro', e.target.value)} />
+                  <input className="w-full border rounded px-3 py-2 text-sm" value={form.bairro || ''} onChange={(e) => onChange('bairro', e.target.value)} />
                 </div>
                 <div>
                   <label className="block text-xs text-slate-600 mb-1">Dormitórios</label>

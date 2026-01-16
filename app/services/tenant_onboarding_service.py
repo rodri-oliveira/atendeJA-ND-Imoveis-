@@ -53,8 +53,26 @@ class TenantOnboardingService:
         if exists:
             t = exists
             settings_json = dict(getattr(t, "settings_json", {}) or {})
-            if settings_json.get("chatbot_domain") != domain:
+            changed = False
+
+            if (settings_json.get("chatbot_domain") or "").strip() != domain:
                 settings_json["chatbot_domain"] = domain
+                changed = True
+
+            raw_enabled = settings_json.get("enabled_domains")
+            if isinstance(raw_enabled, list):
+                enabled_domains = [str(x).strip() for x in raw_enabled if str(x).strip()]
+            else:
+                enabled_domains = []
+            if not enabled_domains:
+                enabled_domains = [domain]
+                changed = True
+            if domain not in enabled_domains:
+                enabled_domains = [domain, *[d for d in enabled_domains if d != domain]]
+                changed = True
+            settings_json["enabled_domains"] = enabled_domains
+
+            if changed:
                 t.settings_json = settings_json
                 self.db.add(t)
                 self.db.flush()
@@ -63,6 +81,7 @@ class TenantOnboardingService:
         t = Tenant(name=tenant_name, timezone=(timezone or "America/Sao_Paulo"))
         settings_json = dict(getattr(t, "settings_json", {}) or {})
         settings_json["chatbot_domain"] = domain
+        settings_json["enabled_domains"] = [domain]
         t.settings_json = settings_json
 
         self.db.add(t)
